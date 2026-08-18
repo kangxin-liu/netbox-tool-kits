@@ -188,18 +188,51 @@ intervene, and each has a specific mitigation:
 | Someone else changes NetBox after validation | Re-run S4 immediately before the first write; abort with nothing written if anything moved | 10.14 |
 | The operator edits and re-uploads the file | Plan bound to a sha256 fingerprint; a different file discards the verdict | 10.13 |
 | A verdict sits in a stale browser tab for hours | Verdicts expire after 30 minutes | 10.15 |
-| NetBox rejects a row mid-apply anyway | Bulk POST per endpoint to shrink the window, plus ordered audit records for unwind | 12.4, D7 |
+| NetBox rejects a row mid-apply anyway | One bulk POST per endpoint: the whole list rolls back, so no rows from that endpoint are written | 12.4, D7 |
 
-**Residual risk, stated plainly.** This gate makes a half-complete import unlikely, not impossible.
-NetBox's REST API offers no dry-run and no cross-request transaction, so a server-side validator, a
-custom validation plugin, or a concurrent change can still reject a write that passed our checks. The
-honest guarantee is: *we will not start writing a file we know to be broken, and we will stop at the
-first sign the world moved* — not *writes cannot fail midway*. The audit log exists for that
-remainder.
+### Measured: bulk create is atomic (D7)
 
-Note also that TurboBulk, a NetBox Labs plugin, does offer true dry-run validation with rollback.
-If it is ever available on the target instance it would strengthen this design considerably; it is
-not assumed here.
+Run against NetBox 4.6.8 on 2026-08-18. Three failure classes were tested because they fail at
+different points in the request and could plausibly behave differently. All three rolled back
+completely:
+
+| Test | Failure class | Response | Survivors |
+| --- | --- | --- | --- |
+| A | Field-level: item 2 of 3 missing a required `name` | `400` with a per-item array `[{}, {"name": [...]}, {}]` | none |
+| B | Deferred DB constraint: two items in one list sharing a slug | `500` `duplicate key value violates unique constraint` | none |
+| C | NetBox model `clean()`: two devices claiming the same rack unit | `400 {"position": ["U10.0 is already occupied ..."]}` | none |
+| Control | All-valid list of two devices | `201` | both created |
+
+Test B is the one that settles it. A field-level error proves only that DRF validates the whole list
+before writing anything; it says nothing about transactions. B failed *during* the write — the first
+insert succeeded and the second violated a database constraint — and the first was still rolled back.
+NetBox wraps the request in a transaction.
+
+**Consequence for apply:** creates are grouped by endpoint and issued as one bulk POST each. The
+half-complete window is no longer "between any two rows" but "between two endpoints" — for the
+hierarchy importer that is three boundaries (regions → sites → locations → racks) regardless of
+whether the sheet has 4 rows or 4,000. Devices and cabling are single-endpoint, so each of those
+sheets applies as one all-or-nothing operation.
+
+**The catch — error attribution.** The three tests returned errors in two different shapes. Test A
+came back as an array positionally aligned to the submitted items, so an error maps cleanly to a
+spreadsheet line. Test C came back as a single un-indexed object: NetBox reported *that* a position
+was occupied, not *which* item caused it. Requirements 12.2 and 16.1 demand line-level attribution,
+so `apply` needs a fallback: when a bulk POST fails with an un-indexed error, replay the same list
+row by row to identify the offender. That replay is safe precisely because the bulk attempt wrote
+nothing. It is also rare by construction — a mid-apply failure means stage S4 missed something, which
+is a validator bug worth surfacing.
+
+**Residual risk, restated.** The remaining exposure is narrow but real: a multi-endpoint importer can
+still fail on its second or third endpoint after the first succeeded, leaving, say, sites created
+without their racks. That is recoverable and non-destructive — re-running the sheet skips what
+exists and creates the remainder — but it is not nothing. NetBox offers no cross-request transaction,
+so this cannot be closed without branching (see below).
+
+Note also that TurboBulk, a NetBox Labs plugin, offers true dry-run validation with rollback, and
+netbox-branching would allow the entire import to be staged in a branch and merged atomically across
+endpoints, closing the residual window above. Neither is assumed here; netbox-branching would need a
+licence review first.
 
 ## Data classification and flow
 
@@ -257,17 +290,26 @@ on disk — it should be rotated if it has ever been shared, and `.gitignore` no
 | D3 | Transceiver recording deferred to iteration 2; no such column exists | Setting `interface.type` cannot record anything once device types define interface types, and every other mechanism is a bigger change than iteration 1 warrants | nothing — the feature is absent |
 | D4 | Device-type autocreate off by default, opt-in via env | Accidentally creating device types from typos pollutes a shared NetBox | `importers/devices.py` |
 | D5 | Apply runs inline in the request, bounded by a max row count | No worker infrastructure for iteration 1 | `views.py` |
+| D7 | Apply issues one bulk POST per endpoint, not one per row | Measured: NetBox wraps a list POST in a transaction, so a failure anywhere rolls the whole list back | `importers/base.py` |
+| D8 | An "exists but differs" conflict blocks on consequential fields and warns on descriptive ones | A wrong region or rack height invalidates every row built on it; a wrong description invalidates nothing, and blocking on it would teach operators to distrust the gate | `columns.py` (`Conflict`) + S4 |
 
 ## Component design
 
 ### `columns.py` — the sheet contract
 
 ```python
+class Conflict(Enum):
+    """What it means when this column disagrees with an object that already exists (D8)."""
+    CONSEQUENTIAL = "error"    # later rows are built on this; a mismatch blocks the file
+    DESCRIPTIVE = "warning"    # nothing downstream reads it; acknowledge and carry on
+    IDENTITY = "none"          # part of the natural key, so it cannot differ by definition
+
 @dataclass(frozen=True)
 class ColumnSpec:
     key: str                      # snake_case; also the exact header text
     label: str                    # human header shown in templates
     required: bool
+    conflict: Conflict            # no default: adding a column forces the D8 decision (Req 11.5c)
     help_text: str                # rendered into the template guidance row
     choices: tuple[str, ...] = () # drives xlsx picklists and validation
     example: str = ""             # synthetic sample value
@@ -276,6 +318,21 @@ HIERARCHY_COLUMNS: tuple[ColumnSpec, ...]
 DEVICE_COLUMNS: tuple[ColumnSpec, ...]
 CABLING_COLUMNS: tuple[ColumnSpec, ...]
 ```
+
+`IDENTITY` covers the columns used to *find* the existing object — a rack's name, a site's name.
+They cannot conflict, because a different value means a different object, which is a create rather
+than a match. Everything else is a judgement call the author of the column has to make:
+
+| `CONSEQUENTIAL` — blocks | `DESCRIPTIVE` — warns |
+| --- | --- |
+| a site's region, a location's site and parent, a region's parent | `description` |
+| `rack_u_height`, `rack_width` | `rack_status`, `rack_type`, `status` |
+| a device's `rack`, `bottom_ru`, `rack_face`, `model` | `tenant`, `serial`, `asset_tag` |
+| a cable's `cable_type` | a cable's `label`, `color`, `length`, `length_unit` |
+
+Comparison is asymmetric by type: identifiers, slugs, integers, and choice values must match
+exactly, while free text is trimmed, whitespace-collapsed, and case-folded first, so `spine row A`
+and `Spine Row A` are the same description and not a conflict (Req 11.5b).
 
 ### `naming.py` — rack name convention
 
@@ -542,12 +599,13 @@ merely greyed out.
 | In-file duplicate, RU overlap, reused termination | S3 | ERROR; file blocked | Both line numbers involved |
 | Reference not found | S4 | ERROR; file blocked | Which lookup failed and the value tried |
 | Already exists, all values match | S4 | INFO; does not block | Which object matched, with a NetBox link |
-| Already exists, values differ | S4 | ERROR by default (decision D8) | Field, sheet value, NetBox value |
+| Already exists, a consequential value differs | S4 | ERROR; file blocked (D8) | Field, sheet value, NetBox value |
+| Already exists, a descriptive value differs | S4 | WARNING; must be acknowledged (D8) | Field, sheet value, NetBox value, and that NetBox's value stands |
 | Unrecognised column, e.g. a leftover `transceiver` | S1 | INFO; does not block | The column name, and that it was ignored |
 | Row count over the bound | S5 | ERROR; file blocked | The limit and the advice to split the file |
 | NetBox moved since validation | pre-apply | Abort before the first write | What changed; re-validate required |
 | Verdict expired or fingerprint changed | pre-apply | Refuse; re-validate | Why the verdict is stale |
-| NetBox 400 despite validation | apply | Row `BLOCKED`; run continues per D7 strategy | NetBox's field errors mapped to line and column |
+| NetBox 400/500 despite validation | apply | The batch rolled back (D7): mark its rows `BLOCKED`, halt before the next endpoint | NetBox's error mapped to line and column, replaying row by row if it came back un-indexed |
 | NetBox 401/403 | apply | Abort run | Auth failure with host, never the token |
 | Connection loss / timeout | apply | Abort run | Rows applied before the abort, in order |
 | Unexpected exception | any | Abort, log traceback server-side | Generic message + run id; no traceback, no headers |

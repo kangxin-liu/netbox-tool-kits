@@ -49,9 +49,11 @@ before implementation starts:
 ```
 
 Read `requirements.md` first — Requirement 10 (the validation gate) and Requirement 16 (issue
-localisation) are the heart of it. Its **Still needs input** section lists what remains open: whether
-NetBox bulk creates are atomic (D7, needs a lab experiment) and how strict an "exists but differs"
-conflict should be (D8). Transceiver recording (D3, D6) is deferred to iteration 2.
+localisation) are the heart of it. Every design decision is now settled. D7 was measured rather than
+assumed: bulk creates are atomic on NetBox 4.6.8, so apply issues one bulk POST per endpoint. Re-run
+`scripts/verify_bulk_atomicity.py` after a NetBox upgrade to confirm that still holds. D8 splits an
+"exists but differs" conflict by field — blocking when the difference invalidates later rows,
+warning when it cannot. Transceiver recording (D3, D6) is deferred to iteration 2.
 
 Every write in iteration 1 is the creation of a new object. There is no code path that updates or
 deletes anything, and the test suite asserts no `PATCH`, `PUT`, or `DELETE` is ever issued.

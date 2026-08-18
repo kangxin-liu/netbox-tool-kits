@@ -41,6 +41,10 @@ a write to NetBox.
 - **Validation is a hard gate, not advice.** A file is validated in full before anything is written,
  and a single blocking error makes the whole file unappliable — there is no partial-apply path, even
  on request. A half-populated NetBox is the failure this tool exists to prevent.
+- **Block on what changes the outcome; warn on the rest.** A problem blocks when proceeding could
+ produce wrong data, and warns when it cannot. Warning on something that matters is how imports go
+ wrong; blocking on something that does not is how a gate loses the operator's trust and gets
+ worked around. Both failures are real, so each new check has to argue for its severity.
 - **Fail loudly, and say exactly where.** Every issue names the file, worksheet, spreadsheet line,
  column, what was received, and what was expected. The engineer should never have to read a stack
  trace, or guess which row the tool meant, to fix a spreadsheet.

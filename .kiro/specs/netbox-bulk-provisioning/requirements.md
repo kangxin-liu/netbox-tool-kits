@@ -334,11 +334,26 @@ can finish a partial import without creating duplicates.
  this iteration performs is the creation of a new object.
 4. WHEN an object already exists in NetBox and every value the sheet supplies for it matches, THEN
  the system SHALL classify the row as INFO / skip-already-exists, which does not block apply.
-5. IF an object already exists but a value the sheet supplies differs from what NetBox holds, THEN
- the system SHALL raise a blocking ERROR naming the field, the sheet value, and the NetBox value,
- because iteration 1 cannot reconcile the difference by updating (see decision D8).
+5. IF an object already exists but a **consequential** value the sheet supplies differs from what
+ NetBox holds, THEN the system SHALL raise a blocking ERROR naming the field, the sheet value, and
+ the NetBox value, because iteration 1 cannot reconcile the difference by updating, and because a
+ difference in these fields means later rows are built on a false premise (decision D8).
+ Consequential fields are: a region's parent; a site's region; a location's site and parent; a
+ rack's `u_height` and `width`; and a device's rack, position, face, and device type.
+5a. IF the differing value is **descriptive** — one that nothing else in the import depends on —
+ THEN the system SHALL raise a WARNING that the operator must acknowledge before applying, rather
+ than blocking. Descriptive fields are: `description`, `status`, `tenant`, `serial`, `asset_tag`,
+ `rack_type`, and a cable's `label`, `color`, `length`, and `length_unit`.
+5b. WHEN comparing a sheet value against NetBox, the system SHALL compare structured values —
+ identifiers, slugs, integers, and choice values — exactly, and SHALL compare free text after
+ trimming and collapsing whitespace and folding case, so that a difference of presentation alone is
+ not reported as a conflict.
+5c. The classification in 11.5 and 11.5a SHALL live in one table in code, so that adding a sheet
+ column forces an explicit decision about which side it falls on.
 6. IF a globally unique field — a device name in scope, or an asset tag — is already held by a
- *different* object, THEN the system SHALL raise a blocking ERROR identifying the holder.
+ *different* object, THEN the system SHALL raise a blocking ERROR identifying the holder. This
+ outranks 11.5a: an asset tag recorded differently *on the matched object* is a descriptive warning,
+ but the same tag held by *another* object is a collision and blocks, because the create would fail.
 7. WHEN the same sheet is uploaded twice with no NetBox changes in between, THEN the second
  validation SHALL find zero ERROR issues, report every row as already present, and applying it
  SHALL create nothing.
@@ -353,13 +368,17 @@ sheet or unwind a partial import without guessing.
 1. WHEN an apply finishes, THEN the system SHALL show per-row outcomes with row numbers matching
  the uploaded file, including the created object's name and a link to it in NetBox.
 2. WHEN NetBox rejects a create, THEN the system SHALL surface NetBox's own field-level error
- text against the offending row and column.
-3. The system SHALL continue processing subsequent rows after a row-level failure, and SHALL abort
- the run only on connection loss or authentication failure.
-4. IF a run aborts partway, THEN the system SHALL report which rows were applied before the abort,
- in order, so the operator can unwind manually.
-5. The system SHALL state plainly that it cannot roll back applied creates, rather than implying
- the batch was atomic.
+ text against the offending row and column. IF NetBox returns a single error that is not aligned to
+ a specific item in the submitted batch, THEN the system SHALL replay the batch one row at a time to
+ identify the offending row before reporting.
+3. WHEN NetBox rejects a batch, THEN the system SHALL treat every row in that batch as not applied
+ (per D7 the batch rolled back), SHALL NOT proceed to the next endpoint, and SHALL abort the run on
+ connection loss or authentication failure.
+4. IF a run aborts partway, THEN the system SHALL report which endpoints completed before the abort,
+ and the rows they created, so the operator can unwind manually.
+5. The system SHALL state plainly what its guarantee is and is not: each endpoint's creates are
+ applied all-or-nothing, the sequence across endpoints is not, and no applied create can be rolled
+ back by this tool.
 6. The system SHALL offer the result report as a CSV download.
 7. Error messages SHALL never include the API token, request headers, or a stack trace.
 
@@ -505,25 +524,25 @@ rather than to appear broken.
 - **D4 — Autocreate device types. DECIDED:** off by default, opt-in by environment variable, since
  typos would otherwise pollute a shared NetBox with junk device types.
 - **D5 — Apply concurrency. DECIDED:** apply runs inline in the request with a bounded maximum row
- count. A background worker is deferred to iteration 2.
-
-- **D5 (revised) — Apply concurrency. DECIDED:** apply still runs inline, but the validation gate of
- Requirement 10 means a run only starts once the file is known clean, so the bounded row count is
- about request duration rather than correctness.
-
-### Still needs input
-
+ count; a background worker is deferred to iteration 2. Revised once the validation gate of
+ Requirement 10 landed: a run only starts on a file already known to be clean, so the bounded row
+ count is now about request duration rather than correctness.
 - **D6 — Transceiver map. CLOSED, moved to iteration 2** along with D3. No part-number map is needed
  while the column does not exist. When iteration 2 revisits this, the map should be built from the
  transceiver models actually in use rather than invented.
-- **D7 — Bulk-create atomicity.** NetBox documents bulk *update* and bulk *delete* as all-or-none,
- but makes no such statement about bulk *create*. If a single POST of a list of objects to one
- endpoint is atomic, the half-complete window shrinks to the boundaries between endpoints, which is
- a materially stronger guarantee than row-by-row creates. This must be **verified empirically
- against a lab instance** — POST a list where one entry is invalid, then check whether the valid
- entries were created — before the apply strategy is fixed. Task 11a covers the experiment.
-- **D8 — Severity of an "exists but differs" conflict.** Requirement 11.5 currently treats it as a
- blocking ERROR, on the reading that "no conflicts" means exactly that. The looser alternative is a
- WARNING the operator acknowledges, on the grounds that nothing would be written for that object
- anyway so it cannot cause a half-complete state. Blocking is stricter and noisier; confirm which
- you want.
+- **D7 — Bulk-create atomicity. DECIDED: bulk create IS atomic** (verified against NetBox 4.6.8 on
+ 2026-08-18; see `design.md` for the experiment and its output). All three failure classes rolled
+ back completely: a field-level validation error, a deferred database uniqueness violation that
+ surfaced as an HTTP 500 mid-write, and a NetBox model `clean()` error. In every case nothing
+ survived. Apply therefore issues **one bulk POST per endpoint**, which shrinks the half-complete
+ window from "between any two rows" to "between two endpoints".
+- **D8 — Severity of an "exists but differs" conflict. DECIDED: split by field.** Neither uniform
+ answer was right. A difference in a *consequential* field — an existing site in a region the sheet
+ disagrees with, a rack whose real `u_height` is not what the sheet assumes, a device found in a
+ different rack — means the operator's picture of NetBox is wrong, and every row built on top of
+ that object is suspect, so it blocks. A difference in a *descriptive* field that nothing else
+ reads cannot produce a wrong result, so it warns and the operator acknowledges it. Blocking on
+ everything would have made a one-word description mismatch stop a 4,000-row import, which is how a
+ safety gate loses its credibility and gets switched off. See Requirements 11.5, 11.5a, 11.5b.
+
+Nothing is open. D3 and D6 are deferred to iteration 2 by choice, not left undecided.

@@ -77,7 +77,7 @@ netbox-tool-kits/
 
 | Adding... | Goes in |
 | --- | --- |
-| a new spreadsheet column | `columns.py`, then the relevant importer |
+| a new spreadsheet column | `columns.py` — including its `Conflict` classification, which has no default so the choice cannot be skipped — then the relevant importer |
 | a new NetBox object type | a new module under `importers/`, plus lookups in `services/lookups.py` |
 | a new page | `views.py`, `urls.py`, a template, and a nav-bar entry in `base.html` |
 | a naming-convention change | `naming.py` only — nothing else parses rack names |

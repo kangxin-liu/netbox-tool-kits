@@ -43,9 +43,12 @@ instance; HTTP is stubbed.
 
 - [ ] 5. `columns.py` column definitions
   - `ColumnSpec` dataclass and the three column tuples exactly as tabulated in `design.md`
+  - `Conflict` enum (`CONSEQUENTIAL` / `DESCRIPTIVE` / `IDENTITY`) as a required field on every spec,
+    populated from the D8 table in `design.md`
   - Synthetic example values only — no real site, device, or serial values
-  - Test: every spec has help text; required columns match the requirements tables
-  - _Requirements: 4.3, 4.6, 7 (columns), 8 (columns), 9 (columns)_
+  - Test: every spec has help text; required columns match the requirements tables; every column
+    carries a `Conflict` and the split matches the D8 table
+  - _Requirements: 4.3, 4.6, 11.5c, 7 (columns), 8 (columns), 9 (columns)_
 
 - [ ] 6. Template generation
   - Generate `.csv` and `.xlsx` templates from `ColumnSpec`, with a header row, a guidance row, and
@@ -109,18 +112,22 @@ instance; HTTP is stubbed.
   - `RowError(code, column, value, expectation)` converting straight into a `ValidationIssue`
   - Parsed rows carry their spreadsheet line number so issues report the line Excel shows, header
     counted as line 1
+  - `compare_to_existing(spec, sheet_value, netbox_value)` implementing D8: exact comparison for
+    identifiers, slugs, integers, and choices, trimmed/collapsed/case-folded for free text, returning
+    an issue at the severity the column's `Conflict` dictates and none when the values agree
   - Tests: `is_applyable` false with one error, false with unacknowledged warnings, false when
     expired, false when stages were not all reached, true only when genuinely clean; `location()`
-    renders `file / sheet / line / column`
-  - _Requirements: 10.5, 10.8, 10.9, 16.1, 16.2, 16.3, 16.4_
+    renders `file / sheet / line / column`; `spine row A` vs `Spine Row A` is not a conflict while
+    `19` vs `23` on a consequential column is an error and a differing description is a warning
+  - _Requirements: 10.5, 10.8, 10.9, 11.5, 11.5a, 11.5b, 16.1, 16.2, 16.3, 16.4_
 
-- [ ] 11a. Verify NetBox bulk-create atomicity (decision D7) — **spike, do before task 12**
-  - Against a **lab** NetBox only, POST a list of objects to one endpoint where a single entry is
-    invalid, then check whether the valid entries were created
-  - Record the finding in `design.md`: if atomic, apply uses one bulk POST per endpoint and the
-    half-complete window shrinks to the boundaries between endpoints; if not, apply stays row-by-row
-    with ordered audit records
-  - Do not run this against production; use a throwaway instance and clean up after
+- [x] 11a. Verify NetBox bulk-create atomicity (decision D7) — **spike, done 2026-08-18**
+  - **Finding: bulk create is atomic on NetBox 4.6.8.** A field-level error, a deferred database
+    uniqueness violation raised mid-write, and a model `clean()` error each rolled the entire list
+    back. Full method and results recorded in `design.md` under "Measured: bulk create is atomic"
+  - Follow-on for task 12: group creates by endpoint and issue one bulk POST each; on a bulk failure
+    whose error body is *not* a per-item array, replay the list row by row to attribute the error to
+    a spreadsheet line (safe because the bulk attempt wrote nothing)
   - _Requirements: decision D7, 12.4_
 
 - [ ] 12. Shared pipeline in `importers/base.py`
@@ -128,9 +135,13 @@ instance; HTTP is stubbed.
     the `Importer` protocol split into `validate_local` (S1–S3), `validate_remote` (S4), `plan` (+S5)
   - `apply` refuses unless `plan.verdict.is_applyable`, re-runs S4 first and aborts with zero writes
     if anything moved, then walks actions in order recording a sequence number
-  - Abort on auth failure or connection loss; strategy for a mid-run NetBox 400 follows task 11a
+  - Per D7, creates are grouped by endpoint and sent as one bulk POST each; a failed batch wrote
+    nothing, so mark its rows `BLOCKED`, stop before the next endpoint, and replay the batch
+    row by row when the error body is a single un-indexed object rather than a per-item array
+  - Abort on auth failure or connection loss
   - Tests: a plan with one error issues zero HTTP writes; stale S4 aborts before the first write;
-    auth failure aborts; applied-before-abort rows reported in order
+    auth failure aborts; a failed batch marks every row in it blocked and halts later endpoints;
+    an un-indexed error triggers the row-by-row replay and lands on the right line
   - _Requirements: 10.1, 10.2, 10.4, 10.6, 10.7, 10.14, 11.1, 11.2, 12.3, 12.4_
 
 - [ ] 13. Hierarchy importer
@@ -140,8 +151,10 @@ instance; HTTP is stubbed.
     different datacenters treated as distinct
   - Split the checks across `validate_local` (S2/S3) and `validate_remote` (S4: slug collisions,
     existing objects matching or differing)
-  - Tests: one per criterion in Requirement 7, including slug collision with a different object
-  - _Requirements: 7.1–7.9, 6.3, 11.4, 11.5_
+  - Tests: one per criterion in Requirement 7, including slug collision with a different object, and
+    the D8 split on a site that exists in a different region (blocks) versus one whose description
+    alone differs (warns)
+  - _Requirements: 7.1–7.9, 6.3, 11.4, 11.5, 11.5a_
 
 - [ ] 14. Device importer
   - Resolve rack, validate face, position and `bottom_ru + ru_height - 1` against rack height,
