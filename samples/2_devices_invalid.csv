@@ -1,0 +1,11 @@
+rack,rack_face,bottom_ru,ru_height,device_name,model,serial,manufacturer,device_role,status,asset_tag,tenant
+LAB1-DH1-R02,front,30,1,lab1-dh1-r02-leaf08,Spectrum-SN4700,,Nvidia,ns-leaf,active,,
+LAB9-DH1-R99,front,10,1,lab9-leaf01,Spectrum-SN4700,,Nvidia,ns-leaf,active,,
+LAB1-DH1-R01,left,26,1,lab1-dh1-r01-leaf04,Spectrum-SN4700,,Nvidia,ns-leaf,active,,
+LAB1-DH1-R01,front,45,2,lab1-dh1-r01-spine09,Spectrum-SN5610,,Nvidia,ns-spine,active,,
+LAB1-DH1-R01,front,10,1,lab1-dh1-r01-clash01,Spectrum-SN4700,,Nvidia,ns-leaf,active,,
+LAB1-DH1-R02,front,20,2,lab1-dh1-r02-spine02,Spectrum-SN5610,,Nvidia,ns-spine,active,,
+LAB1-DH1-R02,front,21,2,lab1-dh1-r02-spine03,Spectrum-SN5610,,Nvidia,ns-spine,active,,
+LAB1-DH1-R02,front,28,1,lab1-dh1-r02-nope01,Spectrum-SN9999,,Nvidia,ns-leaf,active,,
+LAB1-DH1-R02,front,32,1,lab1-dh1-r02-spine04,Spectrum-SN5610,,Nvidia,ns-spine,active,,
+LAB1-DH1-R02,front,34,1,lab1-dh1-r02-leaf10,Spectrum-SN4700,,Nvidia,chief-router,active,,

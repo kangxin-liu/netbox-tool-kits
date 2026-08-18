@@ -1,0 +1,34 @@
+# Secrets — never commit. Real NetBox tokens live only in a local .env.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Django
+db.sqlite3
+db.sqlite3-journal
+/staticfiles/
+/media/
+/logs/
+*.log
+
+# Uploaded spreadsheets may contain customer/site data — keep out of git
+/uploads/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

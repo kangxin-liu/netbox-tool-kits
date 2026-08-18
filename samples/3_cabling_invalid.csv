@@ -1,0 +1,12 @@
+a_end,a_end_kind,a_port,a_port_side,b_end,b_end_kind,b_port,b_port_side,cable_type,transceiver,cable_profile,cable_status,label,length,length_unit,color
+lab1-dh1-r01-leaf01,device,swp3,,lab1-dh1-r01-pp01,panel,MPO3,rear,smf-os2,400gbase-x-qsfpdd,single-1c4p,connected,OK-0001,15,m,
+lab1-dh1-r01-leaf01,device,swp99,,lab1-dh1-r01-pp01,panel,MPO4,rear,smf-os2,,,connected,BAD-0001,,,
+lab1-dh1-r01-leaf01,device,swp4,,lab1-dh1-r01-pp01,panel,9A,front,smf-os2,,,connected,BAD-0002,,,
+lab1-dh1-r01-ghost,device,swp1,,lab1-dh1-r01-pp01,panel,MPO5,rear,smf-os2,,,connected,BAD-0003,,,
+lab1-dh1-r01-leaf01,device,swp5,,lab1-dh1-r01-leaf01,device,swp5,,smf-os2,,,connected,BAD-0004,,,
+lab1-dh1-r01-leaf01,device,swp3,,lab1-dh1-r02-pp01,panel,MPO2,rear,smf-os2,,,connected,BAD-0005,,,
+lab1-dh1-r01-leaf01,device,swp6,,lab1-dh1-r01-pp01,panel,MPO6,rear,cat99,,,connected,BAD-0006,,,
+lab1-dh1-r01-leaf01,device,swp7,,lab1-dh1-r01-pp01,panel,MPO7,rear,smf-os2,QSFP-100G-SR4,,connected,BAD-0007,,,
+lab1-dh1-r01-leaf01,device,swp8,,lab1-dh1-r01-pp01,panel,MPO8,rear,smf-os2,400gbase-x-qsfpdd,breakout-1c4p-4c1p,connected,BAD-0008,,,
+lab1-dh1-r01-leaf01,device,swp9,,lab1-dh1-r02-pp01,panel,MPO3,rear,smf-os2,400gbase-x-qsfpdd,single-9c9p,connected,BAD-0009,,,
+lab1-dh1-r02-leaf01,device,swp7,,lab1-dh1-r02-pp01,panel,MPO4,rear,smf-os2,,single-1c4p,connected,WARN-0001,,,
