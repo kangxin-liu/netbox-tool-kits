@@ -11,8 +11,11 @@ Three importer pages, one per nav-bar entry:
 | Devices | Devices mounted in racks by face and rack unit | `rack` name |
 | Cabling | Cables between devices and patch panels | end names + port names |
 
-Rack names follow `<datacenter>-<datahall>-<rack>`, e.g. `SYD1-DH1-R01`. That convention is the
-join key between all three sheets.
+Rack names follow `<datacenter_slug>-<datahall_slug>-<rack>`, e.g. `SYD1-DH1-R01`. That convention
+is the join key between all three sheets. The first two segments are the datacenter's and datahall's
+**slugs**, which the hierarchy sheet supplies in its optional `datacenter_slug` and `datahall_slug`
+columns — so a site can be called "Sydney One" and still sit in a rack named `SYD1-DH1-R01`. Leave a
+slug cell blank and it is derived from the name, which is all a single-token name like `SYD1` needs.
 
 ## The validation gate
 
@@ -51,12 +54,16 @@ the first write, aborting with nothing written if anything changed in the meanti
   renders no apply button and a direct POST is answered with 409 and the reason. Every attempt —
   including a refused one — is recorded in a read-only run history with a per-row report and CSV
   downloads.
+- **Sheet-supplied slugs (18a).** The hierarchy sheet's optional `datacenter_slug` and `datahall_slug`
+  columns, and rack names built from those slugs rather than from the two display names, so a site can
+  be called "Sydney One" without lengthening every rack name under it. A blank slug cell still derives
+  one from the name, which is why sheets written before this change keep validating unchanged.
 
 **What is not wired up yet:** phase 7 (tasks 19–22) is hardening and handover — the progress state for
 very large sheets, the security regression suite, the deploy check, and the operator runbook for
 preparing an empty NetBox.
 
-The suite is 659 tests and runs in about fifteen seconds, with no live NetBox and no sockets.
+The suite is 697 tests and runs in about fifteen seconds, with no live NetBox and no sockets.
 
 The design lives in `.kiro/`:
 

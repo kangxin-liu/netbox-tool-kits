@@ -65,6 +65,7 @@ instance; HTTP is stubbed.
   - Choice tuples drive the xlsx picklists and the example rows only; validation still asks the API,
     so a choice list going stale cannot silently reject a value NetBox accepts (Requirement 7.7)
   - Synthetic example values only — the example region is `Example Region`, the site `EXA1`
+  - **Extended by task 18a (D9):** the hierarchy sheet gains `datacenter_slug` and `datahall_slug`
   - Tests: required and optional columns match the requirements tables; the D8 split matches the
     design table exactly; every column carries a `Conflict` and help text; no example value looks
     like production data; `transceiver` is absent (D3) and `rack_type` is not a column name
@@ -160,6 +161,9 @@ instance; HTTP is stubbed.
   - Tests: 22 in `test_naming.py` — two and four segments rejected, empty segment rejected, an
     alternate delimiter honoured, and comparison case-insensitive while the supplied casing is
     preserved in what gets created
+  - **Superseded in part by task 18a (D9):** the sheet does now ask for two of the slugs, the rack
+    name's first two segments became slugs rather than names, and this module gained the slug
+    validation rules that go with that
   - _Requirements: 6.1, 6.2, 6.4, 6.5_
 
 ## Phase 5 — Validation framework and importer pipeline
@@ -245,6 +249,9 @@ instance; HTTP is stubbed.
   - Tests: 57, one per criterion in Requirement 7, including a slug collision against a different
     object and the D8 split on a site in the wrong region (blocks) versus one whose description alone
     differs (warns)
+  - **Superseded in part by task 18a (D9):** slugs for the datacenter and datahall now come from the
+    sheet when supplied, the rack-name agreement check compares slugs rather than names, and the two
+    slug columns are `CONSEQUENTIAL` where the three name columns remain `IDENTITY`
   - _Requirements: 7.1–7.9, 6.3, 11.4, 11.5, 11.5a_
 
 - [x] 14. Device importer — **done**
@@ -357,6 +364,81 @@ instance; HTTP is stubbed.
     persisted field and every rendered page, and no mutating route
   - _Requirements: 12.1, 12.2, 12.5, 12.6, 13.1–13.5_
 
+- [x] 18a. Sheet-supplied slugs, and rack names built from them (D9) — **done**
+  - Revises tasks 5, 10, and 13. The rack name's first two segments become the datacenter and datahall
+    **slugs** rather than their names, and the hierarchy sheet gains optional `datacenter_slug` and
+    `datahall_slug` columns to supply them. Until now the slug was derived from the name, which forced
+    the name to double as the short code: a site had to be called `SYD1` rather than "Sydney One" purely
+    to keep rack names short
+  - `columns.py`: two new `ColumnSpec`s placed immediately after the name column each belongs to, so a
+    template reads name, slug, name, slug. Both `CONSEQUENTIAL`, not `IDENTITY` — `IDENTITY` means
+    "cannot differ", which stops being true the moment an operator types the value themselves
+  - `naming.py`: `validate_slug` and `effective_slug`; `RackName.agrees_with` takes slugs; `PATTERN`
+    becomes `<datacenter_slug>-<datahall_slug>-<rack>`. Two separate checks, not one regex — outside
+    NetBox's charset and containing-the-delimiter are different mistakes with different fixes, and the
+    delimiter check reads `RACK_NAME_DELIMITER` rather than matching a literal `-` so Requirement 6.5
+    survives
+  - `validation.py`: `SLUG_INVALID`, `SLUG_CONTAINS_DELIMITER`, and `SLUG_INCONSISTENT_IN_FILE`
+    (one name given two slugs). `SLUG_COLLISION` and `SLUG_NOT_DERIVABLE` keep their current meanings
+  - `importers/hierarchy.py`, five places: `extra_cell_checks` validates the effective slug per level;
+    `check_consistency` compares the rack name against slugs and gains both directions of the slug/name
+    consistency check, with datahall slugs keyed by site per Requirement 7.9; `prefetch` loads by
+    effective rather than derived slug; the three level resolvers put the effective slug in both the
+    lookup and the payload; and `_slug_matches` splits into "this slug belongs to another object"
+    (existing) and "this object's slug is not the one you asserted" (new, blocking)
+  - The supplied-versus-derived distinction is the crux and belongs in one place: a **supplied** slug
+    that disagrees with an existing object blocks (7.13), a **derived** one does not (7.14). Applying
+    the blocking rule to the fallback would make every pre-existing object whose slug this tool did not
+    derive start rejecting rows that pass today
+  - A derived slug containing the delimiter — `derive_slug("Data Hall 1")` is `data-hall-1` — is
+    rejected against the **name** column, not the blank slug column, because that is where the fix goes
+  - Fixtures and docs move with it: `samples/1_hierarchy_*.csv`, `scripts/make_sample_sheets.py`, the
+    example row in `columns.py`, and the header lists asserted in `test_columns.py` and `test_sheets.py`.
+    At least one sample should carry multi-word names so the feature is exercised by the samples
+  - Tests: extend `test_naming.py` (charset, underscore accepted, hyphen rejected, over-length,
+    supplied-versus-derived precedence, and an alternate delimiter flipping which character is banned)
+    and `test_hierarchy_importer.py` (supplied slug reaches the payload verbatim, blank falls back,
+    derived-with-delimiter reported on the name column, one name with two slugs, two names with one
+    slug, the same datahall slug legal under a second datacenter, supplied disagreement blocks, derived
+    disagreement does not). A regression test that a pre-D9 single-token sheet still validates unchanged
+    is the one that proves the fallback works
+  - _Requirements: 6.3, 6.4, 6.6, 6.7, 7.3, 7.10–7.14, 11.1, 11.5, D9_
+
+  **How it came out.**
+  - The **region deliberately gained nothing**. Its slug is still derived and still only has to exist,
+    because it appears in no rack name — so a region may keep a hyphenated slug like `lab-region` that
+    the same rule would forbid for a site. The delimiter ban is a rack-name constraint, not a NetBox one,
+    and applying it where no rack name is involved would have rejected files that are fine
+  - `validate_slug` grew two wording-only arguments beyond the design's sketch, `derived_from` and
+    `advice`, so that all slug phrasing stays in the one function. The alternative — catching the error
+    in `effective_slug` and re-raising it with a different message — would have written every slug
+    message twice, in two places that could then disagree
+  - `row_slug` and `blame_column` are module-level in `importers/hierarchy.py` rather than methods,
+    because S2, S3, S4, and `prefetch` all need the same answer. Computing the effective slug once per
+    level in `plan_row` and passing it down is what makes Requirement 7.10 structural: the lookup, the
+    payload, and the rack-name check cannot be handed different values, because there is only one
+  - `_supplied_slug_matches` is a wrapper around `compare_to_existing`, not a new comparison. That is
+    what makes the supplied-versus-derived distinction free: `compare_to_existing` already returns
+    nothing for a blank cell, so a derived slug never reaches the check, and the column's CONSEQUENTIAL
+    classification is what turns a real disagreement into a blocking error
+  - The datahall gained the collision guard it never had. Looking a location up by `(site, slug)` and
+    finding a *differently named* room used to be treated as a match, which would have attached the
+    row's rack to the wrong datahall; it now blocks, scoped to the site per Requirement 7.9
+  - Slugs compare case-insensitively, following Requirement 6.4 rather than the design's "slugs match
+    exactly": `EXA1-DH1-R01` has to agree with the slugs `exa1` and `dh1`, and a comparison that folded
+    for the rack name but not for the slug behind it would contradict itself. What is *created* still
+    carries the casing the sheet gave (assumption 8)
+  - The samples exercise both halves: the first three rows of `1_hierarchy_valid.csv` leave both slug
+    cells blank, which is the pre-D9 sheet, and the fourth carries "Lab Two" / "Data Hall One" with
+    supplied slugs and the rack name `LAB2-DH1-R01`. `1_hierarchy_invalid.csv` gains the mistake this
+    change makes possible — a multi-word name with the slug cell left blank — which reports against
+    `datacenter`, not against the cell the operator never filled in
+  - Tests: 697 in the suite, up from 659. 47 in `test_naming.py` (13 new, covering the charset,
+    over-length, the delimiter ban, and the alternate delimiter flipping which character it bans) and
+    70 in `test_hierarchy_importer.py` (13 new in `TestSuppliedSlugs`). Two of those are the ones worth
+    keeping honest: a sheet whose slug columns are *absent from the header entirely* still validates,
+    and a derived slug that disagrees with an existing object still does not block
+
 ## Phase 7 — Hardening and handover
 
 - [ ] 19. Row-count bound and progress
@@ -384,6 +466,8 @@ instance; HTTP is stubbed.
 - [ ] 22. README and operator runbook
   - Setup, environment variables, creating the admin user, running the server
   - The rack naming convention, the three sheet formats, and where to get templates
+  - The slug columns of D9: what they are for, that `-` is not allowed inside one, and that a
+    multi-word datacenter or datahall name now needs its slug column filled in
   - How to read a validation report and fix a blocked file; that apply is impossible until validation
     is clean; what to do if a run still aborts partway; that iteration 1 never updates or deletes
   - **Empty-instance prep runbook:** local NetBox via `netbox-docker` (Postgres and Redis included),

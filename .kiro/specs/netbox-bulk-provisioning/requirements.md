@@ -23,14 +23,20 @@ The spreadsheets use the engineers' vocabulary. NetBox's DCIM model is the targe
 | Sheet term | NetBox object | Notes |
 | --- | --- | --- |
 | Location | `dcim.Region` | Geographic grouping, e.g. a metro or country |
-| Datacenter | `dcim.Site` | The physical facility |
-| Datahall / room | `dcim.Location` | A child location scoped to the site |
+| Datacenter | `dcim.Site` | The physical facility. Its slug is the rack name's first segment |
+| Datahall / room | `dcim.Location` | A child location scoped to the site. Its slug is the rack name's second segment |
 | Rack | `dcim.Rack` | Assigned to both the site and the datahall location |
 | Model | `dcim.DeviceType` | Matched by model name (and manufacturer when creating) |
 | Panel | `dcim.Device` with front/rear ports | A patch panel is an ordinary device in NetBox |
 
-**Naming convention.** A rack name is `<datacenter>-<datahall>-<rack>`, for example
-`SYD1-DH1-R01`. This is the join key used by all three sheets.
+**Naming convention.** A rack name is `<datacenter_slug>-<datahall_slug>-<rack>`, for example
+`SYD1-DH1-R01` where the slugs are `syd1` and `dh1`. This is the join key used by all three sheets.
+
+The first two segments are the *slugs* of the datacenter and the datahall, not their names, so that
+display names can stay human — "Sydney One", "Data Hall 1" — while the rack name stays short. The
+sheet supplies those slugs in their own columns, falling back to a slug derived from the name
+(Requirement 7.10). Because the name is split on `RACK_NAME_DELIMITER`, neither slug may contain that
+character (Requirement 6.6).
 
 ## Requirement 1: Local admin-only access
 
@@ -148,8 +154,9 @@ safely, so that a malformed or oversized file cannot break the tool.
 
 ## Requirement 6: Rack naming convention
 
-**User Story:** As an engineer, I want rack names to follow `datacenter-datahall-rack`
-consistently, so that the device and cabling sheets can reference racks unambiguously.
+**User Story:** As an engineer, I want rack names to follow `datacenter_slug-datahall_slug-rack`
+consistently, so that the device and cabling sheets can reference racks unambiguously and a rack name
+stays short even where the datacenter and datahall have long display names.
 
 ### Acceptance Criteria
 
@@ -157,13 +164,23 @@ consistently, so that the device and cabling sheets can reference racks unambigu
  `RACK_NAME_DELIMITER` (default `-`).
 2. IF a rack name does not yield exactly three non-empty segments, THEN the system SHALL reject
  that row with an error quoting the received value and the expected pattern.
-3. WHEN the hierarchy sheet supplies a rack name whose datacenter or datahall segment disagrees
- with that row's datacenter or datahall column, THEN the system SHALL reject the row and state
- both values.
+3. WHEN the hierarchy sheet supplies a rack name whose first or second segment disagrees with that
+ row's effective datacenter or datahall slug (Requirement 7.10), THEN the system SHALL reject the row
+ and state both values.
 4. The system SHALL compare rack names case-insensitively for lookup while preserving the
- supplied casing for any object it creates.
+ supplied casing for any object it creates. A rack may therefore be named `SYD1-DH1-R01` where the
+ slugs are `syd1` and `dh1`, and a sheet that predates the slug columns keeps working wherever the
+ datacenter and datahall names are single tokens.
 5. The system SHALL implement this convention in exactly one module, so that changing the
  delimiter or segment count is a single-file change.
+6. The system SHALL reject any datacenter or datahall slug containing `RACK_NAME_DELIMITER`, whether
+ that slug was supplied or derived, because the rack name is split on that character and an embedded
+ delimiter would make the segment boundaries ambiguous — `syd-1` and `dh1` would produce a
+ four-segment name. NetBox's own slug charset permits the hyphen, so this restriction belongs to the
+ tool, and the error SHALL name the forbidden character and offer `_` as the alternative.
+7. The system SHALL express 6.6 in terms of `RACK_NAME_DELIMITER` and not a literal hyphen, so that
+ configuring `_` as the delimiter forbids `_` inside slugs and permits `-`, which is what keeps 6.5
+ true.
 
 ## Requirement 7: Site and rack hierarchy import
 
@@ -174,7 +191,15 @@ step.
 ### Acceptance Criteria
 
 Sheet columns — required: `location`, `datacenter`, `datahall`, `rack`, `rack_u_height`.
-Optional: `rack_width`, `rack_status`, `rack_form_factor`, `tenant`, `description`.
+Optional: `datacenter_slug`, `datahall_slug`, `rack_width`, `rack_status`, `rack_form_factor`,
+`tenant`, `description`.
+
+`datacenter_slug` and `datahall_slug` are optional rather than required so that a sheet written
+before they existed still validates: a blank cell falls back to a slug derived from the name, which
+for a single-token name such as `SYD1` reproduces exactly what the tool derived before. They become
+necessary as soon as a name is multi-word, because the derived slug would then contain the rack-name
+delimiter (Requirement 6.6). The region has no slug column: its slug is never part of a rack name, so
+nothing the operator can see depends on it.
 
 The column is `rack_form_factor`, not `rack_type`: NetBox 4.2 renamed `Rack.type` to
 `Rack.form_factor` and gave `rack_type` to a foreign key pointing at the separate `RackType` model.
@@ -184,9 +209,10 @@ A column named `rack_type` carrying `4-post-cabinet` would therefore be aimed at
  repeated across the rows that share them.
 2. WHEN a row's location, datacenter, or datahall does not exist in NetBox, THEN the system SHALL
  create it, creating parents before children in the order region → site → location.
-3. The system SHALL derive a URL-safe slug for every created region, site, and datahall location
- from its name, since NetBox requires a slug on all three, and SHALL reject a row whose derived slug
- collides with a different existing object.
+3. The system SHALL set a URL-safe slug on every region, site, and datahall location it creates,
+ since NetBox requires one on all three: taken verbatim from `datacenter_slug` or `datahall_slug`
+ where that column is non-blank, and derived from the object's name otherwise. It SHALL reject a row
+ whose slug, supplied or derived, collides with a *differently named* existing object.
 4. WHEN creating a site, THEN the system SHALL assign it to the region created or matched for
  that row; WHEN creating a datahall, THEN the system SHALL assign it to that site.
 5. WHEN creating a rack, THEN the system SHALL set its site and its datahall location, and SHALL
@@ -200,6 +226,28 @@ A column named `rack_type` carrying `4-post-cabinet` would therefore be aimed at
  row as a duplicate and name the earlier row number.
 9. WHEN a datahall is referenced by rows belonging to different datacenters, THEN the system
  SHALL treat them as distinct datahalls, since a NetBox location is scoped to its site.
+10. The system SHALL define a level's **effective slug** as the supplied slug where its column is
+ non-blank and the slug derived from its name otherwise, and SHALL use that single value for the
+ NetBox lookup, for the created object's `slug`, and for the rack-name agreement check of
+ Requirement 6.3 — so that those three readings of "the slug" cannot disagree with one another.
+11. IF a supplied slug falls outside NetBox's slug charset of letters, digits, hyphen and underscore,
+ THEN the system SHALL reject the row against the slug column. IF an effective slug contains
+ `RACK_NAME_DELIMITER`, THEN the system SHALL reject the row, locating the issue on the **slug**
+ column where the slug was supplied and on the **name** column where it was derived — in the latter
+ case the operator's fix is to fill the slug column in, so that is where the error must point.
+12. IF two rows give one datacenter or datahall name two different effective slugs, THEN the system
+ SHALL reject the later row and name the earlier row's number, since one object cannot hold two
+ slugs. IF two rows give two different names one effective slug, THEN the system SHALL reject the
+ later row as a collision, since NetBox would treat them as a single object. Datahall slugs SHALL be
+ compared within a datacenter and not globally, following 7.9.
+13. IF a site or datahall already exists in NetBox and the sheet **supplied** a slug differing from
+ the one it holds, THEN the system SHALL raise a blocking ERROR naming both values, because iteration
+ 1 never updates an existing object (Requirement 11.3) and the row asks for something the tool cannot
+ deliver. A region can never reach this case, having no slug column.
+14. WHERE the slug column is blank or absent and a **derived** slug differs from what a matched object
+ holds, the system SHALL match on name and proceed, since a derived slug is the tool's guess rather
+ than the operator's assertion and an object created outside this tool has no reason to match it. This
+ is what keeps a region — and any sheet predating the slug columns — behaving exactly as before.
 
 ## Requirement 8: Device import
 
@@ -342,7 +390,8 @@ can finish a partial import without creating duplicates.
 
 1. Before creating any object, the system SHALL look it up by natural key — slug for regions and
  sites, name within parent scope for locations, racks, and devices, and existing termination
- occupancy for cables.
+ occupancy for cables. For regions, sites, and datahalls the slug used is the effective slug of
+ Requirement 7.10, so a sheet that states a slug is looked up by the slug it states.
 2. WHEN a matching object exists, THEN the system SHALL skip it, record it as already present,
  and continue with the row's remaining work.
 3. The system SHALL NOT update, rename, re-parent, or delete any existing NetBox object in this
@@ -355,7 +404,9 @@ can finish a partial import without creating duplicates.
  the NetBox value, because iteration 1 cannot reconcile the difference by updating, and because a
  difference in these fields means later rows are built on a false premise (decision D8).
  Consequential fields are: a region's parent; a site's region; a location's site and parent; a
- rack's `u_height` and `width`; and a device's rack, position, face, and device type.
+ rack's `u_height` and `width`; a device's rack, position, face, and device type; and a slug the sheet
+ supplied explicitly for a site or datahall, per Requirement 7.13 — a slug the tool merely derived is
+ not consequential, per 7.14.
 5a. IF the differing value is **descriptive** — one that nothing else in the import depends on —
  THEN the system SHALL raise a WARNING that the operator must acknowledge before applying, rather
  than blocking. Descriptive fields are: `description`, `status`, `tenant`, `serial`, `asset_tag`,
@@ -519,12 +570,16 @@ rather than to appear broken.
 5. Patch panels already exist as devices with their front and rear ports defined, typically from
  a device type template using the 4.5+ `rear_ports` mapping format. The cabling importer does not
  create panels.
-6. Rack names are globally unique in practice because they embed the datacenter and datahall.
+6. Rack names are globally unique in practice because they embed the datacenter and datahall slugs.
 7. NetBox field names are taken from the target instance rather than from memory. Two 4.x renames
  caught during spec verification against 4.6.8 are worth naming, because a sheet column pointed at
  the old name would fail or, worse, hit a different field: `Rack.type` became `Rack.form_factor` in
  4.2 (`rack_type` is now a foreign key to the `RackType` model), and `dcim.Location` requires a
  `slug` just as regions and sites do.
+8. NetBox validates a slug against `^[-a-zA-Z0-9_]+$` with a maximum length of 100, so the hyphen is
+ legal in a NetBox slug even though Requirement 6.6 forbids it in the two slugs that a rack name is
+ built from. Uppercase is likewise legal, and a supplied slug is submitted with the casing the sheet
+ gave it rather than being folded, matching Requirement 6.4's treatment of names.
 
 ## Decisions
 
@@ -565,5 +620,22 @@ rather than to appear broken.
  reads cannot produce a wrong result, so it warns and the operator acknowledges it. Blocking on
  everything would have made a one-word description mismatch stop a 4,000-row import, which is how a
  safety gate loses its credibility and gets switched off. See Requirements 11.5, 11.5a, 11.5b.
+- **D9 — Slugs in the sheet, and in rack names. DECIDED:** the hierarchy sheet gains optional
+ `datacenter_slug` and `datahall_slug` columns, and a rack name is built from those two slugs rather
+ than from the datacenter and datahall names. Deriving the slug from the name was fine while the slug
+ was invisible plumbing, but it forced the *name* to double as the short code: a datacenter had to be
+ called `SYD1` rather than "Sydney One" purely so the rack name would come out short. The slug columns
+ separate the two jobs.
+ Three sub-decisions were taken with it. **Optional, with a derived fallback**, so no existing sheet
+ breaks and the single-token cases keep working untouched. **A supplied slug that disagrees with an
+ existing object blocks** rather than warning — the operator asserted a value that iteration 1
+ cannot write, and silently using a different one would leave rack names pointing at a slug NetBox
+ does not have. **A derived slug that disagrees does not block** (Requirement 7.14): applying the
+ blocking rule to the fallback would make every pre-existing object whose slug this tool did not
+ derive start rejecting rows that work today.
+ The alternative — keep deriving, and require the *name* to be delimiter-free — was rejected because
+ it fixes the rack-name problem by making the names worse, which is the constraint the change set out
+ to remove. The cost of D9 is that the delimiter ban of Requirement 6.6 becomes load-bearing, and
+ that a multi-word name now needs its slug column filled in.
 
 Nothing is open. D3 and D6 are deferred to iteration 2 by choice, not left undecided.

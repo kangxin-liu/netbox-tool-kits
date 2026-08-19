@@ -62,8 +62,15 @@ class ColumnSpec:
 
 
 # --- Sheet 1: hierarchy, one row per rack ---------------------------------------------------
-# Location → dcim.Region, Datacenter → dcim.Site, Datahall → dcim.Location (D1). All three are
-# identity columns: they are how an existing object is found, so they cannot conflict.
+# Location → dcim.Region, Datacenter → dcim.Site, Datahall → dcim.Location (D1). The three name
+# columns are identity columns: they are how an existing object is found, so they cannot conflict.
+#
+# The two slug columns (D9) are CONSEQUENTIAL rather than IDENTITY, which is worth a note because
+# they *are* the natural key the lookup uses. IDENTITY means "cannot differ" — a different value
+# denotes a different object — and that holds only while the slug is derived. Once an operator types
+# one, a supplied slug that disagrees with the matched object is a real disagreement to report and
+# block (Requirement 7.13), and CONSEQUENTIAL is the class that produces that. The derived fallback
+# leaves the cell blank and so never reaches the comparison at all (Requirement 7.14).
 HIERARCHY_COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec(
         key="location",
@@ -79,7 +86,18 @@ HIERARCHY_COLUMNS: tuple[ColumnSpec, ...] = (
         required=True,
         conflict=Conflict.IDENTITY,
         help_text="The facility, created as a NetBox site within the row's location",
-        example="EXA1",
+        example="Example One",
+    ),
+    ColumnSpec(
+        key="datacenter_slug",
+        label="datacenter_slug",
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text=(
+            "The site's NetBox slug and the rack name's first segment. Letters, digits and "
+            "underscore, no hyphen. Derived from the datacenter name when left blank"
+        ),
+        example="exa1",
     ),
     ColumnSpec(
         key="datahall",
@@ -87,14 +105,27 @@ HIERARCHY_COLUMNS: tuple[ColumnSpec, ...] = (
         required=True,
         conflict=Conflict.IDENTITY,
         help_text="Room, created as a NetBox location inside the site. Scoped to its datacenter",
-        example="DH1",
+        example="Example Hall One",
+    ),
+    ColumnSpec(
+        key="datahall_slug",
+        label="datahall_slug",
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text=(
+            "The datahall's NetBox slug and the rack name's second segment. Letters, digits and "
+            "underscore, no hyphen. Derived from the datahall name when left blank"
+        ),
+        example="dh1",
     ),
     ColumnSpec(
         key="rack",
         label="rack",
         required=True,
         conflict=Conflict.IDENTITY,
-        help_text="Must read <datacenter>-<datahall>-<rack> and agree with those two columns",
+        help_text=(
+            "Must read <datacenter_slug>-<datahall_slug>-<rack> and agree with those two slugs"
+        ),
         example="EXA1-DH1-R01",
     ),
     ColumnSpec(

@@ -257,7 +257,7 @@ class TestCellChecks:
         seed(netbox)
         plan = validate(importer, netbox, [row(rack="R01")])
         error = next(i for i in plan.verdict.errors if i.code is Code.RACK_NAME_MALFORMED)
-        assert "<datacenter>-<datahall>-<rack>" in error.expected
+        assert "<datacenter_slug>-<datahall_slug>-<rack>" in error.expected
 
     def test_every_problem_in_the_stage_is_reported_not_just_the_first(self, importer, netbox):
         """Requirement 10.3."""

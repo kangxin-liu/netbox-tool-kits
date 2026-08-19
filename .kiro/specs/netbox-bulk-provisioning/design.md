@@ -249,6 +249,7 @@ renamed field fails at apply time — after the operator has been told the file 
 | `Rack.status` choices | `reserved, available, planned, active, deprecated` |
 | Required on create | region/site/location: `name` + `slug` (location also `site`); rack: `name` + `site`; device: `device_type` + `role` + `site`; cable: nothing |
 | `dcim.Location` slug | **required**, same as regions and sites — the spec previously derived slugs for regions and sites only |
+| Slug validation | `^[-a-zA-Z0-9_]+$`, max length 100, uppercase accepted. The hyphen being legal in a NetBox slug is what forces the tool's own stricter rule on the two slugs a rack name is built from (Req 6.6) |
 | `Device.face` choices | `front, rear` |
 | `Cable.type` choices | includes `cat6`, `cat6a`, `mmf-om4`, `smf-os2`, `dac-passive` as the sheet examples assume |
 | `Cable.status` / `length_unit` | `connected, planned, decommissioning` / `km, m, cm, mi, ft, in` |
@@ -318,6 +319,7 @@ on disk — it should be rotated if it has ever been shared, and `.gitignore` no
 | D5 | Apply runs inline in the request, bounded by a max row count | No worker infrastructure for iteration 1 | `views.py` |
 | D7 | Apply issues one bulk POST per endpoint, not one per row | Measured: NetBox wraps a list POST in a transaction, so a failure anywhere rolls the whole list back | `importers/base.py` |
 | D8 | An "exists but differs" conflict blocks on consequential fields and warns on descriptive ones | A wrong region or rack height invalidates every row built on it; a wrong description invalidates nothing, and blocking on it would teach operators to distrust the gate | `columns.py` (`Conflict`) + S4 |
+| D9 | Optional `datacenter_slug` / `datahall_slug` columns, and a rack name built from those slugs rather than from the two names | Deriving the slug from the name forced the name to double as the short code, so a site had to be called `SYD1` rather than "Sydney One" just to keep rack names short. Optional with a derived fallback keeps every existing sheet valid | `columns.py`, `naming.py`, `importers/hierarchy.py`, and the rack-name pattern all three sheets join on |
 
 ## Component design
 
@@ -353,9 +355,18 @@ than a match. Everything else is a judgement call the author of the column has t
 | `CONSEQUENTIAL` — blocks | `DESCRIPTIVE` — warns |
 | --- | --- |
 | a site's region, a location's site and parent, a region's parent | `description` |
+| `datacenter_slug`, `datahall_slug` | |
 | `rack_u_height`, `rack_width` | `rack_status`, `rack_form_factor`, `status` |
 | a device's `rack`, `bottom_ru`, `rack_face`, `model` | `tenant`, `serial`, `asset_tag` |
 | a cable's `cable_type` | a cable's `label`, `color`, `length`, `length_unit` |
+
+The two slug columns are `CONSEQUENTIAL` rather than `IDENTITY`, which is worth a sentence because
+they *are* the natural key the lookup uses. `IDENTITY` means "cannot differ" — a different value
+denotes a different object — and that holds while a slug is derived. Once the operator types one, a
+supplied slug that disagrees with the matched object is a genuine disagreement to report and block
+(Req 7.13), and the only class that produces that outcome is `CONSEQUENTIAL`. The derived fallback
+never reaches this comparison at all (Req 7.14), so the classification only ever fires on a value
+somebody actually wrote.
 
 Comparison is asymmetric by type: identifiers, slugs, integers, and choice values must match
 exactly, while free text is trimmed, whitespace-collapsed, and case-folded first, so `spine row A`
@@ -372,12 +383,12 @@ difference in behaviour nobody chose. The flag is set on `rack_u_height`, `rack_
 ```python
 @dataclass(frozen=True)
 class RackName:
-    datacenter: str
-    datahall: str
+    datacenter: str          # segment 1 — a slug, per D9
+    datahall: str            # segment 2 — a slug
     rack: str
     raw: str
-    def key(self) -> tuple[str, str, str]: ...          # case-folded, for comparison
-    def agrees_with(self, datacenter, datahall, rack) -> bool: ...
+    def key(self) -> str: ...                            # case-folded, for comparison
+    def agrees_with(self, *, datacenter_slug, datahall_slug) -> bool: ...
 
 def parse_rack_name(value: str, delim: str | None = None, *, column: str = "rack") -> RackName:
     """Split into exactly 3 non-empty segments. Raises RowError otherwise."""
@@ -385,14 +396,42 @@ def parse_rack_name(value: str, delim: str | None = None, *, column: str = "rack
 def build_rack_name(datacenter: str, datahall: str, rack: str, delim: str | None = None) -> str: ...
 def expected_pattern(delim: str | None = None) -> str: ...   # for the `expected` field on an issue
 def derive_slug(name: str) -> str: ...
+def validate_slug(value: str, *, column: str, delim: str | None = None,
+                  derived_from: str = "", advice: str = "") -> str:
+    """NetBox's charset, minus the delimiter. Raises RowError otherwise."""
+def effective_slug(name: str, supplied: str, *, column: str, name_column: str,
+                   delim: str | None = None) -> str:
+    """Supplied when non-blank, derived from the name otherwise (Req 7.10). Validates either way."""
 ```
+
+`derived_from` and `advice` carry the two things a message about a *derived* slug needs and a message
+about a supplied one does not: the name it came from, and the fact that the fix is to fill the slug
+column in. They only change wording, never the verdict, and keeping them here rather than catching
+and re-raising in `effective_slug` means all slug phrasing lives in one function.
 
 The only module that knows the convention (Req 6.5); the delimiter defaults to `RACK_NAME_DELIMITER`.
 
 `derive_slug` lives here rather than in each importer. NetBox requires a slug on regions, sites,
-locations, device types, and manufacturers, no sheet asks for one, so every importer derives it from
-the name (Req 7.3) — and they have to derive it *identically*, or two importers would disagree about
-which existing object a given name refers to.
+locations, device types, and manufacturers; only the hierarchy sheet asks for one, and only for two of
+its three levels, so everywhere else the slug is derived from the name (Req 7.3) — and it has to be
+derived *identically*, or two importers would disagree about which existing object a given name
+refers to.
+
+**Why `validate_slug` is two checks and not one regex.** NetBox accepts `^[-a-zA-Z0-9_]+$`, and the
+rack name is split on `-`, so the two rules disagree about the hyphen and the operator needs to be
+told which one they broke. A value outside NetBox's charset is one error ("letters, digits, hyphen and
+underscore only"); a value inside it that contains the delimiter is a different error ("the rack name
+is split on `-`; use `_`"). Writing it as a single narrowed regex would collapse both into one
+message that is wrong for one of the two cases. The second check reads the delimiter from settings
+rather than matching a literal hyphen, so configuring `_` as the delimiter forbids `_` and permits `-`
+without touching this module's rules (Req 6.7).
+
+**Why `effective_slug` takes both column names.** The fallback can itself produce an invalid slug:
+`derive_slug("Data Hall 1")` is `data-hall-1`, which contains the delimiter. That row has to be
+rejected, but pointing the error at `datahall_slug` — a cell the operator left deliberately blank —
+tells them nothing. So the issue is located on the slug column when the value was supplied and on the
+name column when it was derived, with a message that says to fill the slug column in. That is the one
+piece of state this helper exists to carry; computing the slug is the easy half.
 
 ### `importers/base.py` — the shared pipeline
 
@@ -509,9 +548,11 @@ Two things differ from the original sketch:
 | Column | Req | Format / choices | NetBox target |
 | --- | --- | --- | --- |
 | `location` | yes | text | `dcim.Region.name` (+ derived slug) |
-| `datacenter` | yes | text | `dcim.Site.name` (+ derived slug), region = row's location |
-| `datahall` | yes | text | `dcim.Location.name` (+ derived slug), site-scoped |
-| `rack` | yes | `<datacenter>-<datahall>-<rack>` | `dcim.Rack.name` |
+| `datacenter` | yes | text | `dcim.Site.name`, region = row's location |
+| `datacenter_slug` | no | `[a-zA-Z0-9_]+`, no `-`; derived from `datacenter` when blank | `dcim.Site.slug`, and segment 1 of the rack name |
+| `datahall` | yes | text | `dcim.Location.name`, site-scoped |
+| `datahall_slug` | no | `[a-zA-Z0-9_]+`, no `-`; derived from `datahall` when blank | `dcim.Location.slug`, and segment 2 of the rack name |
+| `rack` | yes | `<datacenter_slug>-<datahall_slug>-<rack>` | `dcim.Rack.name` |
 | `rack_u_height` | yes | positive int | `Rack.u_height` |
 | `rack_width` | no | 10 / 19 / 21 / 23, default 19 | `Rack.width` |
 | `rack_status` | no | from API, default `active` | `Rack.status` |
@@ -519,7 +560,13 @@ Two things differ from the original sketch:
 | `tenant` | no | existing tenant name | `Rack.tenant` |
 | `description` | no | text | `Rack.description` |
 
-Example row: `APAC, SYD1, DH1, SYD1-DH1-R01, 45, 19, active, 4-post-frame, , spine row A`
+Example row: `APAC, Sydney One, syd1, Data Hall 1, dh1, SYD1-DH1-R01, 45, 19, active, 4-post-frame, , spine row A`
+
+That row is the case D9 was written for: two multi-word display names whose rack name is still
+`SYD1-DH1-R01`, matching the slugs case-insensitively per Req 6.4. Leave both slug cells blank and the
+row is rejected — `sydney-one` contains the delimiter — with the error on the `datacenter` column
+telling the operator to fill `datacenter_slug` in. Blank slugs are only viable where the names are
+already single tokens, which is precisely the pre-D9 sheet.
 
 ### Sheet 2 — devices
 
@@ -767,13 +814,21 @@ There are two levels of double, deliberately:
 The whole suite runs in about five seconds, which is why it gets run on every change.
 
 - **Unit — `naming.py`:** valid 3-segment names, wrong segment counts, empty segments, alternate
- delimiter, case-insensitive comparison (Req 6).
+ delimiter, case-insensitive comparison (Req 6); and for slugs, the NetBox charset accepted,
+ underscore accepted, hyphen rejected, over-length rejected, a name with nothing slug-able in it,
+ supplied-versus-derived precedence, and — the one that protects Req 6.7 — that configuring `_` as
+ the delimiter flips which of `-` and `_` is the forbidden character.
 - **Unit — `sheets.py`:** csv and xlsx parsing, reordered headers, case/whitespace in headers,
  missing required column, unknown column warning, blank rows, oversize rejection, formulas read
  as values, template round-trip (generate → parse yields the declared columns) (Req 4, 5).
 - **Unit — importers, one test per numbered criterion:**
  - hierarchy: parent-before-child ordering, slug derivation and collision, duplicate rack rows,
- rack name vs column disagreement, same datahall name under two datacenters (Req 7)
+ rack name vs slug disagreement, same datahall name under two datacenters (Req 7); plus the D9
+ cases — a supplied slug reaching the create payload verbatim, a blank slug falling back to the
+ derived one, a derived slug containing the delimiter reported against the *name* column, one name
+ carrying two slugs, two names carrying one slug, the same datahall slug reused under a second
+ datacenter being legal, a supplied slug disagreeing with an existing object blocking, and the same
+ disagreement from a derived slug not blocking
  - devices: face validation, RU overflow past rack height, overlap with an existing device and
  with another row, `ru_height` vs device-type height mismatch, missing model with autocreate off
  then on, role fallback then failure, duplicate device name (Req 8)

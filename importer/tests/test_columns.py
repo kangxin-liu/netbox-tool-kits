@@ -20,7 +20,17 @@ EXPECTED_REQUIRED = {
 }
 
 EXPECTED_OPTIONAL = {
-    "hierarchy": ("rack_width", "rack_status", "rack_form_factor", "tenant", "description"),
+    # The two slug columns are optional so a sheet written before D9 still validates: a blank cell
+    # falls back to a slug derived from the name (Requirement 7.10).
+    "hierarchy": (
+        "datacenter_slug",
+        "datahall_slug",
+        "rack_width",
+        "rack_status",
+        "rack_form_factor",
+        "tenant",
+        "description",
+    ),
     "devices": ("serial", "manufacturer", "device_role", "status", "asset_tag", "tenant"),
     "cabling": (
         "a_end_kind",
@@ -37,7 +47,9 @@ EXPECTED_OPTIONAL = {
 
 # The D8 split from design.md. Everything not named here is IDENTITY.
 EXPECTED_CONSEQUENTIAL = {
-    "hierarchy": {"rack_u_height", "rack_width"},
+    # The slug columns are CONSEQUENTIAL, not IDENTITY: IDENTITY means "cannot differ", which stops
+    # being true the moment an operator types the value themselves (D9, Requirement 7.13).
+    "hierarchy": {"datacenter_slug", "datahall_slug", "rack_u_height", "rack_width"},
     "devices": {"rack", "rack_face", "bottom_ru", "ru_height", "model"},
     "cabling": {"cable_type"},
 }

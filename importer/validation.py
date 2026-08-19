@@ -60,6 +60,15 @@ class Code(StrEnum):
     COLOR_MALFORMED = "COLOR_MALFORMED"
     LENGTH_UNIT_MISSING = "LENGTH_UNIT_MISSING"
     SLUG_NOT_DERIVABLE = "SLUG_NOT_DERIVABLE"
+    SLUG_INVALID = "SLUG_INVALID"
+    """Outside NetBox's own slug charset (decision D9)."""
+
+    SLUG_CONTAINS_DELIMITER = "SLUG_CONTAINS_DELIMITER"
+    """Inside NetBox's charset but unusable in a rack name, which is split on that character.
+
+    Distinct from SLUG_INVALID because the fix is different: one value is not a slug at all, the
+    other is a perfectly good slug that this tool cannot build a rack name from (Requirement 6.6).
+    """
 
     # S3 — intra-file consistency
     RACK_NAME_DISAGREES_WITH_COLUMNS = "RACK_NAME_DISAGREES_WITH_COLUMNS"
@@ -69,6 +78,8 @@ class Code(StrEnum):
     RU_RANGE_OVERLAP = "RU_RANGE_OVERLAP"
     DUPLICATE_TERMINATION_IN_FILE = "DUPLICATE_TERMINATION_IN_FILE"
     SAME_PORT_BOTH_ENDS = "SAME_PORT_BOTH_ENDS"
+    SLUG_INCONSISTENT_IN_FILE = "SLUG_INCONSISTENT_IN_FILE"
+    """One name given two different slugs by two rows. One object cannot hold both (Req 7.12)."""
 
     # S4 — cross-reference against NetBox
     RACK_NOT_FOUND = "RACK_NOT_FOUND"

@@ -54,8 +54,43 @@ def sheet(rows: list[dict[str, str]], filename: str = "hierarchy.csv"):
     )
 
 
+def legacy_sheet(rows: list[dict[str, str]]):
+    """The same sheet as it was written before the slug columns existed (decision D9)."""
+    specs = [spec for spec in columns_for("hierarchy") if not spec.key.endswith("_slug")]
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow([spec.label for spec in specs])
+    for row_values in rows:
+        writer.writerow([row_values.get(spec.key, "") for spec in specs])
+    payload = buffer.getvalue().encode("utf-8-sig")
+    return parse_upload(
+        "hierarchy",
+        filename="legacy.csv",
+        stream=io.BytesIO(payload),
+        size=len(payload),
+        content_type="text/csv",
+    )
+
+
 def row(**overrides: str) -> dict[str, str]:
     return {**BASE_ROW, **overrides}
+
+
+SLUGGED = {
+    "datacenter": "Example One",
+    "datacenter_slug": "exa1",
+    "datahall": "Example Hall One",
+    "datahall_slug": "dh1",
+}
+
+
+def slugged_row(**overrides: str) -> dict[str, str]:
+    """The D9 case: display names a human would write, and a rack name that stays short."""
+    return {**BASE_ROW, **SLUGGED, **overrides}
+
+
+def payload_for(planned, endpoint: str) -> dict:
+    return next(action.payload for action in planned.actions if action.endpoint == endpoint)
 
 
 def seed_hierarchy(netbox, **rack_fields):
@@ -230,7 +265,7 @@ class TestCellChecks:
         """Requirement 6.2."""
         plan = validate(importer, netbox, [row(rack="R01")])
         error = next(i for i in plan.verdict.errors if i.code is Code.RACK_NAME_MALFORMED)
-        assert "<datacenter>-<datahall>-<rack>" in error.expected
+        assert "<datacenter_slug>-<datahall_slug>-<rack>" in error.expected
 
     def test_every_problem_in_the_stage_is_reported_not_just_the_first(self, importer, netbox):
         """Requirement 10.3."""
@@ -260,13 +295,14 @@ class TestCellChecks:
 
 
 class TestConsistency:
-    def test_a_rack_name_disagreeing_with_its_own_columns_blocks(self, importer, netbox):
+    def test_a_rack_name_disagreeing_with_its_own_slugs_blocks(self, importer, netbox):
         """Requirement 6.3: state both values."""
         plan = validate(importer, netbox, [row(rack="EXA9-DH1-R01")])
         error = next(
             i for i in plan.verdict.errors if i.code is Code.RACK_NAME_DISAGREES_WITH_COLUMNS
         )
-        assert "EXA9" in error.message and "EXA1" in error.message
+        assert "EXA9" in error.message and "exa1" in error.message
+        assert error.expected == "exa1-dh1-R01"
 
     def test_a_duplicate_rack_names_the_earlier_row(self, importer, netbox):
         """Requirement 7.8."""
@@ -292,6 +328,156 @@ class TestConsistency:
         )
         error = next(i for i in plan.verdict.errors if i.code is Code.SLUG_COLLISION)
         assert "example-region" in error.message
+
+
+# --- D9: slugs supplied by the sheet --------------------------------------------------------
+
+
+class TestSuppliedSlugs:
+    """Task 18a. Requirements 6.3, 6.6, 7.3, 7.10-7.14.
+
+    The first test is the case the decision was taken for: two multi-word display names whose rack
+    name is still short, which deriving the slug from the name could not express.
+    """
+
+    def test_multi_word_names_keep_a_short_rack_name(self, importer, netbox):
+        plan = validate(importer, netbox, [slugged_row()])
+        assert plan.verdict.errors == []
+        assert plan.verdict.is_applyable() is True
+
+    def test_a_supplied_slug_reaches_the_payload_verbatim(self, importer, netbox):
+        """Requirement 7.10: the same value is used for the lookup and for what is created."""
+        plan = validate(importer, netbox, [slugged_row()])
+        site = payload_for(plan.rows[0], SITES)
+        hall = payload_for(plan.rows[0], LOCATIONS)
+        assert (site["name"], site["slug"]) == ("Example One", "exa1")
+        assert (hall["name"], hall["slug"]) == ("Example Hall One", "dh1")
+
+    def test_a_blank_slug_falls_back_to_the_derived_one(self, importer, netbox):
+        """Requirement 7.10, and the reason the columns are optional."""
+        plan = validate(importer, netbox, [row()])
+        assert payload_for(plan.rows[0], SITES)["slug"] == "exa1"
+        assert payload_for(plan.rows[0], LOCATIONS)["slug"] == "dh1"
+
+    def test_a_sheet_without_the_slug_columns_at_all_still_validates(self, importer, netbox):
+        """The regression that proves a pre-D9 sheet is untouched by the change."""
+        plan = importer.validate(legacy_sheet([row()]), Lookups(client=netbox))
+        assert plan.verdict.errors == []
+        assert payload_for(plan.rows[0], SITES)["slug"] == "exa1"
+
+    def test_a_derived_slug_containing_the_delimiter_is_reported_on_the_name(
+        self, importer, netbox
+    ):
+        """Requirement 7.11: the fix is to fill the slug column in, so the error points at the name.
+
+        Leaving the slug blank beside a multi-word name is the mistake this catches, and it is
+        caught in S2, before the rack name is ever compared against anything.
+        """
+        plan = validate(importer, netbox, [slugged_row(datacenter_slug="")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.SLUG_CONTAINS_DELIMITER)
+        assert error.column == "datacenter"
+        assert error.value == "example-one"
+        assert "'datacenter_slug'" in error.message
+        assert plan.verdict.stages_completed == ("S1", "S2")
+
+    def test_a_slug_outside_netboxs_charset_is_reported_on_the_slug_column(self, importer, netbox):
+        """Requirement 7.11: a value the operator typed is reported where they typed it."""
+        plan = validate(importer, netbox, [slugged_row(datacenter_slug="exa 1")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.SLUG_INVALID)
+        assert error.column == "datacenter_slug"
+
+    def test_one_name_given_two_slugs_names_the_earlier_row(self, importer, netbox):
+        """Requirement 7.12: one object cannot hold two slugs."""
+        plan = validate(
+            importer,
+            netbox,
+            [slugged_row(), slugged_row(datacenter_slug="exa2", rack="EXA2-DH1-R02")],
+        )
+        error = next(i for i in plan.verdict.errors if i.code is Code.SLUG_INCONSISTENT_IN_FILE)
+        assert (error.line, error.related_line) == (3, 2)
+        assert error.column == "datacenter_slug"
+        assert "exa1" in error.message and "exa2" in error.message
+
+    def test_two_names_given_one_slug_are_rejected_as_a_collision(self, importer, netbox):
+        """Requirement 7.12: NetBox would treat them as a single object."""
+        plan = validate(
+            importer,
+            netbox,
+            [slugged_row(), slugged_row(datacenter="Example Two", rack="EXA1-DH1-R02")],
+        )
+        error = next(i for i in plan.verdict.errors if i.code is Code.SLUG_COLLISION)
+        assert (error.line, error.related_line) == (3, 2)
+        assert "Example Two" in error.message and "Example One" in error.message
+
+    def test_the_same_datahall_slug_is_legal_under_a_second_datacenter(self, importer, netbox):
+        """Requirements 7.9, 7.12: a datahall is scoped to its site, and so is its slug."""
+        plan = validate(
+            importer,
+            netbox,
+            [
+                slugged_row(),
+                slugged_row(datacenter="Example Two", datacenter_slug="exa2", rack="EXA2-DH1-R01"),
+            ],
+        )
+        assert plan.verdict.errors == []
+        halls = [payload_for(planned, LOCATIONS)["slug"] for planned in plan.rows]
+        assert halls == ["dh1", "dh1"]
+
+    def test_a_row_is_looked_up_by_the_slug_it_states(self, importer, netbox):
+        """Requirement 11.1: the effective slug, not one derived from the name.
+
+        `Example One` would derive `example-one`, which matches nothing here. Finding the site at
+        all is what proves the stated slug was the key.
+        """
+        netbox.add(SITES, name="Example Uno", slug="exa1")
+        plan = validate(importer, netbox, [slugged_row()])
+        error = next(i for i in plan.verdict.errors if i.code is Code.SLUG_COLLISION)
+        assert "Example Uno" in error.message
+
+    def test_a_supplied_slug_that_disagrees_with_an_existing_object_blocks(self, importer, netbox):
+        """Requirement 7.13: iteration 1 cannot write the value the operator asserted."""
+        region = netbox.add(REGIONS, name="Example Region", slug="example-region")
+        netbox.add(
+            SITES,
+            name="Example One",
+            slug="exaone",
+            region={"id": region["id"], "name": "Example Region"},
+        )
+
+        plan = validate(importer, netbox, [slugged_row()])
+        assert plan.verdict.is_applyable() is False
+        error = next(
+            i
+            for i in plan.verdict.errors
+            if i.code is Code.EXISTS_BUT_DIFFERS and i.column == "datacenter_slug"
+        )
+        assert (error.value, error.expected) == ("exa1", "exaone")
+
+    def test_a_derived_slug_that_disagrees_with_an_existing_object_does_not_block(
+        self, importer, netbox
+    ):
+        """Requirement 7.14: the fallback is the tool's guess, not the operator's assertion.
+
+        An object created outside this tool has no reason to carry the slug this tool would have
+        derived, and blocking on that would reject rows that pass today.
+        """
+        region = netbox.add(REGIONS, name="Example Region", slug="example-region")
+        netbox.add(
+            SITES,
+            name="EXA1",
+            slug="exa1-site",
+            region={"id": region["id"], "name": "Example Region"},
+        )
+
+        plan = validate(importer, netbox, [row()])
+        assert plan.verdict.errors == []
+        assert not any(action.endpoint == SITES for action in plan.rows[0].actions)
+
+    def test_a_supplied_slug_is_created_with_the_casing_the_sheet_gave_it(self, importer, netbox):
+        """Assumption 8: NetBox accepts uppercase, and 6.4 keeps the supplied casing."""
+        plan = validate(importer, netbox, [slugged_row(datacenter_slug="EXA1")])
+        assert plan.verdict.errors == []
+        assert payload_for(plan.rows[0], SITES)["slug"] == "EXA1"
 
 
 # --- S4: what already exists ----------------------------------------------------------------

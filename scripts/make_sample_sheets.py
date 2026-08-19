@@ -69,7 +69,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HIERARCHY_COLUMNS = (
     "location",
     "datacenter",
+    # Decision D9: the rack name's first two segments are these slugs, not the two names, so a
+    # multi-word display name needs its slug column filled in.
+    "datacenter_slug",
     "datahall",
+    "datahall_slug",
     "rack",
     "rack_u_height",
     "rack_width",
@@ -120,10 +124,14 @@ CABLING_COLUMNS = (
 # --------------------------------------------------------------------------------------
 
 HIERARCHY_VALID = (
+    # The first three rows leave both slug columns blank, which is the pre-D9 sheet: a single-token
+    # name derives the slug the rack name already carries.
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB1-DH1-R01",
         "45",
         "19",
@@ -135,7 +143,9 @@ HIERARCHY_VALID = (
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB1-DH1-R02",
         "45",
         "19",
@@ -148,7 +158,9 @@ HIERARCHY_VALID = (
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH2",
+        "",
         "LAB1-DH2-R01",
         "45",
         "19",
@@ -157,18 +169,21 @@ HIERARCHY_VALID = (
         "",
         "new datahall under LAB1",
     ),
-    # New site under the same region: region is reused, site and datahall are created.
+    # New site under the same region, and the case D9 exists for: two multi-word display names
+    # whose rack name is still short, which only works because the slugs are supplied.
     (
         "Lab Region",
-        "LAB2",
-        "DH1",
+        "Lab Two",
+        "lab2",
+        "Data Hall One",
+        "dh1",
         "LAB2-DH1-R01",
         "42",
         "19",
         "planned",
         "4-post-cabinet",
         "",
-        "new site",
+        "new site, multi-word names with supplied slugs",
     ),
 )
 
@@ -176,7 +191,9 @@ HIERARCHY_INVALID = (
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB1-DH1-R09",
         "45",
         "19",
@@ -189,7 +206,9 @@ HIERARCHY_INVALID = (
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB1-R05",
         "45",
         "19",
@@ -197,12 +216,14 @@ HIERARCHY_INVALID = (
         "",
         "",
         "",
-        "malformed rack name: only two segments, expects <datacenter>-<datahall>-<rack>",
+        "malformed rack name: two segments, expects <datacenter_slug>-<datahall_slug>-<rack>",
     ),
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB9-DH1-R06",
         "45",
         "19",
@@ -210,12 +231,32 @@ HIERARCHY_INVALID = (
         "",
         "",
         "",
-        "rack name's datacenter segment (LAB9) disagrees with the datacenter column (LAB1)",
+        "rack name's first segment (LAB9) disagrees with this row's datacenter slug (lab1)",
+    ),
+    # D9: a multi-word name with the slug column left blank. The derived slug is `lab-three`, which
+    # contains the delimiter, and the error lands on the datacenter column because that is where the
+    # operator has to act — by filling datacenter_slug in.
+    (
+        "Lab Region",
+        "Lab Three",
+        "",
+        "DH1",
+        "",
+        "LAB3-DH1-R01",
+        "45",
+        "19",
+        "active",
+        "",
+        "",
+        "",
+        "multi-word datacenter with no slug: the derived slug contains the rack-name delimiter",
     ),
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB1-DH1-R07",
         "forty-five",
         "19",
@@ -228,7 +269,9 @@ HIERARCHY_INVALID = (
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB1-DH1-R09",
         "45",
         "19",
@@ -241,7 +284,9 @@ HIERARCHY_INVALID = (
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB1-DH1-R01",
         "12",
         "19",
@@ -255,7 +300,9 @@ HIERARCHY_INVALID = (
     (
         "Lab Region",
         "LAB1",
+        "",
         "DH1",
+        "",
         "LAB1-DH1-R08",
         "45",
         "19",
@@ -927,13 +974,14 @@ SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...
         "1_hierarchy_valid",
         HIERARCHY_COLUMNS,
         HIERARCHY_VALID,
-        "self-contained: creates the region, 2 sites, 3 datahalls and 4 racks on an empty instance",
+        "self-contained: creates the region, 2 sites, 3 datahalls and 4 racks on an empty "
+        "instance; the last row exercises supplied slugs (D9)",
     ),
     (
         "1_hierarchy_invalid",
         HIERARCHY_COLUMNS,
         HIERARCHY_INVALID,
-        "line 2 is valid; lines 3-8 each carry one fault, so the whole file must be blocked",
+        "line 2 is valid; lines 3-9 each carry one fault, so the whole file must be blocked",
     ),
     (
         "2_devices_valid",

@@ -24,7 +24,7 @@ def issue(**overrides) -> ValidationIssue:
         "line": 3,
         "column": "rack",
         "value": "EXA1_DH1",
-        "expected": "<datacenter>-<datahall>-<rack>",
+        "expected": "<datacenter_slug>-<datahall_slug>-<rack>",
         "message": "The rack name needs three segments.",
     }
     return ValidationIssue(**{**fields, **overrides})

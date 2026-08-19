@@ -1,8 +1,9 @@
-location,datacenter,datahall,rack,rack_u_height,rack_width,rack_status,rack_form_factor,tenant,description
-Lab Region,LAB1,DH1,LAB1-DH1-R09,45,19,active,,,
-Lab Region,LAB1,DH1,LAB1-R05,45,19,active,,,
-Lab Region,LAB1,DH1,LAB9-DH1-R06,45,19,active,,,
-Lab Region,LAB1,DH1,LAB1-DH1-R07,forty-five,19,active,,,
-Lab Region,LAB1,DH1,LAB1-DH1-R09,45,19,active,,,
-Lab Region,LAB1,DH1,LAB1-DH1-R01,12,19,active,,,
-Lab Region,LAB1,DH1,LAB1-DH1-R08,45,19,switched-on,,,
+location,datacenter,datacenter_slug,datahall,datahall_slug,rack,rack_u_height,rack_width,rack_status,rack_form_factor,tenant,description
+Lab Region,LAB1,,DH1,,LAB1-DH1-R09,45,19,active,,,
+Lab Region,LAB1,,DH1,,LAB1-R05,45,19,active,,,
+Lab Region,LAB1,,DH1,,LAB9-DH1-R06,45,19,active,,,
+Lab Region,Lab Three,,DH1,,LAB3-DH1-R01,45,19,active,,,
+Lab Region,LAB1,,DH1,,LAB1-DH1-R07,forty-five,19,active,,,
+Lab Region,LAB1,,DH1,,LAB1-DH1-R09,45,19,active,,,
+Lab Region,LAB1,,DH1,,LAB1-DH1-R01,12,19,active,,,
+Lab Region,LAB1,,DH1,,LAB1-DH1-R08,45,19,switched-on,,,

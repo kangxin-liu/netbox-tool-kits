@@ -3,8 +3,23 @@
 """Sheet 1 — one row per rack, creating the hierarchy above it (Requirement 7).
 
 The mapping is decision D1: `location` → `dcim.Region`, `datacenter` → `dcim.Site`, `datahall` →
-`dcim.Location`, and `rack` → `dcim.Rack`. NetBox requires a slug on the first three, and the sheet
-does not ask for one, so it is derived from the name (Requirement 7.3).
+`dcim.Location`, and `rack` → `dcim.Rack`. NetBox requires a slug on the first three.
+
+**Where those slugs come from (decision D9).** The datacenter's and the datahall's slugs are the
+rack name's first two segments, so the sheet supplies them in optional `datacenter_slug` and
+`datahall_slug` columns; a blank cell falls back to a slug derived from the name, which is what the
+tool always did and what keeps a sheet written before those columns valid. The region has no slug
+column, because a region's slug appears in no rack name and so in nothing the operator can see.
+
+Whichever way it was arrived at, one value — the *effective slug* of Requirement 7.10 — is used for
+the NetBox lookup, for the created object's `slug`, and for the rack-name agreement check, so those
+three readings of "the slug" cannot drift apart.
+
+The supplied-versus-derived distinction matters in exactly one place, and it is the crux of D9: a
+**supplied** slug that disagrees with an object already in NetBox blocks (Requirement 7.13, through
+the column's CONSEQUENTIAL classification), while a **derived** one does not (Requirement 7.14). The
+fallback is the tool's guess, and an object created outside this tool has no reason to match it;
+blocking on that would reject rows that pass today.
 
 This is the only importer that creates its own parents, which is why it works against a completely
 empty NetBox (Requirement 17.7). Parents are created before children because the child's payload
@@ -29,7 +44,7 @@ from importer.importers.base import (
     Registry,
     RowOutcome,
 )
-from importer.naming import derive_slug, parse_rack_name
+from importer.naming import build_rack_name, derive_slug, effective_slug, parse_rack_name
 from importer.services.lookups import Lookups
 from importer.services.sheets import Row
 from importer.validation import (
@@ -48,6 +63,27 @@ TENANTS = "tenancy.tenants"
 
 DEFAULT_WIDTH = 19
 DEFAULT_STATUS = "active"
+
+# The two levels whose slug a rack name is built from (D9), as (name column, slug column).
+SLUGGED_LEVELS: tuple[tuple[str, str], ...] = (
+    ("datacenter", "datacenter_slug"),
+    ("datahall", "datahall_slug"),
+)
+
+
+def row_slug(row: Row, name_column: str, slug_column: str) -> str:
+    """The effective slug for one level of one row (Requirement 7.10). May raise `RowError`."""
+    return effective_slug(
+        row.get(name_column),
+        row.get(slug_column),
+        column=slug_column,
+        name_column=name_column,
+    )
+
+
+def blame_column(row: Row, name_column: str, slug_column: str) -> str:
+    """Where a slug problem is reported: the cell the operator would have to edit (Req 7.11)."""
+    return slug_column if row.get(slug_column).strip() else name_column
 
 
 @dataclass
@@ -88,38 +124,61 @@ class HierarchyImporter(BaseImporter):
         except RowError as error:
             errors.append(error)
 
-        for key in ("location", "datacenter", "datahall"):
-            value = row.get(key)
-            if value and not derive_slug(value):
-                errors.append(
-                    RowError(
-                        Code.SLUG_NOT_DERIVABLE,
-                        column=key,
-                        value=value,
-                        expected="a name containing at least one letter or digit",
-                        message=(
-                            f"No URL-safe slug can be derived from {value!r}, and NetBox requires "
-                            f"one. Give it a name with letters or digits."
-                        ),
-                    )
+        # The region has no slug column, so its slug only has to exist: it is never part of a rack
+        # name, and nothing the operator reads depends on it (Requirement 7.3).
+        region = row.get("location")
+        if region and not derive_slug(region):
+            errors.append(
+                RowError(
+                    Code.SLUG_NOT_DERIVABLE,
+                    column="location",
+                    value=region,
+                    expected="a name containing at least one letter or digit",
+                    message=(
+                        f"No URL-safe slug can be derived from {region!r}, and NetBox requires "
+                        f"one. Give it a name with letters or digits."
+                    ),
                 )
+            )
+
+        # The other two carry the rack name's segments, so their slugs are validated in full
+        # (Requirements 6.6, 7.11). A blank name cell is already reported as a missing required
+        # value; complaining about its slug as well would be two errors for one mistake.
+        for name_column, slug_column in SLUGGED_LEVELS:
+            if not row.get(name_column).strip():
+                continue
+            try:
+                row_slug(row, name_column, slug_column)
+            except RowError as error:
+                errors.append(error)
         return errors
 
     # --- S3 ---------------------------------------------------------------------------------
 
     def check_consistency(self, rows: list[Row], collector: IssueCollector) -> None:
         seen_racks: dict[str, int] = {}
+        region_slugs: dict[str, tuple[str, int]] = {}
+        # Both directions of the name↔slug relationship, keyed by scope so that datahall slugs are
+        # compared within a datacenter rather than globally (Requirements 7.9, 7.12).
         slug_owners: dict[tuple[str, str], tuple[str, int]] = {}
+        name_slugs: dict[tuple[str, str], tuple[str, int]] = {}
 
         for row in rows:
             try:
                 rack_name = parse_rack_name(row.get("rack"))
+                slugs = {
+                    slug_column: row_slug(row, name_column, slug_column)
+                    for name_column, slug_column in SLUGGED_LEVELS
+                }
             except RowError:
                 continue  # already reported in S2
 
-            # Requirement 6.3: the rack name must agree with its own row.
+            datacenter_slug = slugs["datacenter_slug"]
+            datahall_slug = slugs["datahall_slug"]
+
+            # Requirement 6.3: the rack name must agree with its own row's slugs.
             if not rack_name.agrees_with(
-                datacenter=row.get("datacenter"), datahall=row.get("datahall")
+                datacenter_slug=datacenter_slug, datahall_slug=datahall_slug
             ):
                 collector.add(
                     Severity.ERROR,
@@ -127,13 +186,31 @@ class HierarchyImporter(BaseImporter):
                     line=row.line,
                     column="rack",
                     value=rack_name.raw,
-                    expected=(f"{row.get('datacenter')}-{row.get('datahall')}-{rack_name.rack}"),
+                    expected=build_rack_name(datacenter_slug, datahall_slug, rack_name.rack),
                     message=(
-                        f"Rack name {rack_name.raw!r} says datacenter "
-                        f"{rack_name.datacenter!r} and datahall {rack_name.datahall!r}, but this "
-                        f"row's columns say {row.get('datacenter')!r} and "
-                        f"{row.get('datahall')!r}. One of them is wrong."
+                        f"Rack name {rack_name.raw!r} says datacenter slug "
+                        f"{rack_name.datacenter!r} and datahall slug {rack_name.datahall!r}, but "
+                        f"this row's slugs are {datacenter_slug!r} and {datahall_slug!r}. One of "
+                        f"them is wrong."
                     ),
+                )
+
+            # Requirements 7.12: one name cannot hold two slugs, and two names cannot share one.
+            scopes = {
+                "datacenter_slug": "site",
+                "datahall_slug": f"location:{datacenter_slug.casefold()}",
+            }
+            for name_column, slug_column in SLUGGED_LEVELS:
+                self._check_slug_agreement(
+                    row=row,
+                    collector=collector,
+                    scope=scopes[slug_column],
+                    name=row.get(name_column).strip(),
+                    slug=slugs[slug_column],
+                    name_column=name_column,
+                    slug_column=slug_column,
+                    slug_owners=slug_owners,
+                    name_slugs=name_slugs,
                 )
 
             # Requirement 7.8: a duplicate rack name names the earlier row.
@@ -155,30 +232,90 @@ class HierarchyImporter(BaseImporter):
             else:
                 seen_racks[folded] = row.line
 
-            # Two differently spelled names that slug identically would collide inside NetBox, which
-            # would otherwise surface as an opaque 400 partway through the apply.
-            for kind, column in (("region", "location"), ("site", "datacenter")):
-                value = row.get(column)
-                if not value:
-                    continue
-                slug = derive_slug(value)
-                owner = slug_owners.get((kind, slug))
-                if owner is None:
-                    slug_owners[(kind, slug)] = (value, row.line)
-                elif owner[0].strip().casefold() != value.strip().casefold():
-                    collector.add(
-                        Severity.ERROR,
-                        Code.SLUG_COLLISION,
-                        line=row.line,
-                        column=column,
-                        value=value,
-                        expected=f"a name whose slug differs from {owner[0]!r}",
-                        message=(
-                            f"{value!r} and {owner[0]!r} (line {owner[1]}) both reduce to the slug "
-                            f"{slug!r}, so NetBox would treat them as one {kind}. Rename one."
-                        ),
-                        related_line=owner[1],
-                    )
+            # The region's slug is always derived, so two differently spelled names that slug
+            # identically would collide inside NetBox — an opaque 400 partway through the apply.
+            value = row.get("location").strip()
+            slug = derive_slug(value)
+            if not slug:
+                continue  # reported in S2 as an underivable slug
+            owner = region_slugs.get(slug)
+            if owner is None:
+                region_slugs[slug] = (value, row.line)
+            elif owner[0].casefold() != value.casefold():
+                collector.add(
+                    Severity.ERROR,
+                    Code.SLUG_COLLISION,
+                    line=row.line,
+                    column="location",
+                    value=value,
+                    expected=f"a name whose slug differs from {owner[0]!r}",
+                    message=(
+                        f"{value!r} and {owner[0]!r} (line {owner[1]}) both reduce to the slug "
+                        f"{slug!r}, so NetBox would treat them as one region. Rename one."
+                    ),
+                    related_line=owner[1],
+                )
+
+    def _check_slug_agreement(
+        self,
+        *,
+        row: Row,
+        collector: IssueCollector,
+        scope: str,
+        name: str,
+        slug: str,
+        name_column: str,
+        slug_column: str,
+        slug_owners: dict[tuple[str, str], tuple[str, int]],
+        name_slugs: dict[tuple[str, str], tuple[str, int]],
+    ) -> None:
+        """Requirement 7.12, both directions, for one level of one row.
+
+        A name given two slugs and a slug given two names are two spellings of the same mistake, and
+        catching them here is what stops the apply from either failing on NetBox's slug uniqueness
+        or quietly folding two rows into one object.
+        """
+        if not name:
+            return
+        folded_name, folded_slug = name.casefold(), slug.casefold()
+        column = blame_column(row, name_column, slug_column)
+
+        held = name_slugs.get((scope, folded_name))
+        if held is None:
+            name_slugs[(scope, folded_name)] = (slug, row.line)
+        elif held[0].casefold() != folded_slug:
+            collector.add(
+                Severity.ERROR,
+                Code.SLUG_INCONSISTENT_IN_FILE,
+                line=row.line,
+                column=column,
+                value=slug,
+                expected=held[0],
+                message=(
+                    f"{name!r} is given the slug {slug!r} here and {held[0]!r} on line {held[1]}. "
+                    f"One object cannot hold two slugs — make them agree."
+                ),
+                related_line=held[1],
+            )
+
+        owner = slug_owners.get((scope, folded_slug))
+        if owner is None:
+            slug_owners[(scope, folded_slug)] = (name, row.line)
+        elif owner[0].casefold() != folded_name:
+            collector.add(
+                Severity.ERROR,
+                Code.SLUG_COLLISION,
+                line=row.line,
+                column=column,
+                value=slug,
+                expected=f"a slug other than {slug!r}",
+                message=(
+                    f"{name!r} and {owner[0]!r} (line {owner[1]}) are both given the slug "
+                    f"{slug!r}, so NetBox would treat them as one object. Give one of them a "
+                    f"different slug."
+                ),
+                related_line=owner[1],
+            )
 
     # --- S4 ---------------------------------------------------------------------------------
 
@@ -196,10 +333,26 @@ class HierarchyImporter(BaseImporter):
         if tenants:
             lookups.prefetch(TENANTS, names=tenants)
 
-        # Slug collisions are found by slug, not by name, so the candidates have to be loaded too
-        # (Requirement 7.3).
-        for endpoint, values in ((REGIONS, regions), (SITES, sites), (LOCATIONS, halls)):
-            slugs = sorted({derive_slug(value) for value in values if value})
+        # Lookups happen by slug as well as by name, so those candidates have to be loaded too
+        # (Requirement 11.1) — by the *effective* slug for the two levels that have a column, so a
+        # sheet that states a slug is looked up by the slug it states.
+        region_slugs = {derive_slug(value) for value in regions if value}
+        supplied: dict[str, set[str]] = {SITES: set(), LOCATIONS: set()}
+        for row in rows:
+            for endpoint, (name_column, slug_column) in zip(
+                (SITES, LOCATIONS), SLUGGED_LEVELS, strict=True
+            ):
+                try:
+                    supplied[endpoint].add(row_slug(row, name_column, slug_column))
+                except RowError:
+                    continue  # S2 reported it; S4 would never be reached with it unresolved
+
+        for endpoint, values in (
+            (REGIONS, region_slugs),
+            (SITES, supplied[SITES]),
+            (LOCATIONS, supplied[LOCATIONS]),
+        ):
+            slugs = sorted(values - {""})
             if slugs:
                 lookups.prefetch(endpoint, slug__ie=slugs)
 
@@ -214,14 +367,18 @@ class HierarchyImporter(BaseImporter):
         planned = PlannedRow(line=row.line)
         try:
             rack_name = parse_rack_name(row.get("rack"))
+            # Resolved once and passed down, so the lookup, the payload, and the rack name are
+            # guaranteed to be talking about the same slug (Requirement 7.10).
+            site_slug = row_slug(row, "datacenter", "datacenter_slug")
+            hall_slug = row_slug(row, "datahall", "datahall_slug")
         except RowError as error:
             collector.add_row_error(error, row.line)
             planned.outcome = RowOutcome.BLOCKED
             return planned
 
         region = self._region(row, lookups, registry, state, collector, planned)
-        site = self._site(row, region, lookups, registry, state, collector, planned)
-        hall = self._location(row, site, lookups, registry, state, collector, planned)
+        site = self._site(row, region, site_slug, lookups, registry, state, collector, planned)
+        hall = self._location(row, site, hall_slug, lookups, registry, state, collector, planned)
         rack = self._rack(row, rack_name, site, hall, lookups, registry, state, collector, planned)
 
         for resolution in (region, site, hall, rack):
@@ -300,6 +457,7 @@ class HierarchyImporter(BaseImporter):
         self,
         row: Row,
         region: Resolution,
+        slug: str,
         lookups: Lookups,
         registry: Registry,
         state: dict[str, str],
@@ -307,12 +465,17 @@ class HierarchyImporter(BaseImporter):
         planned: PlannedRow,
     ) -> Resolution:
         name = row.get("datacenter").strip()
-        slug = derive_slug(name)
         resolution = Resolution(endpoint=SITES, key=Registry.key(slug), label=f"Site {name}")
 
         existing = lookups.get_or_none(SITES, name=name) or lookups.get_or_none(SITES, slug=slug)
         if existing is not None:
             if not self._slug_matches(existing, name, slug, "datacenter", row, collector, "site"):
+                planned.outcome = RowOutcome.BLOCKED
+                return resolution
+
+            if not self._supplied_slug_matches(
+                existing, "datacenter_slug", row, lookups, SITES, collector, "Site"
+            ):
                 planned.outcome = RowOutcome.BLOCKED
                 return resolution
 
@@ -364,6 +527,7 @@ class HierarchyImporter(BaseImporter):
         self,
         row: Row,
         site: Resolution,
+        slug: str,
         lookups: Lookups,
         registry: Registry,
         state: dict[str, str],
@@ -371,7 +535,6 @@ class HierarchyImporter(BaseImporter):
         planned: PlannedRow,
     ) -> Resolution:
         name = row.get("datahall").strip()
-        slug = derive_slug(name)
         site_id = site.object_id
         # Requirement 7.9: a datahall is scoped to its site, so the key carries the site.
         resolution = Resolution(
@@ -387,6 +550,18 @@ class HierarchyImporter(BaseImporter):
             else None
         )
         if existing is not None:
+            # Both checks are scoped to the site by the lookup above, which is what Requirement 7.9
+            # means for slugs: the same datahall slug under a second datacenter is a different room.
+            if not self._slug_matches(existing, name, slug, "datahall", row, collector, "datahall"):
+                planned.outcome = RowOutcome.BLOCKED
+                return resolution
+
+            if not self._supplied_slug_matches(
+                existing, "datahall_slug", row, lookups, LOCATIONS, collector, "Datahall"
+            ):
+                planned.outcome = RowOutcome.BLOCKED
+                return resolution
+
             resolution.existing = existing
             self._register(
                 state,
@@ -558,10 +733,15 @@ class HierarchyImporter(BaseImporter):
         collector: IssueCollector,
         kind: str,
     ) -> bool:
-        """Requirement 7.3: a derived slug that belongs to a differently named object blocks."""
+        """Requirement 7.3: this row's slug already belongs to a *differently named* object.
+
+        The other direction — this object exists and its slug is not the one the sheet asserted — is
+        `_supplied_slug_matches` below. Two questions, two answers: one says "that slug is taken",
+        the other says "that object does not have the slug you gave".
+        """
         if str(existing.get("name", "")).strip().casefold() == name.strip().casefold():
             return True
-        if str(existing.get("slug", "")) != slug:
+        if str(existing.get("slug", "")).casefold() != slug.casefold():
             return True
         collector.add(
             Severity.ERROR,
@@ -569,15 +749,46 @@ class HierarchyImporter(BaseImporter):
             line=row.line,
             column=column,
             value=name,
-            expected=f"a name that does not reduce to the slug {slug!r}",
+            expected=f"a name or slug other than {slug!r}",
             message=(
-                f"The slug derived from {name!r} is {slug!r}, which already belongs to the "
+                f"The slug for {name!r} is {slug!r}, which already belongs to the "
                 f"{kind} {existing.get('name')!r}. NetBox requires slugs to be unique, so this "
-                f"row would either fail or attach to the wrong object. Rename one of them."
+                f"row would either fail or attach to the wrong object. Rename one of them, or give "
+                f"this one its own slug."
             ),
             related_object=f"{kind} {existing.get('name')}",
         )
         return False
+
+    def _supplied_slug_matches(
+        self,
+        existing: dict[str, Any],
+        slug_column: str,
+        row: Row,
+        lookups: Lookups,
+        endpoint: str,
+        collector: IssueCollector,
+        kind: str,
+    ) -> bool:
+        """Requirement 7.13: a slug the sheet *stated* must be the one the matched object holds.
+
+        Only a supplied slug is compared. A derived one is the tool's guess, not the operator's
+        assertion, and an object created outside this tool has no reason to match it — blocking on
+        that would reject rows that pass today (Requirement 7.14). `compare_to_existing` enforces
+        the distinction for free by returning nothing for a blank cell, and the column's
+        CONSEQUENTIAL classification is what makes the difference an error rather than a warning.
+        """
+        conflict = compare_to_existing(
+            self.specs()[slug_column],
+            row.get(slug_column),
+            existing.get("slug"),
+            object_label=f"{kind} {existing.get('name')}",
+            related_url=self._url(lookups, endpoint, existing),
+        )
+        if conflict is None:
+            return True
+        collector.add_row_error(conflict, row.line)
+        return conflict.severity is not Severity.ERROR
 
     @staticmethod
     def _url(lookups: Lookups, endpoint: str, existing: dict[str, Any]) -> str:

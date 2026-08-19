@@ -56,10 +56,14 @@ def hierarchy_rows(*data: list[str]) -> bytes:
     return csv_bytes([header, *data])
 
 
+# Positional, against HIERARCHY_COLUMNS. The two slug cells are left blank on purpose: parsing has
+# no opinion about slugs, and a blank one exercises the derived fallback these tests predate (D9).
 VALID_HIERARCHY_ROW = [
     "Test Region",
     "TST1",
+    "",
     "DH1",
+    "",
     "TST1-DH1-R01",
     "45",
     "19",
@@ -308,7 +312,16 @@ class TestRows:
         assert codes(raised.value.issues) == [Code.NO_DATA_ROWS.value]
 
     def test_cells_are_trimmed_and_kept_as_text(self):
-        row = ["  Test Region  ", " TST1 ", "DH1", "TST1-DH1-R01", " 45 ", "", "", "", "", ""]
+        row = [
+            "  Test Region  ",
+            " TST1 ",
+            "",
+            "DH1",
+            "",
+            "TST1-DH1-R01",
+            " 45 ",
+            *[""] * 5,
+        ]
         parsed = parse("hierarchy", hierarchy_rows(row), "spaced.csv")
         assert parsed.rows[0].values["location"] == "Test Region"
         assert parsed.rows[0].values["rack_u_height"] == "45"
@@ -337,7 +350,12 @@ class TestXlsxSpecifics:
     def test_numeric_cells_do_not_arrive_as_floats(self):
         header = [spec.label for spec in columns_module.HIERARCHY_COLUMNS]
         payload = xlsx_bytes(
-            [header, ["Test Region", "TST1", "DH1", "TST1-DH1-R01", 45, 19, "active", "", "", ""]]
+            [
+                header,
+                # Numbers as numbers: openpyxl writes 45 and 19 as floats, and they must read back
+                # as the text the sheet meant.
+                ["Test Region", "TST1", "", "DH1", "", "TST1-DH1-R01", 45, 19, "active", *[""] * 3],
+            ]
         )
         parsed = parse("hierarchy", payload, "numbers.xlsx")
         assert parsed.rows[0].values["rack_u_height"] == "45"
@@ -378,7 +396,9 @@ class TestXlsxSpecifics:
                 [
                     "Test Region",
                     "TST1",
+                    "",
                     "DH1",
+                    "",
                     "TST1-DH1-R01",
                     "45",
                     "",
