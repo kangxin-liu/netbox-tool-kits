@@ -1,0 +1,161 @@
+{% extends "importer/base.html" %}
+{% comment %}Classification: INTERNAL. Shared shell for the three importer pages.
+
+Three stacked regions, so the operator never loses context: the template and upload form, the verdict
+banner with its issue list, and the plan preview with the apply control.
+
+A blocked file shows the first two regions and **no apply button at all** — absent rather than greyed
+out, because a disabled control invites a second look at whether it can be re-enabled. The endpoint
+refuses regardless (Requirement 10.6); this is just honesty in the UI.
+{% endcomment %}
+{% load static %}
+{% block title %}{{ page_title }} — netbox-tool-kits{% endblock %}
+
+{% block content %}
+<h1>{{ page_title }}</h1>
+<p class="blurb">{{ page_blurb }}</p>
+
+<section class="panel">
+  <h2>1. Start from a template</h2>
+  <p>
+    Both formats carry the same columns, a guidance line explaining each one, and a synthetic
+    example row. Replace the example row before uploading — it is refused as example data.
+  </p>
+  <p class="actions">
+    <a class="button" href="{% url 'importer:'|add:page|add:'_template_xlsx' %}">Download .xlsx</a>
+    <a class="button secondary" href="{% url 'importer:'|add:page|add:'_template_csv' %}">Download .csv</a>
+  </p>
+  <table class="columns">
+    <caption>Columns for this sheet</caption>
+    <thead>
+      <tr><th>Column</th><th>Required</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      {% for spec in column_specs %}
+      <tr>
+        <td><code>{{ spec.label }}</code></td>
+        <td>{% if spec.required %}required{% else %}optional{% endif %}</td>
+        <td>
+          {{ spec.help_text }}{% if spec.choices %}
+          <br><span class="muted">one of: {{ spec.choices|join:", " }}</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% if readiness %}
+<section class="panel">
+  <h2>Prerequisites in NetBox</h2>
+  {% if readiness.note %}
+  <p class="muted">{{ readiness.note }}</p>
+  {% endif %}
+
+  {% for blocker in readiness.blockers %}
+  <p class="banner banner-error inline-banner" role="alert">{{ blocker }}</p>
+  {% endfor %}
+
+  {% if readiness.facts %}
+  <table class="columns">
+    <caption>Read-only check — nothing here creates anything in NetBox</caption>
+    <tbody>
+      {% for fact in readiness.facts %}
+      <tr>
+        <td>{{ fact.label }}</td>
+        <td class="level-{{ fact.level }}">{{ fact.value }}</td>
+        <td>{{ fact.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="panel">
+  <h2>2. Upload and validate</h2>
+  <p>
+    Validation reads NetBox and writes nothing. Rack names follow
+    <code>&lt;datacenter&gt;-&lt;datahall&gt;-&lt;rack&gt;</code>, for example
+    <code>EXA1-DH1-R01</code>, and that name is the join key between all three sheets.
+  </p>
+  <form method="post" enctype="multipart/form-data"
+        action="{% url 'importer:'|add:page|add:'_validate' %}" class="upload">
+    {% csrf_token %}
+    <label for="sheet">Filled-in sheet</label>
+    <input type="file" name="sheet" id="sheet" accept="{{ accepted }}" required>
+    <button type="submit" class="button">Validate</button>
+  </form>
+  {% if not connection.can_import %}
+  <p class="muted">
+    Validation is refused while the target is unusable: {{ connection.detail }}
+  </p>
+  {% endif %}
+</section>
+
+{% if expired_run %}
+<section class="panel">
+  <h2>3. Verdict</h2>
+  <p class="banner banner-warn inline-banner" role="status">
+    The plan validated for <code>{{ expired_run.filename }}</code> is no longer being held, so it
+    cannot be applied. Its report is kept as
+    <a href="{% url 'importer:run_detail' expired_run.pk %}">run {{ expired_run.pk }}</a>.
+    Upload the file again to apply it.
+  </p>
+</section>
+{% endif %}
+
+{% if verdict %}
+<section class="panel">
+  <h2>3. Verdict</h2>
+  {% include "importer/_verdict_banner.html" %}
+
+  {% if verdict.needs_acknowledgement and not verdict.errors %}
+  <form method="post" action="{% url 'importer:'|add:page|add:'_ack' %}" class="ack">
+    {% csrf_token %}
+    <p>
+      {{ verdict.warnings|length }} warning{{ verdict.warnings|length|pluralize }} need
+      acknowledging. NetBox's existing values will be left exactly as they are — nothing is updated.
+    </p>
+    <button type="submit" class="button secondary">Acknowledge {{ verdict.warnings|length }} warning{{ verdict.warnings|length|pluralize }}</button>
+  </form>
+  {% endif %}
+
+  {% include "importer/_issue_list.html" %}
+</section>
+
+{% if plan %}
+<section class="panel">
+  <h2>4. Plan</h2>
+  {% include "importer/_preview_table.html" %}
+
+  {% if held.applyable %}
+  <form method="post" action="{% url 'importer:'|add:page|add:'_apply' %}" class="apply"
+        id="apply-form">
+    {% csrf_token %}
+    <input type="hidden" name="fingerprint" value="{{ verdict.fingerprint }}">
+    <p class="apply-warning">
+      This creates {{ verdict.object_count }} object{{ verdict.object_count|pluralize }} in NetBox at
+      <code>{{ connection.host }}</code>, from {{ verdict.create_count }} row{{ verdict.create_count|pluralize }}.
+      Nothing this tool creates can be rolled back by this tool.
+    </p>
+    <button type="submit" class="button danger" id="apply-button"
+            data-busy-label="Applying — do not navigate away…">
+      Apply {{ verdict.object_count }} create{{ verdict.object_count|pluralize }}
+    </button>
+    <span class="busy" id="apply-busy" hidden role="status">Applying — do not navigate away…</span>
+  </form>
+  {% else %}
+  <p class="muted">
+    No apply control: {{ refusal }}
+  </p>
+  {% endif %}
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/apply.js' %}" defer></script>
+{% endblock %}

@@ -174,25 +174,37 @@ def scratch_device_type(nb: NetBox) -> tuple[int, int, int] | None:
 
 
 def run_experiment(nb: NetBox) -> None:
-    print(f"baseline : tenants={nb.count('tenancy/tenants')} racks={nb.count('dcim/racks')} "
-          f"devices={nb.count('dcim/devices')}\n")
+    print(
+        f"baseline : tenants={nb.count('tenancy/tenants')} racks={nb.count('dcim/racks')} "
+        f"devices={nb.count('dcim/devices')}\n"
+    )
 
     verdicts = []
 
     print("TEST A  field-level error: item 2 of 3 is missing a required 'name'")
-    status, body = nb.post("tenancy/tenants", [
-        {"name": f"{PREFIX}A1", "slug": "zz-d7-a1"},
-        {"slug": "zz-d7-a2"},
-        {"name": f"{PREFIX}A3", "slug": "zz-d7-a3"},
-    ])
-    verdicts.append(report("A", status, body, [t["name"] for t in nb.find_prefixed("tenancy/tenants")]))
+    status, body = nb.post(
+        "tenancy/tenants",
+        [
+            {"name": f"{PREFIX}A1", "slug": "zz-d7-a1"},
+            {"slug": "zz-d7-a2"},
+            {"name": f"{PREFIX}A3", "slug": "zz-d7-a3"},
+        ],
+    )
+    verdicts.append(
+        report("A", status, body, [t["name"] for t in nb.find_prefixed("tenancy/tenants")])
+    )
 
     print("\nTEST B  deferred DB constraint: two items in one list share a slug")
-    status, body = nb.post("tenancy/tenants", [
-        {"name": f"{PREFIX}B1", "slug": "zz-d7-dup"},
-        {"name": f"{PREFIX}B2", "slug": "zz-d7-dup"},
-    ])
-    verdicts.append(report("B", status, body, [t["name"] for t in nb.find_prefixed("tenancy/tenants")]))
+    status, body = nb.post(
+        "tenancy/tenants",
+        [
+            {"name": f"{PREFIX}B1", "slug": "zz-d7-dup"},
+            {"name": f"{PREFIX}B2", "slug": "zz-d7-dup"},
+        ],
+    )
+    verdicts.append(
+        report("B", status, body, [t["name"] for t in nb.find_prefixed("tenancy/tenants")])
+    )
 
     ids = scratch_device_type(nb)
     if ids is None:
@@ -202,32 +214,50 @@ def run_experiment(nb: NetBox) -> None:
     site_id, type_id, role_id = ids
 
     print("\nTEST C  model clean() error: two devices claim the same rack unit")
-    status, rack = nb.post("dcim/racks", {
-        "name": f"{PREFIX}RACK", "site": site_id, "u_height": 45, "status": "active",
-    })
+    status, rack = nb.post(
+        "dcim/racks",
+        {
+            "name": f"{PREFIX}RACK",
+            "site": site_id,
+            "u_height": 45,
+            "status": "active",
+        },
+    )
     if status != 201:
         raise SystemExit(f"could not create the scratch rack: HTTP {status} {rack}")
     rack_id = rack["id"]
 
     def device(name: str, position: int) -> dict:
         return {
-            "name": f"{PREFIX}{name}", "device_type": type_id, "role": role_id, "site": site_id,
-            "rack": rack_id, "position": position, "face": "front", "status": "active",
+            "name": f"{PREFIX}{name}",
+            "device_type": type_id,
+            "role": role_id,
+            "site": site_id,
+            "rack": rack_id,
+            "position": position,
+            "face": "front",
+            "status": "active",
         }
 
     status, body = nb.post("dcim/devices", [device("C1", 10), device("C2", 10)])
-    verdicts.append(report("C", status, body, [d["name"] for d in nb.find_prefixed("dcim/devices")]))
+    verdicts.append(
+        report("C", status, body, [d["name"] for d in nb.find_prefixed("dcim/devices")])
+    )
 
     print("\nCONTROL  an all-valid list of two devices must create both")
     status, _ = nb.post("dcim/devices", [device("OK1", 20), device("OK2", 22)])
     made = sorted(d["name"] for d in nb.find_prefixed("dcim/devices"))
     control_ok = status == 201 and len(made) == 2
     print(f"   response : HTTP {status}, created {made}")
-    print(f"   VERDICT  : {'as expected' if control_ok else 'UNEXPECTED — the tests above prove nothing'}")
+    verdict = "as expected" if control_ok else "UNEXPECTED — the tests above prove nothing"
+    print(f"   VERDICT  : {verdict}")
 
     print("\n" + "=" * 78)
     if not control_ok:
-        print("INCONCLUSIVE: the control failed, so the rollbacks above may be unrelated to atomicity.")
+        print(
+            "INCONCLUSIVE: the control failed, so the rollbacks above "
+            "may be unrelated to atomicity."
+        )
     elif all(verdicts):
         print("BULK CREATE IS ATOMIC: every failure class rolled the whole list back.")
         print("Apply may group creates by endpoint and send one bulk POST each.")
@@ -261,7 +291,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--apply", action="store_true", help="actually run it (default is a dry run)")
+    parser.add_argument(
+        "--apply", action="store_true", help="actually run it (default is a dry run)"
+    )
     parser.add_argument("--allow-remote", action="store_true", help="permit a non-loopback target")
     args = parser.parse_args()
 

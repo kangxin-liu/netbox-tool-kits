@@ -94,9 +94,7 @@ class Panel:
     def add_rear(self, name: str, port_type: str, positions: int = 1) -> None:
         self.rear.append({"name": name, "type": port_type, "positions": positions})
 
-    def add_front(
-        self, name: str, port_type: str, rear_name: str, rear_position: int = 1
-    ) -> None:
+    def add_front(self, name: str, port_type: str, rear_name: str, rear_position: int = 1) -> None:
         self.front.append(
             {
                 "name": name,
@@ -203,7 +201,9 @@ class NetBox:
         page = self.get(f"/api/dcim/{endpoint}/", device_type_id=device_type_id, limit=500)
         while True:
             names.update(
-                item["name"] for item in page.get("results", []) if self.owned_by(item, device_type_id)
+                item["name"]
+                for item in page.get("results", [])
+                if self.owned_by(item, device_type_id)
             )
             nxt = page.get("next")
             if not nxt:
@@ -249,7 +249,10 @@ def seed_switches(nb: NetBox, naming: str, verbose: bool) -> None:
             )
         nb.skipped += len(planned) - len(todo)
         summary = ", ".join(f"{c}x {t}" for c, t in groups)
-        print(f"  {model:<34} {len(todo):>3} to create, {len(planned) - len(todo):>3} present  [{summary}]")
+        print(
+            f"  {model:<34} {len(todo):>3} to create, "
+            f"{len(planned) - len(todo):>3} present  [{summary}]"
+        )
         if verbose and todo:
             print(f"      {todo[0][0]} .. {todo[-1][0]}")
 
@@ -284,7 +287,9 @@ def seed_panels(nb: NetBox, verbose: bool) -> None:
         # the same reason as in existing_names: mapping a front port to another device type's rear
         # port would be silently wrong.
         if nb.apply:
-            for item in nb.get("/api/dcim/rear-port-templates/", device_type_id=dt_id, limit=500).get("results", []):
+            for item in nb.get(
+                "/api/dcim/rear-port-templates/", device_type_id=dt_id, limit=500
+            ).get("results", []):
                 if nb.owned_by(item, dt_id):
                     rear_ids[item["name"]] = item["id"]
 
@@ -349,7 +354,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--apply", action="store_true", help="actually write (default is a dry run)")
+    parser.add_argument(
+        "--apply", action="store_true", help="actually write (default is a dry run)"
+    )
     parser.add_argument("--naming", choices=sorted(NAMING_SCHEMES), default="cumulus")
     parser.add_argument("--allow-remote", action="store_true", help="permit a non-loopback target")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -373,7 +380,8 @@ def main() -> int:
     print("\nPatch panel front/rear port templates:")
     seed_panels(nb, args.verbose)
 
-    print(f"\n{'created' if args.apply else 'would create'}: {nb.created}   already present: {nb.skipped}")
+    verb = "created" if args.apply else "would create"
+    print(f"\n{verb}: {nb.created}   already present: {nb.skipped}")
     if not args.apply:
         print("\nDry run only — nothing was written. Re-run with --apply to commit.")
     else:

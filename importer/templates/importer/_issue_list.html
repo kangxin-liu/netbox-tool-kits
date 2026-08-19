@@ -1,0 +1,64 @@
+{% comment %}Classification: INTERNAL. AI-assisted (Cursor) — review before merge.
+
+Issues grouped by severity then line, each stating file, sheet, line, column, what was received, and
+what was expected (Requirement 16.1). The per-code tally comes first, so one systemic mistake reads as
+one problem with a count rather than as hundreds of separate ones (Requirement 16.8).
+
+Every value is autoescaped: these strings come from a spreadsheet and from NetBox, and neither is
+trusted to be safe HTML (Requirement 14.4).
+{% endcomment %}
+{% if issue_report.total %}
+<div class="issues">
+  <table class="codes">
+    <caption>Issues by code — {{ issue_report.total }} in total</caption>
+    <tbody>
+      {% for code, count in issue_report.code_counts %}
+      <tr><td><code>{{ code }}</code></td><td class="tally">{{ count }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if issue_report.truncated %}
+  <p class="banner banner-warn inline-banner" role="status">{{ issue_report.truncation_notice }}</p>
+  {% endif %}
+
+  {% if run %}
+  <p class="actions">
+    <a class="button secondary" href="{% url 'importer:run_issues' run.pk %}">Download all issues (.csv)</a>
+  </p>
+  {% endif %}
+
+  {% for group in issue_report.groups %}
+  <section class="severity severity-{{ group.severity }}">
+    <h3>{{ group.severity|capfirst }} — {{ group.total }}</h3>
+    {% for line_group in group.lines %}
+    <div class="issue-line">
+      <h4>{{ line_group.label|capfirst }}</h4>
+      {% for issue in line_group.issues %}
+      <div class="issue">
+        <p class="issue-head">
+          <code class="issue-code">{{ issue.code }}</code>
+          <span class="issue-where">{{ issue.location }}</span>
+        </p>
+        <p class="issue-values">
+          received <code>{{ issue.value|default:"(blank)" }}</code>,
+          expected <code>{{ issue.expected|default:"—" }}</code>
+        </p>
+        <p class="issue-message">{{ issue.message }}</p>
+        {% if issue.related_line %}
+        <p class="muted">Also involves line {{ issue.related_line }}.</p>
+        {% endif %}
+        {% if issue.related_object %}
+        <p class="muted">
+          Existing object: {{ issue.related_object }}{% if issue.related_url %}
+          — <a href="{{ issue.related_url }}" rel="noreferrer noopener">open in NetBox</a>{% endif %}
+        </p>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </section>
+  {% endfor %}
+</div>
+{% endif %}

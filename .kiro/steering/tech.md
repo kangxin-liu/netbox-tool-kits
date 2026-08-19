@@ -81,7 +81,7 @@ pip install -r requirements.txt
 cp .env.example .env          # then fill in locally
 python manage.py migrate
 python manage.py createsuperuser
-python manage.py runserver
+python manage.py runserver     # serves 8080; 8000 is the local NetBox
 pytest
 ruff check . && ruff format --check .
 ```

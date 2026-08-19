@@ -1,0 +1,94 @@
+{% extends "importer/base.html" %}
+{% comment %}Classification: INTERNAL. AI-assisted (Cursor) — review before merge.
+
+One run: what it was, what it did, and — stated plainly rather than implied — what the guarantee is
+and is not (Requirement 12.5). If a run aborted partway, the endpoints that completed and the objects
+they created are listed, because that list is what a manual unwind works from (Requirement 12.4).
+{% endcomment %}
+{% block title %}Run {{ run.pk }} — netbox-tool-kits{% endblock %}
+
+{% block content %}
+<h1>Run {{ run.pk }} — {{ run.importer }}</h1>
+<p class="blurb">
+  <code>{{ run.filename }}</code>, uploaded by {{ run.user.get_username }} at
+  {{ run.started_at|date:"Y-m-d H:i" }}, against NetBox {{ run.netbox_version }} on
+  <code>{{ run.netbox_host }}</code>.
+</p>
+
+<section class="panel">
+  <h2>Outcome</h2>
+  <div class="verdict verdict-{{ run.verdict }}">
+    <p class="verdict-headline">{{ run.get_verdict_display }}</p>
+    <ul class="verdict-counts">
+      <li><strong>{{ run.row_count }}</strong> data row{{ run.row_count|pluralize }}</li>
+      <li><strong>{{ run.created_count }}</strong> created</li>
+      <li><strong>{{ run.skipped_count }}</strong> already present</li>
+      <li><strong>{{ run.blocked_count }}</strong> blocked</li>
+      <li><strong>{{ run.error_count }}</strong> error{{ run.error_count|pluralize }}</li>
+      <li><strong>{{ run.warning_count }}</strong> warning{{ run.warning_count|pluralize }}</li>
+    </ul>
+    <p class="muted">
+      Stages reached: {{ run.stages|join:", "|default:"none" }}.
+      Warnings acknowledged: {% if run.warnings_acknowledged %}yes{% else %}no{% endif %}.
+      Fingerprint <code>{{ run.file_fingerprint|slice:":16" }}</code>.
+    </p>
+    {% if run.aborted_reason %}
+    <p class="verdict-refusal">{{ run.aborted_reason }}</p>
+    {% endif %}
+  </div>
+
+  {% if run.was_applied or results %}
+  <p class="guarantee">{{ guarantee }}</p>
+  {% if endpoints_completed %}
+  <p class="muted">Endpoints applied in full: {{ endpoints_completed|join:", " }}.</p>
+  {% endif %}
+  {% if run.replayed %}
+  <p class="banner banner-warn inline-banner">
+    NetBox rejected a batch with an error it did not attribute to any one item, so that batch was
+    re-sent row by row to find the offending line. Rows before it were therefore created
+    individually rather than as one all-or-nothing list.
+  </p>
+  {% endif %}
+  {% endif %}
+</section>
+
+{% if results %}
+<section class="panel">
+  <h2>Rows</h2>
+  <p class="actions">
+    <a class="button secondary" href="{% url 'importer:run_report' run.pk %}">Download report (.csv)</a>
+  </p>
+  <table class="results">
+    <caption>What happened to each row, in apply order</caption>
+    <thead>
+      <tr><th>#</th><th>Line</th><th>Outcome</th><th>Object</th><th>Detail</th></tr>
+    </thead>
+    <tbody>
+      {% for result in results %}
+      <tr class="outcome-{{ result.outcome }}">
+        <td class="line">{{ result.sequence|default:"—" }}</td>
+        <td class="line">{{ result.line }}</td>
+        <td><span class="pill pill-{{ result.outcome }}">{{ result.outcome }}</span></td>
+        <td>
+          {% if result.url %}
+          <a href="{{ result.url }}" rel="noreferrer noopener">{{ result.object_name }}</a>
+          {% else %}{{ result.object_name|default:"—" }}{% endif %}
+          {% if result.object_type %}<span class="muted">{{ result.object_type }}</span>{% endif %}
+        </td>
+        <td>
+          {% if result.column %}<code>{{ result.column }}</code> {% endif %}{{ result.message }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if issue_report.total %}
+<section class="panel">
+  <h2>Validation report</h2>
+  {% include "importer/_issue_list.html" %}
+</section>
+{% endif %}
+{% endblock %}

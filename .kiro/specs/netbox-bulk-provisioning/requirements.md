@@ -114,6 +114,9 @@ so that I do not have to guess column names or ordering.
 5. WHEN the example row is left in place and uploaded unchanged, THEN the system SHALL flag it as
  example data and refuse to import it rather than creating objects named after the examples.
 6. Template downloads SHALL contain no real site, device, serial, or customer values.
+7. The per-column guidance SHALL occupy line 2 of the template and SHALL carry a marker in its
+ first cell that the parser recognises, so that guidance can be left in place without being read as
+ a data row (see Requirement 5.11).
 
 ## Requirement 5: Upload and parsing
 
@@ -134,11 +137,14 @@ safely, so that a malformed or oversized file cannot break the tool.
 6. The system SHALL ignore unrecognised columns and report them as informational warnings.
 7. The system SHALL treat every cell as untrusted text: trimming whitespace, coercing types
  explicitly, and never rendering cell content as HTML.
-8. The system SHALL skip fully blank rows silently and SHALL stop parsing at the first blank row
- only if all subsequent rows are also blank.
+8. The system SHALL skip fully blank rows silently wherever they occur, so that a blank row in the
+ middle of a sheet does not truncate the import and trailing blank rows do not appear in the report.
 9. WHEN a file is rejected or an import finishes, THEN the system SHALL delete any temporary copy
  of the upload, including on the error path.
 10. The system SHALL NOT store uploaded files in any web-served directory.
+11. The system SHALL skip the template's per-column guidance row — line 2 of a generated template,
+ identified by its leading marker — without treating it as data, so that a template filled in below
+ the guidance can be uploaded as downloaded.
 
 ## Requirement 6: Rack naming convention
 
@@ -168,14 +174,19 @@ step.
 ### Acceptance Criteria
 
 Sheet columns — required: `location`, `datacenter`, `datahall`, `rack`, `rack_u_height`.
-Optional: `rack_width`, `rack_status`, `rack_type`, `tenant`, `description`.
+Optional: `rack_width`, `rack_status`, `rack_form_factor`, `tenant`, `description`.
+
+The column is `rack_form_factor`, not `rack_type`: NetBox 4.2 renamed `Rack.type` to
+`Rack.form_factor` and gave `rack_type` to a foreign key pointing at the separate `RackType` model.
+A column named `rack_type` carrying `4-post-cabinet` would therefore be aimed at the wrong field.
 
 1. The system SHALL accept one row per rack, with the location, datacenter, and datahall values
  repeated across the rows that share them.
 2. WHEN a row's location, datacenter, or datahall does not exist in NetBox, THEN the system SHALL
  create it, creating parents before children in the order region → site → location.
-3. The system SHALL derive a URL-safe slug for created regions and sites from their name, and
- SHALL reject a row whose derived slug collides with a different existing object.
+3. The system SHALL derive a URL-safe slug for every created region, site, and datahall location
+ from its name, since NetBox requires a slug on all three, and SHALL reject a row whose derived slug
+ collides with a different existing object.
 4. WHEN creating a site, THEN the system SHALL assign it to the region created or matched for
  that row; WHEN creating a datahall, THEN the system SHALL assign it to that site.
 5. WHEN creating a rack, THEN the system SHALL set its site and its datahall location, and SHALL
@@ -234,9 +245,14 @@ terminations, so that connectivity is recorded without tracing each link by hand
 
 ### Acceptance Criteria
 
-Sheet columns — required: `a_end`, `a_end_kind`, `a_port`, `b_end`, `b_end_kind`, `b_port`,
-`cable_type`. Optional: `a_port_side`, `b_port_side`, `cable_status`, `label`, `length`,
+Sheet columns — required: `a_end`, `a_port`, `b_end`, `b_port`, `cable_type`. Optional:
+`a_end_kind`, `b_end_kind`, `a_port_side`, `b_port_side`, `cable_status`, `label`, `length`,
 `length_unit`, `color`.
+
+`a_end_kind` and `b_end_kind` are optional because 9.1 gives them a default. An earlier draft listed
+them as required, which contradicted that default: a required column's blank cell is rejected before
+any default can apply, so the default would have been unreachable. They are optional with a
+documented default, like every other column that has one.
 
 Transceiver recording is **deferred to iteration 2** — see decision D3.
 
@@ -343,7 +359,7 @@ can finish a partial import without creating duplicates.
 5a. IF the differing value is **descriptive** — one that nothing else in the import depends on —
  THEN the system SHALL raise a WARNING that the operator must acknowledge before applying, rather
  than blocking. Descriptive fields are: `description`, `status`, `tenant`, `serial`, `asset_tag`,
- `rack_type`, and a cable's `label`, `color`, `length`, and `length_unit`.
+ `rack_form_factor`, and a cable's `label`, `color`, `length`, and `length_unit`.
 5b. WHEN comparing a sheet value against NetBox, the system SHALL compare structured values —
  identifiers, slugs, integers, and choice values — exactly, and SHALL compare free text after
  trimming and collapsing whitespace and folding case, so that a difference of presentation alone is
@@ -504,6 +520,11 @@ rather than to appear broken.
  a device type template using the 4.5+ `rear_ports` mapping format. The cabling importer does not
  create panels.
 6. Rack names are globally unique in practice because they embed the datacenter and datahall.
+7. NetBox field names are taken from the target instance rather than from memory. Two 4.x renames
+ caught during spec verification against 4.6.8 are worth naming, because a sheet column pointed at
+ the old name would fail or, worse, hit a different field: `Rack.type` became `Rack.form_factor` in
+ 4.2 (`rack_type` is now a foreign key to the `RackType` model), and `dcim.Location` requires a
+ `slug` just as regions and sites do.
 
 ## Decisions
 

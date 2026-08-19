@@ -1,0 +1,13 @@
+# Classification: INTERNAL
+# Pinned deliberately: see .kiro/steering/tech.md. Django stays on the 5.2 LTS line;
+# 5.2.7 was the first patch to declare Python 3.14 support, which is the local interpreter.
+Django==5.2.17
+pynetbox==7.8.0
+openpyxl==3.1.5
+python-dotenv==1.1.1
+
+# --- development / test only ---
+pytest==8.4.2
+pytest-django==4.11.1
+responses==0.26.2
+ruff==0.14.4

@@ -1,0 +1,74 @@
+{% comment %}Classification: INTERNAL. AI-assisted (Cursor) — review before merge.
+
+The nav bar and the target banner. Every value here is autoescaped by Django; nothing on this page
+is built from raw sheet or NetBox content, and the API token is not available to the template
+context at all (Requirements 2.4, 14.1, 14.4).
+{% endcomment %}{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}NetBox tool kits{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body>
+{% if user.is_authenticated %}
+<header class="topbar">
+  <nav class="nav" aria-label="Importers">
+    <span class="brand">netbox-tool-kits</span>
+    <a href="{% url 'importer:hierarchy' %}" {% if page == 'hierarchy' %}class="active" aria-current="page"{% endif %}>Hierarchy</a>
+    <a href="{% url 'importer:devices' %}" {% if page == 'devices' %}class="active" aria-current="page"{% endif %}>Devices</a>
+    <a href="{% url 'importer:cabling' %}" {% if page == 'cabling' %}class="active" aria-current="page"{% endif %}>Cabling</a>
+    <a href="{% url 'importer:runs' %}" {% if page == 'runs' %}class="active" aria-current="page"{% endif %}>History</a>
+  </nav>
+  <div class="session">
+    <span class="target" title="Target NetBox instance">{{ netbox_display }}</span>
+    {% if connection %}
+    <span class="status status-{% if connection.can_import %}ok{% elif connection.reachable %}warn{% else %}error{% endif %}"
+          title="{{ connection.detail }}">{{ connection.label }}</span>
+    {% endif %}
+    <span class="who">{{ user.get_username }}</span>
+    <form method="post" action="{% url 'logout' %}" class="inline">
+      {% csrf_token %}
+      <button type="submit" class="linkish">Log out</button>
+    </form>
+  </div>
+</header>
+
+{% if netbox_loopback_dev %}
+<p class="banner banner-dev" role="status">
+  Development target: plaintext <code>http://</code> to loopback host <code>{{ netbox_host }}</code>.
+  Permitted for local NetBox only.
+</p>
+{% endif %}
+{% if not netbox_verify_ssl %}
+<p class="banner banner-warn" role="alert">
+  TLS certificate verification is <strong>disabled</strong> for {{ netbox_display }}. Lab use only.
+</p>
+{% endif %}
+
+{% if connection and not connection.reachable %}
+<p class="banner banner-error" role="alert">
+  Cannot reach NetBox at <code>{{ connection.host }}</code> — failure category
+  <strong>{{ connection.category.value }}</strong>. {{ connection.detail }}
+  Importing is disabled until this is fixed.
+</p>
+{% elif connection and not connection.version_supported %}
+<p class="banner banner-error" role="alert">
+  {{ connection.detail }} Importing is disabled.
+</p>
+{% endif %}
+{% endif %}
+
+{% if messages %}
+{% for message in messages %}
+<p class="banner banner-{{ message.tags }}" role="status">{{ message }}</p>
+{% endfor %}
+{% endif %}
+
+<main>
+  {% block content %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

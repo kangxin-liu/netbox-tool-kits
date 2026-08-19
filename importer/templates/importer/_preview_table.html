@@ -1,0 +1,34 @@
+{% comment %}Classification: INTERNAL. AI-assisted (Cursor) — review before merge.
+
+The plan, one row per spreadsheet line: the line number as Excel shows it, what will happen to that
+row, what its references resolved to, and any issues attached to it (Requirement 10.18).
+
+`blocked` appears on every row of a file that has any error, including rows that are individually
+fine, because there is no partial apply (Requirement 10.7).
+{% endcomment %}
+{% if plan.rows %}
+<table class="preview">
+  <caption>What each row will do</caption>
+  <thead>
+    <tr><th>Line</th><th>Outcome</th><th>Resolved</th><th>Issues</th></tr>
+  </thead>
+  <tbody>
+    {% for row in plan.rows %}
+    <tr class="outcome-{{ row.outcome }}">
+      <td class="line">{{ row.line }}</td>
+      <td><span class="pill pill-{{ row.outcome }}">{{ row.outcome }}</span></td>
+      <td class="resolved">
+        {% for name, value in row.resolved.items %}
+        <span class="resolved-item"><span class="muted">{{ name }}</span> {{ value }}</span>
+        {% empty %}<span class="muted">—</span>{% endfor %}
+      </td>
+      <td class="row-issues">
+        {% for issue in row.issues %}
+        <div><code>{{ issue.code }}</code> {{ issue.message }}</div>
+        {% empty %}<span class="muted">—</span>{% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}

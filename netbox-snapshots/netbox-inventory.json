@@ -3,7 +3,7 @@
   "classification": "CONFIDENTIAL",
   "source": {
     "netbox_version": "4.6.8",
-    "exported_at": "2026-08-18T08:55:07.531548+00:00",
+    "exported_at": "2026-08-19T02:56:30.996809+00:00",
     "scope": "core tenancy, DCIM, cabling, and basic IPAM inventory"
   },
   "endpoints": [
@@ -43,7 +43,7 @@
           "custom_fields": {},
           "created": "2026-08-18T06:41:06.974238Z",
           "last_updated": "2026-08-18T06:41:06.974249Z",
-          "site_count": 1,
+          "site_count": 2,
           "prefix_count": 0,
           "owner": null,
           "comments": "",
@@ -70,6 +70,33 @@
           "custom_fields": {},
           "created": "2026-08-18T06:41:50.283659Z",
           "last_updated": "2026-08-18T06:41:50.283671Z",
+          "site_count": 1,
+          "prefix_count": 0,
+          "owner": null,
+          "comments": "",
+          "_depth": 1
+        },
+        {
+          "id": 3,
+          "url": "http://localhost:8000/api/dcim/regions/3/",
+          "display_url": "http://localhost:8000/dcim/regions/3/",
+          "display": "VICTORIA",
+          "name": "VICTORIA",
+          "slug": "victoria",
+          "parent": {
+            "id": 1,
+            "url": "http://localhost:8000/api/dcim/regions/1/",
+            "display_url": "http://localhost:8000/dcim/regions/1/",
+            "display": "Australia",
+            "name": "Australia",
+            "slug": "australia",
+            "_depth": 0
+          },
+          "description": "",
+          "tags": [],
+          "custom_fields": {},
+          "created": "2026-08-19T02:55:18.065740Z",
+          "last_updated": "2026-08-19T02:55:18.065748Z",
           "site_count": 1,
           "prefix_count": 0,
           "owner": null,
@@ -128,6 +155,50 @@
           "rack_count": 0,
           "virtualmachine_count": 0,
           "vlan_count": 0
+        },
+        {
+          "id": 2,
+          "url": "http://localhost:8000/api/dcim/sites/2/",
+          "display_url": "http://localhost:8000/dcim/sites/2/",
+          "display": "MEL01 - BK2",
+          "name": "MEL01 - BK2",
+          "slug": "mel01",
+          "status": {
+            "value": "active",
+            "label": "Active"
+          },
+          "region": {
+            "id": 3,
+            "url": "http://localhost:8000/api/dcim/regions/3/",
+            "display": "VICTORIA",
+            "name": "VICTORIA",
+            "slug": "victoria",
+            "description": "",
+            "site_count": 0,
+            "_depth": 1
+          },
+          "group": null,
+          "tenant": null,
+          "facility": "",
+          "time_zone": null,
+          "description": "",
+          "physical_address": "",
+          "shipping_address": "",
+          "latitude": null,
+          "longitude": null,
+          "owner": null,
+          "comments": "",
+          "asns": [],
+          "tags": [],
+          "custom_fields": {},
+          "created": "2026-08-19T02:55:38.249610Z",
+          "last_updated": "2026-08-19T02:55:38.249617Z",
+          "circuit_count": 0,
+          "device_count": 0,
+          "prefix_count": 0,
+          "rack_count": 0,
+          "virtualmachine_count": 0,
+          "vlan_count": 0
         }
       ]
     },
@@ -161,6 +232,40 @@
           "custom_fields": {},
           "created": "2026-08-18T06:43:09.667310Z",
           "last_updated": "2026-08-18T06:43:09.667319Z",
+          "rack_count": 0,
+          "device_count": 0,
+          "prefix_count": 0,
+          "owner": null,
+          "comments": "",
+          "_depth": 0
+        },
+        {
+          "id": 2,
+          "url": "http://localhost:8000/api/dcim/locations/2/",
+          "display_url": "http://localhost:8000/dcim/locations/2/",
+          "display": "MEL01-DH22",
+          "name": "MEL01-DH22",
+          "slug": "mel01-dh22",
+          "site": {
+            "id": 2,
+            "url": "http://localhost:8000/api/dcim/sites/2/",
+            "display": "MEL01 - BK2",
+            "name": "MEL01 - BK2",
+            "slug": "mel01",
+            "description": ""
+          },
+          "parent": null,
+          "status": {
+            "value": "active",
+            "label": "Active"
+          },
+          "tenant": null,
+          "facility": "",
+          "description": "",
+          "tags": [],
+          "custom_fields": {},
+          "created": "2026-08-19T02:55:58.327196Z",
+          "last_updated": "2026-08-19T02:55:58.327205Z",
           "rack_count": 0,
           "device_count": 0,
           "prefix_count": 0,
@@ -12784,5 +12889,5 @@
       "records": []
     }
   ],
-  "sha256": "7352b27f5c16cc0a4e568954664ce52a99718c403a6a0eb548f3773dca29113a"
+  "sha256": "4f4423b153ff1e890cf74243e6c54be91b3056c7b7cf6f65f3102c1fbf601762"
 }

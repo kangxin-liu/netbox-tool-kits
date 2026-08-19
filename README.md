@@ -33,8 +33,32 @@ the first write, aborting with nothing written if anything changed in the meanti
 
 ## Status
 
-**Spec only — no application code yet.** The design lives in `.kiro/` and is meant to be reviewed
-before implementation starts:
+**Usable end to end, not yet hardened.** Phases 1–6 of
+`.kiro/specs/netbox-bulk-provisioning/tasks.md` are built:
+
+- **Foundation (1–7).** The Django project and its fail-fast environment configuration, superuser-only
+  access with audited logins, the three-page nav shell, the shared column contract, template downloads
+  in both formats, and upload parsing.
+- **NetBox access (8–10).** A client that classifies every failure into something actionable, redacts
+  the token from anything it raises or logs, and refuses at the transport layer to issue any method
+  other than GET, OPTIONS, or POST. A caching lookup layer that keeps a 2,000-row sheet to a handful
+  of requests, a read-only readiness panel per page, and the rack naming convention in one module.
+- **Validation and the three importers (11–15).** The five-stage pipeline and the verdict that gates
+  apply, plus the hierarchy, device, and cabling importers. All three validate and plan; apply issues
+  one bulk POST per endpoint, and refuses outright unless the verdict is clean.
+- **The operator flow (16–18).** Upload, verdict, issue report, plan preview, and apply, all in the
+  browser. The validated plan is held server-side and applied only through the gate: a blocked file
+  renders no apply button and a direct POST is answered with 409 and the reason. Every attempt —
+  including a refused one — is recorded in a read-only run history with a per-row report and CSV
+  downloads.
+
+**What is not wired up yet:** phase 7 (tasks 19–22) is hardening and handover — the progress state for
+very large sheets, the security regression suite, the deploy check, and the operator runbook for
+preparing an empty NetBox.
+
+The suite is 659 tests and runs in about fifteen seconds, with no live NetBox and no sockets.
+
+The design lives in `.kiro/`:
 
 ```
 .kiro/
@@ -55,21 +79,34 @@ assumed: bulk creates are atomic on NetBox 4.6.8, so apply issues one bulk POST 
 "exists but differs" conflict by field — blocking when the difference invalidates later rows,
 warning when it cannot. Transceiver recording (D3, D6) is deferred to iteration 2.
 
+Field names in the spec were checked against the target instance's own `OPTIONS` responses on NetBox
+4.6.8 before any importer was written — see "Verified against the target instance" in `design.md`.
+That caught the hierarchy sheet aiming its form-factor column at `Rack.type`, a field NetBox renamed
+in 4.2, where `rack_type` now belongs to a foreign key pointing at a different model.
+
 Every write in iteration 1 is the creation of a new object. There is no code path that updates or
 deletes anything, and the test suite asserts no `PATCH`, `PUT`, or `DELETE` is ever issued.
 
-## Getting started (once Phase 1 of `tasks.md` is built)
+## Getting started
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # then fill in your NetBox URL and token
+cp .env.example .env          # then fill in your NetBox URL and token, and generate a secret key
 python manage.py migrate
 python manage.py createsuperuser
-python manage.py runserver
+python manage.py runserver          # http://127.0.0.1:8080/
 ```
 
+`runserver` serves **8080**, not Django's usual 8000, because 8000 is where a local NetBox listens.
+Pass an address to override it: `python manage.py runserver 9000`.
+
 Authentication is a single local Django superuser. There is no registration flow and no SSO.
+
+The app refuses to start when `NETBOX_URL`, `NETBOX_TOKEN`, or `DJANGO_SECRET_KEY` is missing, and
+names the variable rather than falling back to a default nobody chose. It also refuses an `http://`
+NetBox URL unless the host is loopback, so the plaintext exception cannot be pointed at a shared
+instance.
 
 ## Configuration
 
@@ -90,5 +127,15 @@ ruff check . && ruff format --check .
 python manage.py check --deploy   # must be clean before anyone else uses it
 ```
 
-Tests never contact a live NetBox instance — HTTP is stubbed. Fixtures are synthetic only: no
-production site names, serials, or customer identifiers.
+Tests never contact a live NetBox instance, and an autouse fixture fails any test that tries to open
+a socket. HTTP is stubbed with `responses` for the client and lookup layers; importer tests run against
+`FakeNetBox`, an in-memory instance that reproduces the API behaviours which change outcomes — ignored
+query parameters, atomic list POSTs, and injectable failures.
+
+The view tests drive the real forms through Django's test client against `FakeNetBox`, so a request
+that should never write is checked by asserting the fake received no POST at all. `test_apply_gate.py`
+is the file to read first: it tries a forged POST on a blocked plan, a stale fingerprint, an expired
+verdict, unacknowledged warnings, a second apply, and a NetBox that moved after validation, and every
+one of them ends with zero writes.
+
+Fixtures are synthetic only: no production site names, serials, or customer identifiers.

@@ -201,7 +201,7 @@ class NetBox:
         self.context = (
             ssl.create_default_context()
             if settings.verify_ssl
-            else ssl._create_unverified_context()  # noqa: SLF001 - explicit lab-only escape hatch
+            else ssl._create_unverified_context()
         )
         self._writable_fields: dict[str, set[str]] = {}
 
@@ -231,7 +231,9 @@ class NetBox:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout, context=self.context) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout, context=self.context
+            ) as response:
                 return json.load(response) if response.status != 204 else None
         except urllib.error.HTTPError as exc:
             if allow_not_found and exc.code == 404:
@@ -246,9 +248,7 @@ class NetBox:
         return self.request("GET", "/api/status/")
 
     def all(self, endpoint: str, *, allow_not_found: bool = False) -> list[dict[str, Any]] | None:
-        page = self.request(
-            "GET", f"/api/{endpoint}/?limit=500", allow_not_found=allow_not_found
-        )
+        page = self.request("GET", f"/api/{endpoint}/?limit=500", allow_not_found=allow_not_found)
         if page is None:
             return None
         records: list[dict[str, Any]] = []
@@ -393,7 +393,11 @@ class Restorer:
         for entry in snapshot["endpoints"]:
             endpoint = entry.get("path")
             records = entry.get("records")
-            if endpoint not in ENDPOINTS or endpoint in seen_endpoints or not isinstance(records, list):
+            if (
+                endpoint not in ENDPOINTS
+                or endpoint in seen_endpoints
+                or not isinstance(records, list)
+            ):
                 raise SnapshotError(f"Invalid or duplicate endpoint in snapshot: {endpoint!r}")
             seen_endpoints.add(endpoint)
             for record in records:
@@ -436,7 +440,9 @@ class Restorer:
         if isinstance(value.get("object_type"), str) and isinstance(value.get("object_id"), int):
             object_endpoint = OBJECT_TYPE_ENDPOINTS.get(value["object_type"])
             if object_endpoint is None:
-                raise SnapshotError(f"Unsupported generic relationship type: {value['object_type']}")
+                raise SnapshotError(
+                    f"Unsupported generic relationship type: {value['object_type']}"
+                )
             return {
                 "object_type": value["object_type"],
                 "object_id": self.map_reference(object_endpoint, value["object_id"]),
@@ -454,9 +460,7 @@ class Restorer:
                 )
                 normalized[key_name] = self.map_reference(rear_endpoint, nested)
             else:
-                normalized[key_name] = self.normalize(
-                    nested, endpoint=endpoint, field=key_name
-                )
+                normalized[key_name] = self.normalize(nested, endpoint=endpoint, field=key_name)
         return normalized
 
     def payload(
@@ -480,9 +484,7 @@ class Restorer:
                 if old_id is not None and isinstance(object_type, str):
                     object_endpoint = OBJECT_TYPE_ENDPOINTS.get(object_type)
                     if object_endpoint is None:
-                        raise SnapshotError(
-                            f"Unsupported generic relationship type: {object_type}"
-                        )
+                        raise SnapshotError(f"Unsupported generic relationship type: {object_type}")
                     payload[field] = self.map_reference(object_endpoint, old_id)
                     continue
             payload[field] = self.normalize(record[field], endpoint=endpoint, field=field)
@@ -613,7 +615,8 @@ class Restorer:
             suffix = " ..." if len(nonempty) > 8 else ""
             raise SnapshotError(
                 f"Target is not empty: {details}{suffix}. "
-                "Use a fresh target or pass --merge to map matching objects and create missing ones."
+                "Use a fresh target or pass --merge to map matching objects "
+                "and create missing ones."
             )
         # Device creation can automatically materialise interfaces and other components from its
         # type's templates. Do not retain the preflight's empty component caches into the apply

@@ -26,11 +26,7 @@ class FakeNetBox:
 
 
 def snapshot(*entries: tuple[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    return {
-        "endpoints": [
-            {"path": endpoint, "records": records} for endpoint, records in entries
-        ]
-    }
+    return {"endpoints": [{"path": endpoint, "records": records} for endpoint, records in entries]}
 
 
 class RestorerTests(unittest.TestCase):

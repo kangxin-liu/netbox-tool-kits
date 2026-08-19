@@ -1,0 +1,223 @@
+# Classification: INTERNAL
+# AI-assisted (Cursor) — review before merge.
+"""An in-memory stand-in for NetBox, for testing importers rather than HTTP.
+
+`test_netbox_client.py` covers the real transport with stubbed HTTP. Above that layer the
+interesting behaviour is what the importers *decide*, so this double implements the client's
+surface and records what was posted. It deliberately reproduces two real behaviours of NetBox 4.6.8:
+
+* an unrecognised query parameter is ignored rather than rejected, so a filter this fake does not
+  understand returns every record — the same trap the lookup cache guards against;
+* a list POST is atomic: if the batch is rejected, nothing in it is stored;
+* an endpoint's choices are fetched once and then cached, as `NetBoxClient` caches them, so a
+  request-budget assertion measures the importer rather than the double.
+
+All data is synthetic: example names, no real hosts, no credentials.
+"""
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from importer.services.netbox_client import NetBoxStatus, NetBoxWriteRejected
+
+# Enough of NetBox's OPTIONS choices for the sheets to validate against, spelled as NetBox spells
+# them (Requirement 7.7 reads these from the API in production).
+CHOICES: dict[str, dict[str, frozenset[str]]] = {
+    "dcim.racks": {
+        "status": frozenset({"reserved", "available", "planned", "active", "deprecated"}),
+        "width": frozenset({"10", "19", "21", "23"}),
+        "form_factor": frozenset(
+            {
+                "2-post-frame",
+                "4-post-frame",
+                "4-post-cabinet",
+                "wall-frame",
+                "wall-frame-vertical",
+                "wall-cabinet",
+                "wall-cabinet-vertical",
+            }
+        ),
+    },
+    "dcim.devices": {
+        "status": frozenset(
+            {"offline", "active", "planned", "staged", "failed", "inventory", "decommissioning"}
+        ),
+        "face": frozenset({"front", "rear"}),
+    },
+    "dcim.cables": {
+        "type": frozenset(
+            {
+                "cat6",
+                "cat6a",
+                "mmf-om3",
+                "mmf-om4",
+                "smf-os2",
+                "dac-passive",
+                "aoc",
+                "power",
+            }
+        ),
+        "status": frozenset({"connected", "planned", "decommissioning"}),
+        "length_unit": frozenset({"km", "m", "cm", "mi", "ft", "in"}),
+    },
+}
+
+
+@dataclass
+class Post:
+    endpoint: str
+    payloads: list[dict[str, Any]]
+
+    @property
+    def size(self) -> int:
+        return len(self.payloads)
+
+
+@dataclass
+class FakeNetBox:
+    """The `NetBoxClient` surface, in memory."""
+
+    objects: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    version: str = "4.6.8"
+    host: str = "netbox.example.com"
+    posts: list[Post] = field(default_factory=list)
+    rejections: dict[str, Callable[[list[dict[str, Any]]], Any]] = field(default_factory=dict)
+    unavailable_on: dict[str, Exception] = field(default_factory=dict)
+    """Endpoint → transport failure raised on *writes*, for mid-apply abort tests."""
+    unavailable_on_read: dict[str, Exception] = field(default_factory=dict)
+    request_count: int = 0
+    _next_id: int = 1000
+    _choices_fetched: set[str] = field(default_factory=set)
+
+    # --- test-side helpers ------------------------------------------------------------------
+
+    def add(self, endpoint: str, **fields: Any) -> dict[str, Any]:
+        record = {"id": self._take_id(), **fields}
+        self.objects.setdefault(endpoint, []).append(record)
+        return record
+
+    def reject(self, endpoint: str, decide: Callable[[list[dict[str, Any]]], Any]) -> None:
+        """`decide(payloads)` returns None to accept, or `(status, body)` to reject."""
+        self.rejections[endpoint] = decide
+
+    def stored(self, endpoint: str) -> list[dict[str, Any]]:
+        return list(self.objects.get(endpoint, []))
+
+    def posted(self, endpoint: str) -> list[Post]:
+        return [post for post in self.posts if post.endpoint == endpoint]
+
+    def _take_id(self) -> int:
+        self._next_id += 1
+        return self._next_id
+
+    # --- the client surface -----------------------------------------------------------------
+
+    def status(self, *, refresh: bool = False) -> NetBoxStatus:
+        return NetBoxStatus(version=self.version, host=self.host, supported=True)
+
+    def get_all(self, endpoint: str, **filters: Any) -> list[dict[str, Any]]:
+        self.request_count += 1
+        if endpoint in self.unavailable_on_read:
+            raise self.unavailable_on_read[endpoint]
+        records = self.objects.get(endpoint, [])
+        return [record for record in records if self._matches(record, filters)]
+
+    def count(self, endpoint: str, **filters: Any) -> int:
+        return len(self.get_all(endpoint, **filters))
+
+    def choices_for(self, endpoint: str, field_name: str) -> frozenset[str]:
+        if endpoint not in self._choices_fetched:
+            # One OPTIONS request per endpoint for the life of the client, as the real one does.
+            self._choices_fetched.add(endpoint)
+            self.request_count += 1
+        return CHOICES.get(endpoint, {}).get(field_name, frozenset())
+
+    def create(self, endpoint: str, payload: dict | list[dict]) -> list[dict[str, Any]]:
+        self.request_count += 1
+        payloads = payload if isinstance(payload, list) else [payload]
+        self.posts.append(Post(endpoint=endpoint, payloads=[dict(item) for item in payloads]))
+
+        if endpoint in self.unavailable_on:
+            raise self.unavailable_on[endpoint]
+
+        decide = self.rejections.get(endpoint)
+        if decide is not None:
+            verdict = decide(payloads)
+            if verdict is not None:
+                status, body = verdict
+                # Atomic: a rejected batch stores nothing (decision D7).
+                raise NetBoxWriteRejected(status, body, endpoint)
+
+        created: list[dict[str, Any]] = []
+        for item in payloads:
+            record = {"id": self._take_id(), **self._expand(item)}
+            self.objects.setdefault(endpoint, []).append(record)
+            created.append(record)
+        return created
+
+    def object_url(self, endpoint: str, object_id: int) -> str:
+        app, _, name = endpoint.partition(".")
+        return f"https://{self.host}/{app}/{name}/{object_id}/"
+
+    # --- filtering, faithful to NetBox's quirks ---------------------------------------------
+
+    def _matches(self, record: dict[str, Any], filters: dict[str, Any]) -> bool:
+        for name, wanted in filters.items():
+            values = wanted if isinstance(wanted, list) else [wanted]
+            if name.endswith("__ie"):
+                field_name = name.removesuffix("__ie")
+                held = str(record.get(field_name, "")).casefold()
+                if held not in {str(value).casefold() for value in values}:
+                    return False
+            elif name.endswith("_id"):
+                field_name = name.removesuffix("_id")
+                related = record.get(field_name)
+                held = related.get("id") if isinstance(related, dict) else related
+                if held not in {int(value) for value in values}:
+                    return False
+            # Anything else is ignored, exactly as NetBox ignores an unrecognised parameter: the
+            # response comes back unfiltered rather than as an error.
+        return True
+
+    def _expand(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Turn submitted ids into the nested briefs NetBox returns, so reads look realistic."""
+        expanded: dict[str, Any] = {}
+        for name, value in payload.items():
+            if name in {
+                "site",
+                "region",
+                "location",
+                "rack",
+                "tenant",
+                "device",
+                "device_type",
+                "role",
+            }:
+                expanded[name] = self._brief(name, value)
+            else:
+                expanded[name] = value
+        return expanded
+
+    def _brief(self, name: str, value: Any) -> Any:
+        if not isinstance(value, int):
+            return value
+        endpoint = {
+            "site": "dcim.sites",
+            "region": "dcim.regions",
+            "location": "dcim.locations",
+            "rack": "dcim.racks",
+            "tenant": "tenancy.tenants",
+            "device": "dcim.devices",
+            "device_type": "dcim.device-types",
+            "role": "dcim.device-roles",
+        }[name]
+        for record in self.objects.get(endpoint, []):
+            if record.get("id") == value:
+                return {
+                    "id": value,
+                    "name": record.get("name"),
+                    "slug": record.get("slug"),
+                    "model": record.get("model"),
+                }
+        return {"id": value}

@@ -23,8 +23,10 @@ prevent.
 The app holds no copy of NetBox's inventory. Its only persistent data is the local user table and
 an audit log of what each run submitted. NetBox stays the system of record.
 
-Design status: **draft, pending review.** Open decisions D1–D5 in `requirements.md` are resolved
-below with recommended defaults; changing one changes only the module named in its row.
+Design status: **verified against NetBox 4.6.8 on 2026-08-18, implementation under way.** Every
+decision D1–D8 in `requirements.md` is settled; each one's blast radius if reversed is named in the
+table below. Field names in this document were checked against the target instance's own
+`OPTIONS` responses rather than from memory — see "Verified against the target instance".
 
 ## Architecture
 
@@ -234,6 +236,30 @@ netbox-branching would allow the entire import to be staged in a branch and merg
 endpoints, closing the residual window above. Neither is assumed here; netbox-branching would need a
 licence review first.
 
+## Verified against the target instance
+
+Field names, required fields, and choice values below were read from the target's own `OPTIONS`
+responses on NetBox 4.6.8 (2026-08-18) before any importer was written, because a column aimed at a
+renamed field fails at apply time — after the operator has been told the file is clean.
+
+| Checked | Result |
+| --- | --- |
+| Rack enumerated form factor | `form_factor`, **not** `type`. `rack_type` is a foreign key to the `RackType` model, so a `4-post-cabinet` string sent there would be rejected as an invalid id |
+| `Rack.width` choices | `10, 19, 21, 23` — matches the sheet definition |
+| `Rack.status` choices | `reserved, available, planned, active, deprecated` |
+| Required on create | region/site/location: `name` + `slug` (location also `site`); rack: `name` + `site`; device: `device_type` + `role` + `site`; cable: nothing |
+| `dcim.Location` slug | **required**, same as regions and sites — the spec previously derived slugs for regions and sites only |
+| `Device.face` choices | `front, rear` |
+| `Cable.type` choices | includes `cat6`, `cat6a`, `mmf-om4`, `smf-os2`, `dac-passive` as the sheet examples assume |
+| `Cable.status` / `length_unit` | `connected, planned, decommissioning` / `km, m, cm, mi, ft, in` |
+| Front-port mapping format | `rear_ports: [{position, rear_port, rear_port_position}]`, the 4.5+ shape — confirmed by `scripts/seed_netbox.py` running against it |
+
+Two things the live instance has that iteration 1 deliberately does not use: `Cable.profile` (cable
+profiles, which is how NetBox 4.5+ expresses breakout) and `Cable.tenant`. The sample sheets in
+`samples/` carry a `cable_profile` column left over from earlier exploration; like `transceiver`, it
+is reported as an unrecognised column and ignored (Requirement 5.6). Adopting cable profiles is an
+iteration 2 decision, not an oversight.
+
 ## Data classification and flow
 
 | Store / flow | Classification | Handling |
@@ -264,12 +290,12 @@ OWASP Top 10 baseline, scoped to what this app actually does.
 | --- | --- | --- | --- | --- |
 | T1 | Token disclosure | Token echoed in a debug page, log line, or audit record | Env-only; `DEBUG=false`; explicit redaction in the error formatter; audit schema has no token field | 2.4, 12.7, 14.1 |
 | T2 | Broken access control | Unauthenticated or non-superuser reaching an importer | `login_required` + superuser test on every view; default-deny mixin on the base view class | 1.2, 1.3 |
-| T3 | Unauthorised bulk write (CSRF) | Forged POST applying a plan | CSRF token required; apply is POST-only; plan bound to the session that created it | 10.6, 10.8, 14.3 |
+| T3 | Unauthorised bulk write (CSRF) | Forged POST applying a plan | CSRF token required; apply is POST-only; plan bound to the session that created it | 10.6, 10.17, 14.3 |
 | T4 | Malicious upload | Zip-bomb / huge xlsx, formula injection, spoofed extension | Size cap before parse; extension + content-type allow-list; `openpyxl` read-only, values not formulas | 5.1, 5.2, 5.3 |
 | T5 | Stored XSS via cell content | A cell containing markup rendered into the preview table | Django autoescaping; no `mark_safe` on sheet or NetBox values | 5.7, 14.4 |
 | T6 | Destructive mistake at scale | A wrong sheet mass-creating objects | Create-only (never update/delete); mandatory preview; explicit confirm; idempotent skip | 10.1, 10.4, 11.3 |
 | T7 | MITM on the NetBox path | Downgraded or unverified TLS | HTTPS only, verification on by default; override warns loudly in logs and UI | 2.3, 14.5 |
-| T8 | CSV injection in exported reports | Report cell beginning `=`/`+`/`-`/`@` executing in Excel | Prefix formula-leading values with `'` when writing report CSVs | 12.6 |
+| T8 | CSV injection in exported reports | Report cell beginning `=`/`+`/`-`/`@` executing in Excel | Prefix formula-leading values with `'` when writing report CSVs | 12.6, 16.9 |
 | T9 | Repudiation | No record of who ran a bulk change | Durable `ImportRun` per apply, UI-immutable, with actor and counts | 13.1, 13.5 |
 | T10 | Partial-write confusion | Aborted run leaves NetBox half-populated and operator misled | Ordered record of applied creates; UI states rollback is not possible | 12.4, 12.5 |
 
@@ -313,6 +339,7 @@ class ColumnSpec:
     help_text: str                # rendered into the template guidance row
     choices: tuple[str, ...] = () # drives xlsx picklists and validation
     example: str = ""             # synthetic sample value
+    numeric: bool = False         # compare as a number rather than as text
 
 HIERARCHY_COLUMNS: tuple[ColumnSpec, ...]
 DEVICE_COLUMNS: tuple[ColumnSpec, ...]
@@ -326,7 +353,7 @@ than a match. Everything else is a judgement call the author of the column has t
 | `CONSEQUENTIAL` — blocks | `DESCRIPTIVE` — warns |
 | --- | --- |
 | a site's region, a location's site and parent, a region's parent | `description` |
-| `rack_u_height`, `rack_width` | `rack_status`, `rack_type`, `status` |
+| `rack_u_height`, `rack_width` | `rack_status`, `rack_form_factor`, `status` |
 | a device's `rack`, `bottom_ru`, `rack_face`, `model` | `tenant`, `serial`, `asset_tag` |
 | a cable's `cable_type` | a cable's `label`, `color`, `length`, `length_unit` |
 
@@ -334,7 +361,13 @@ Comparison is asymmetric by type: identifiers, slugs, integers, and choice value
 exactly, while free text is trimmed, whitespace-collapsed, and case-folded first, so `spine row A`
 and `Spine Row A` are the same description and not a conflict (Req 11.5b).
 
-### `naming.py` — rack name convention
+`numeric` is declared per column rather than sniffed from the value. NetBox returns `19.0` where the
+sheet says `19`, and those agree — but only for columns that are genuinely numbers. Inferring it from
+the value would make a numeric-looking `label` compare differently from a textual one, which is a
+difference in behaviour nobody chose. The flag is set on `rack_u_height`, `rack_width`, `bottom_ru`,
+`ru_height`, and `length`.
+
+### `naming.py` — rack name convention and slugs
 
 ```python
 @dataclass(frozen=True)
@@ -343,20 +376,29 @@ class RackName:
     datahall: str
     rack: str
     raw: str
+    def key(self) -> tuple[str, str, str]: ...          # case-folded, for comparison
+    def agrees_with(self, datacenter, datahall, rack) -> bool: ...
 
-def parse_rack_name(value: str, delimiter: str = "-") -> RackName:
+def parse_rack_name(value: str, delim: str | None = None, *, column: str = "rack") -> RackName:
     """Split into exactly 3 non-empty segments. Raises RowError otherwise."""
 
-def build_rack_name(datacenter: str, datahall: str, rack: str, delimiter: str = "-") -> str: ...
+def build_rack_name(datacenter: str, datahall: str, rack: str, delim: str | None = None) -> str: ...
+def expected_pattern(delim: str | None = None) -> str: ...   # for the `expected` field on an issue
+def derive_slug(name: str) -> str: ...
 ```
 
-The only module that knows the convention (Req 6.5).
+The only module that knows the convention (Req 6.5); the delimiter defaults to `RACK_NAME_DELIMITER`.
+
+`derive_slug` lives here rather than in each importer. NetBox requires a slug on regions, sites,
+locations, device types, and manufacturers, no sheet asks for one, so every importer derives it from
+the name (Req 7.3) — and they have to derive it *identically*, or two importers would disagree about
+which existing object a given name refers to.
 
 ### `importers/base.py` — the shared pipeline
 
 ```python
 class RowOutcome(StrEnum):
-    CREATE = "create"; SKIP_EXISTS = "skip_exists"; BLOCKED = "blocked"; PARTIAL = "partial"
+    CREATE = "create"; SKIP_EXISTS = "skip_exists"; BLOCKED = "blocked"
 
 @dataclass
 class PlannedRow:
@@ -371,6 +413,7 @@ class CreateAction:
     endpoint: str                    # "dcim.racks"
     payload: dict[str, Any]
     natural_key: dict[str, Any]      # used for the pre-create existence check
+    refs: dict[str, Ref]             # parents created earlier in this same run
 
 @dataclass
 class Plan:
@@ -378,19 +421,34 @@ class Plan:
     verdict: Verdict
     importer: str
 
-class Importer(Protocol):
-    columns: tuple[ColumnSpec, ...]
-    def validate_local(self, rows: Sequence[Row]) -> list[ValidationIssue]: ...   # S1–S3
-    def validate_remote(self, rows: Sequence[Row]) -> list[ValidationIssue]: ...  # S4
-    def plan(self, rows: Sequence[Row]) -> Plan: ...                              # + S5
-    def apply(self, plan: Plan) -> RunReport: ...
+class BaseImporter(ABC):
+    name: str
+    endpoint_order: tuple[str, ...]           # the order bulk POSTs are issued in
+    choice_sources: dict[str, tuple[str, str]]  # column -> (endpoint, field) for S2
+
+    def validate(self, rows, *, lookups) -> Plan: ...   # runs S2–S5 and builds the Verdict
+    def apply(self, plan) -> RunReport: ...
+
+    # the only per-sheet surface
+    def extra_cell_checks(self, row, collector) -> None: ...   # S2, optional
+    def check_consistency(self, rows, collector) -> None: ...  # S3, optional
+    def prefetch(self, rows, lookups) -> None: ...             # S4 bulk reads, optional
+    def plan_row(self, row, lookups, registry) -> PlannedRow: ...  # S4/S5, required
 ```
 
-`validate_local` covers structure, format, and intra-file rules with no NetBox dependency, so most
-of the test suite needs no HTTP stub at all. `validate_remote` is stage S4, split out precisely
-because it is the one that must be re-run at apply time (Req 10.14). `plan` composes both plus S5
-into a `Verdict`. `apply` refuses outright unless `plan.verdict.is_applyable`, re-runs S4, then walks
-the actions in order.
+**Built differently from the original sketch.** An earlier draft gave each importer three entry
+points (`validate_local`, `validate_remote`, `plan`). Three importers implementing that protocol would
+each have re-implemented stage ordering, the collector wiring, and the rule about which failures stop
+the run — the exact logic Requirement 10.2 wants in one place. So `BaseImporter` owns one `validate()`
+that runs S2 through S5 itself and calls four narrow hooks; only `plan_row` is mandatory. The
+local/remote distinction still exists where it earns its keep: S2 and S3 touch no NetBox, so most of
+the suite needs no HTTP at all, and S4 is re-runnable on its own because it is the stage that must be
+repeated at apply time (Req 10.14).
+
+`apply` refuses outright unless `verdict.is_applyable()`, re-runs S4, then issues one bulk POST per
+endpoint in `endpoint_order`. If NetBox has become unreachable by then, that is reported as a clean
+abort with zero writes rather than raised — the moment the operator most needs to be told nothing
+happened is the worst possible moment to show them a traceback.
 
 ### `services/lookups.py` — idempotency and choices
 
@@ -399,19 +457,50 @@ sites, locations, racks, device types, roles, and for cabling the terminations o
 named in the sheet — so validating 2,000 rows is a handful of requests, not thousands (Req 15.2).
 
 ```python
-def get_or_none(endpoint: str, **natural_key) -> Record | None: ...
 def prefetch(endpoint: str, **filters) -> None: ...
+def get_or_none(endpoint: str, **natural_key) -> Record | None: ...
+def all_records(endpoint: str) -> list[Record]: ...
+def count(endpoint: str, **filters) -> int: ...
+def add_records(endpoint: str, records) -> None: ...   # so a just-created object is visible
 def choices_for(endpoint: str, field: str) -> frozenset[str]: ...   # from the API, cached
+def prefetch_terminations(device_ids, kind) -> None: ...
 def terminations_for(device_id: int, kind: Literal["interface","frontport","rearport"]) -> dict[str, int]: ...
 def occupied(object_type: str, object_id: int) -> Cable | None: ...
 ```
 
+**Server-side filters are a bandwidth hint, not a source of truth.** Two NetBox behaviours, both
+confirmed on 4.6.8, force that:
+
+1. An unrecognised query parameter is *ignored*. `?bogus__lookup=x` returns **every** object with
+   HTTP 200 instead of an error, so a mistyped filter name would look like a successful match against
+   the wrong records. Every record returned is therefore re-verified locally against the natural key
+   before it counts as a match.
+2. Filtering by an id that no longer exists returns **400**, not an empty list. The pre-apply re-check
+   reads that as "not found" — an object deleted since validation is drift to report, not a crash.
+
+Matching is case-insensitive (Req 6.4, 11.1): the index is keyed on case-folded values while the
+record keeps whatever casing NetBox holds.
+
 ### `services/netbox_client.py`
 
-Builds the `pynetbox` API object from environment config, applies `NETBOX_VERIFY_SSL` and
-`NETBOX_TIMEOUT`, probes `/api/status/` once per process for the version, and classifies
-connection failures into DNS / TLS / timeout / auth for Req 2.5. Every exception it raises is
-redacted of headers before it can reach a template.
+Builds the client from environment config, applies `NETBOX_VERIFY_SSL` and `NETBOX_TIMEOUT`, probes
+`/api/status/` once per process for the version, and enforces the supported range `>=4.6, <4.7`.
+
+`classify()` turns a raw exception into one of DNS / TLS / TIMEOUT / AUTH / CONNECTION / VERSION /
+SERVER, each carrying a sentence naming the operator's next action, because "DNS does not resolve
+netbox.example.com" and "the token was rejected" need different responses and a bare
+`ConnectionError(...)` distinguishes them for nobody (Req 2.5). `redact()` runs over every message
+before it becomes an exception, a log record, or template context.
+
+Two things differ from the original sketch:
+
+- **Requests do not go through `pynetbox`.** It raises `RequestError` with the response body
+  interpolated into `str(e)`, which is precisely what Req 14.1 and task 21 must guarantee cannot
+  happen. This module's own session gives redaction a single choke point — and it is the only place
+  the token crosses (trust boundary 3).
+- **The session refuses any method outside GET / OPTIONS / POST**, raising before a request is issued.
+  The create-only invariant is then enforced by the transport rather than trusted separately in three
+  importers.
 
 ## Sheet definitions
 
@@ -421,12 +510,12 @@ redacted of headers before it can reach a template.
 | --- | --- | --- | --- |
 | `location` | yes | text | `dcim.Region.name` (+ derived slug) |
 | `datacenter` | yes | text | `dcim.Site.name` (+ derived slug), region = row's location |
-| `datahall` | yes | text | `dcim.Location.name`, site-scoped |
+| `datahall` | yes | text | `dcim.Location.name` (+ derived slug), site-scoped |
 | `rack` | yes | `<datacenter>-<datahall>-<rack>` | `dcim.Rack.name` |
 | `rack_u_height` | yes | positive int | `Rack.u_height` |
 | `rack_width` | no | 10 / 19 / 21 / 23, default 19 | `Rack.width` |
 | `rack_status` | no | from API, default `active` | `Rack.status` |
-| `rack_type` | no | from API | `Rack.type` |
+| `rack_form_factor` | no | from API (`4-post-cabinet`, `4-post-frame`, …) | `Rack.form_factor` |
 | `tenant` | no | existing tenant name | `Rack.tenant` |
 | `description` | no | text | `Rack.description` |
 
@@ -456,7 +545,7 @@ Example row: `SYD1-DH1-R01, front, 12, 2, syd1-dh1-r01-leaf01, DCS-7050SX3-48YC8
 | Column | Req | Format / choices | Notes |
 | --- | --- | --- | --- |
 | `a_end` / `b_end` | yes | device or panel name | must already exist |
-| `a_end_kind` / `b_end_kind` | yes | device / panel, default device | selects the termination model |
+| `a_end_kind` / `b_end_kind` | no | device / panel, default device | selects the termination model |
 | `a_port` / `b_port` | yes | port name on that end | interface, or front/rear port for a panel |
 | `a_port_side` / `b_port_side` | no | front / rear, default front | panels only; ignored for devices |
 | `cable_type` | yes | from API (`cat6`, `cat6a`, `mmf-om4`, `smf-os2`, `dac-passive`, …) | |
@@ -529,7 +618,11 @@ class ImportRun(models.Model):
     error_count   = models.PositiveIntegerField(default=0)
     warning_count = models.PositiveIntegerField(default=0)
     # A blocked attempt is still a run: it is auditable even though nothing was written.
-    verdict       = models.CharField(max_length=16)    # blocked | ready | applied | stale | expired
+    # As built, the states are blocked | ready | applied | aborted | stale | expired | unavailable.
+    # `aborted` (writes happened, then the run stopped) and `unavailable` (the target was refused
+    # before the file was read) are distinct facts from `stale`, and an operator unwinding by hand
+    # needs to tell them apart.
+    verdict       = models.CharField(max_length=16)
     file_fingerprint = models.CharField(max_length=64) # sha256 of the upload
     stages_completed = models.CharField(max_length=32) # e.g. "S1,S2,S3"
     warnings_acknowledged = models.BooleanField(default=False)
@@ -546,6 +639,9 @@ class ImportRowResult(models.Model):
     object_name  = models.CharField(max_length=255, blank=True)
     message      = models.TextField(blank=True)
     sequence     = models.PositiveIntegerField()       # apply order, for manual unwind
+    # As built, also `url` and `column`. The link is stored rather than rebuilt from NETBOX_URL, so a
+    # link in an old report still resolves after the tool is repointed at a different instance;
+    # `column` carries NetBox's own field-level error back to the offending cell (Requirement 12.2).
 
 class ValidationIssueRecord(models.Model):
     """Persisted so a blocked attempt is auditable and re-openable (Req 16.11)."""
@@ -580,10 +676,45 @@ single offending cell, which is what makes the issue actionable.
 | `/runs/<id>/issues.csv` | `importer:run_issues` | Validation report CSV, formula-escaped |
 | `/runs/<id>/report.csv` | `importer:run_report` | Apply result CSV, formula-escaped |
 
+The three POST endpoints are POST-only because their views define no `get`, which makes the verb
+restriction structural: Django answers 405 before any view code runs, so a link, a crawler, or a
+mistyped URL cannot reach them. Both state changes redirect: validating goes back to the page and
+applying goes to `/runs/<id>/`, so a refresh can neither re-upload nor re-apply. The server refuses a
+second apply regardless — the redirect only means the operator never has to discover that.
+
 UI is one `base.html` with the nav bar, plus three shared partials: `_verdict_banner.html` (the
 blocked/ready summary), `_issue_list.html` (issues grouped by severity then line), and
-`_preview_table.html` (the per-row plan). Bootstrap 5 from a pinned local static file — no CDN, no
-build step.
+`_preview_table.html` (the per-row plan).
+
+### Where a validated plan lives between validate and apply
+
+Requirement 10.12 says apply writes *the plan that was validated*, so the plan is held server-side and
+the browser gets a run id. A crafted POST can therefore name a plan but cannot describe one.
+
+It is held in Django's cache, not the session, because Django serialises sessions as JSON and a plan
+is a graph of dataclasses holding `Ref`s and payloads. Hand-writing a codec for that would mean bugs
+that are silent and whose failure mode is applying something subtly different from what was validated.
+The cost is that the default cache backend is per-process: with more than one worker, an apply can land
+on a process that never saw the plan. That fails safe — the plan is reported missing, nothing is
+written, the operator re-validates — but a multi-worker deployment should configure a shared cache
+backend. Iteration 1 assumes one operator and one process (assumption 3).
+
+The session holds only `{importer: run_id}`, which is what makes a report survive navigating away, and
+what logout clears (along with the cached plans themselves).
+
+### Two counts, not one
+
+`Verdict` carries `create_count` (rows) and `object_count` (objects). One hierarchy row can create a
+region, a site, a location, and a rack, so "1 row" and "4 objects in NetBox" are different consents and
+the apply button quotes the second. `object_count` counts distinct `(endpoint, key)` pairs rather than
+actions, because twenty rows in one new datahall each carry an action for it and apply creates it once
+(Requirement 7.6) — counting actions would overstate what the operator is authorising.
+
+Styling is a single hand-rolled `static/css/app.css` — no CDN, no build step, and no vendored
+third-party asset. This replaces an earlier "Bootstrap 5 from a pinned local static file": three
+server-rendered pages, two banner styles, and two tables do not need a framework, and pulling one in
+would add a supply-chain dependency to review and keep patched for styling this small. Revisit only
+if the plan preview needs behaviour rather than layout.
 
 Each importer page is a single screen with three stacked regions, so the operator never loses
 context: the upload form, then the verdict banner with the issue list, then the plan preview with the
@@ -620,7 +751,20 @@ rather than treated as normal operation.
 
 ## Testing strategy
 
-Live NetBox is never contacted in tests; HTTP is stubbed with `responses`.
+Live NetBox is never contacted in tests, and an autouse fixture in `importer/tests/conftest.py` fails
+any test that tries to open a socket, so hermeticity is enforced rather than assumed.
+
+There are two levels of double, deliberately:
+
+- **`responses`** stubs raw HTTP for the client, lookups, and readiness — the layers whose job *is*
+  HTTP status codes, headers, and redaction.
+- **`FakeNetBox`** (`importer/tests/fakes.py`) is an in-memory instance for importer tests, which care
+  about object state across many rows rather than wire format. It reproduces the API behaviours that
+  change outcomes: unrecognised query parameters ignored, list POSTs atomic, choices fetched once per
+  endpoint, and read or write failures injectable per endpoint. Asserting a 2,000-row overlap check
+  through hand-written HTTP stubs would test the stubs.
+
+The whole suite runs in about five seconds, which is why it gets run on every change.
 
 - **Unit — `naming.py`:** valid 3-segment names, wrong segment counts, empty segments, alternate
  delimiter, case-insensitive comparison (Req 6).
@@ -663,10 +807,29 @@ Live NetBox is never contacted in tests; HTTP is stubbed with `responses`.
 - **Fixtures:** synthetic only — `example.com`, fake serials, invented site codes. No production
  data, per policy.
 
+## Configuration
+
+Everything is an environment variable; `.env.example` is the full list. The ones that carry a
+requirement rather than a preference:
+
+| Variable | Default | Requirement |
+| --- | --- | --- |
+| `NETBOX_URL` / `NETBOX_TOKEN` | none — startup fails naming the variable | 2.1, 2.2 |
+| `NETBOX_VERIFY_SSL` | `true`; `false` warns in the log and banners the UI | 2.3 |
+| `NETBOX_TIMEOUT` | 30s | 2.5 |
+| `RACK_NAME_DELIMITER` | `-` | 6.1 |
+| `NETBOX_DEFAULT_DEVICE_ROLE` | unset; a device row with no `device_role` is then rejected | 8.8, D2 |
+| `NETBOX_AUTOCREATE_DEVICE_TYPES` | `false` | 8.7, D4 |
+| `MAX_UPLOAD_MB` | 5 | 5.2 |
+| `PLAN_EXPIRY_MINUTES` | 30 | 10.15 |
+| `MAX_APPLY_ROWS` | 2000 | 15.3 |
+| `MAX_ISSUES_DISPLAYED` | 500 | 16.10 |
+
 ## Deployment notes
 
 Iteration 1 targets local/internal use: `runserver` for development, gunicorn behind an internal
-reverse proxy otherwise. Requirements: Python 3.12–3.14, `DJANGO_DEBUG=false`, explicit
+reverse proxy otherwise. The development server defaults to port **8080**, since Django's usual 8000
+is where a local netbox-docker instance listens and the two must not fight over it. Requirements: Python 3.12–3.14, `DJANGO_DEBUG=false`, explicit
 `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`, SQLite on a backed-up path, and a rotated NetBox token
 scoped to the DCIM writes this tool needs. `python manage.py check --deploy` must be clean before
 anyone else is pointed at it.

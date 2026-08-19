@@ -1,0 +1,34 @@
+{% comment %}Classification: INTERNAL. Local accounts only — no registration, no password reset
+(Requirement 1.4). The login page deliberately shows no NetBox detail to an unauthenticated
+visitor (Requirement 1.2).{% endcomment %}{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log in — netbox-tool-kits</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body class="centred">
+<main class="card">
+  <h1>netbox-tool-kits</h1>
+  <p class="blurb">Internal NetBox bulk provisioning. Local admin accounts only.</p>
+
+  {% if form.errors %}
+    <p class="banner banner-warn" role="alert">That username and password did not match an account.</p>
+  {% endif %}
+
+  <form method="post">
+    {% csrf_token %}
+    <label for="{{ form.username.id_for_label }}">Username</label>
+    {{ form.username }}
+    <label for="{{ form.password.id_for_label }}">Password</label>
+    {{ form.password }}
+    <button type="submit">Log in</button>
+  </form>
+
+  <p class="fineprint">
+    Accounts are created by the tool owner with <code>manage.py createsuperuser</code>.
+  </p>
+</main>
+</body>
+</html>

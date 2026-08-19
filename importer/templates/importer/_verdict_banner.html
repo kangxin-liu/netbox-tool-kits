@@ -1,0 +1,31 @@
+{% comment %}Classification: INTERNAL. AI-assisted (Cursor) — review before merge.
+
+The verdict, prominently (Requirement 10.10). Blocked states the error count and that nothing will be
+written; ready states the create and skip counts and how many warnings are outstanding.
+
+Every value here comes from `Verdict`, so the banner and the apply endpoint cannot disagree about
+whether this plan may be applied.
+{% endcomment %}
+<div class="verdict verdict-{% if verdict.errors %}blocked{% elif refusal %}pending{% else %}ready{% endif %}"
+     role="status">
+  <p class="verdict-headline">{{ verdict.headline }}</p>
+  <ul class="verdict-counts">
+    <li><strong>{{ verdict.row_count }}</strong> data row{{ verdict.row_count|pluralize }}</li>
+    <li><strong>{{ verdict.errors|length }}</strong> error{{ verdict.errors|length|pluralize }}</li>
+    <li><strong>{{ verdict.warnings|length }}</strong> warning{{ verdict.warnings|length|pluralize }}</li>
+    <li><strong>{{ verdict.create_count }}</strong> row{{ verdict.create_count|pluralize }} to create</li>
+    <li><strong>{{ verdict.object_count }}</strong> object{{ verdict.object_count|pluralize }} in NetBox</li>
+    <li><strong>{{ verdict.skip_count }}</strong> already present</li>
+  </ul>
+  <p class="muted">
+    File <code>{{ verdict.file }}</code>, sheet <code>{{ verdict.sheet }}</code>.
+    Validated {{ verdict.validated_at|time:"H:i" }}, expires {{ verdict.expires_at|time:"H:i" }}.
+    Stages reached: {{ verdict.stages_completed|join:", " }}.
+  </p>
+  {% if not verdict.complete %}
+  <p class="banner banner-warn inline-banner">{{ verdict.unreached_explanation }}</p>
+  {% endif %}
+  {% if refusal %}
+  <p class="verdict-refusal">{{ refusal }}</p>
+  {% endif %}
+</div>

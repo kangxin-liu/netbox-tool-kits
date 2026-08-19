@@ -1,0 +1,47 @@
+{% extends "importer/base.html" %}
+{% comment %}Classification: INTERNAL. AI-assisted (Cursor) — review before merge.
+
+Read-only history, newest first (Requirement 13.4). There is no edit or delete control here and no
+endpoint behind one either (Requirement 13.5).
+
+Blocked attempts are listed alongside applied ones on purpose: "someone uploaded this at 14:05 and the
+tool refused it" is part of the audit trail, not an absence of one.
+{% endcomment %}
+{% block title %}Import history — netbox-tool-kits{% endblock %}
+
+{% block content %}
+<h1>Import history</h1>
+<p class="blurb">
+  Every validation and every apply, newest first. Records here are never edited or deleted through
+  this interface.
+</p>
+
+<section class="panel">
+  <table class="runs">
+    <caption>{{ runs|length }} most recent run{{ runs|length|pluralize }}</caption>
+    <thead>
+      <tr>
+        <th>Run</th><th>Started</th><th>Sheet</th><th>File</th><th>By</th>
+        <th>Verdict</th><th>Created</th><th>Skipped</th><th>Errors</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><a href="{% url 'importer:run_detail' run.pk %}">#{{ run.pk }}</a></td>
+        <td>{{ run.started_at|date:"Y-m-d H:i" }}</td>
+        <td>{{ run.importer }}</td>
+        <td><code>{{ run.filename }}</code></td>
+        <td>{{ run.user.get_username }}</td>
+        <td><span class="pill pill-{{ run.verdict }}">{{ run.get_verdict_display }}</span></td>
+        <td class="tally">{{ run.created_count }}</td>
+        <td class="tally">{{ run.skipped_count }}</td>
+        <td class="tally">{{ run.error_count }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="9" class="muted">Nothing has been validated yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
