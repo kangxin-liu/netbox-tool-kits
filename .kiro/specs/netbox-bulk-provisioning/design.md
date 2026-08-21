@@ -27,7 +27,9 @@ Design status: **verified against NetBox 4.6.8 on 2026-08-18, implementation und
 D1–D9 in `requirements.md` are settled and built; each one's blast radius if reversed is named in the
 table below. **D10 — cable profiles and breakout — is proposed and not yet built.** Its field-level
 facts were probed on 2026-08-20 and hold; two behavioural questions remain open because answering them
-needs a cable to be created, and are listed under "Still unverified". Field names in this document were checked against the target instance's own
+needs a cable to be created, and are listed under "Still unverified". **D11 — loopback and management
+addresses on the device sheet — is proposed and not yet built.** Its IPAM field names still need a
+read-only probe against 4.6.8 before implementation. Field names in this document were checked against the target instance's own
 `OPTIONS` responses rather than from memory — see "Verified against the target instance".
 
 ## Architecture
@@ -92,8 +94,8 @@ Ordered, and each stage only runs if the previous one left the file interpretabl
 | --- | --- | --- |
 | **S1** file structure | extension, size, worksheet present, required columns, unknown columns, example row still present | no |
 | **S2** cell format | required-but-blank, integer/enum coercion, rack-name shape, choice values against cached API choices | choices only |
-| **S3** intra-file consistency | duplicate racks, duplicate device names, RU-range overlap between rows, the same cable termination used twice *outside* a shared `cable_group`, a group's rows disagreeing about the cable they describe, rack name disagreeing with its own datacenter/datahall columns | no |
-| **S4** cross-reference | referenced racks/models/roles/tenants exist, ports resolve, terminations not already cabled, slugs and unique fields free, existing objects match the sheet | yes |
+| **S3** intra-file consistency | duplicate racks, duplicate device names, duplicate loopback/management addresses, RU-range overlap between rows, the same cable termination used twice *outside* a shared `cable_group`, a group's rows disagreeing about the cable they describe, rack name disagreeing with its own datacenter/datahall columns | no |
+| **S4** cross-reference | referenced racks/models/roles/tenants exist, ports resolve, terminations not already cabled, slugs and unique fields free, existing objects match the sheet, device-type `mgmt_only` / `loopback` interfaces resolve, IP addresses are free or already on the intended interface | yes |
 | **S5** feasibility | parent-before-child ordering resolvable, row count within the bound, no contradictory creates | no |
 
 S4 is the only stage whose result can go stale, which is why it alone is re-run at apply time.
@@ -370,6 +372,7 @@ on disk — it should be rotated if it has ever been shared, and `.gitignore` no
 | D8 | An "exists but differs" conflict blocks on consequential fields and warns on descriptive ones | A wrong region or rack height invalidates every row built on it; a wrong description invalidates nothing, and blocking on it would teach operators to distrust the gate | `columns.py` (`Conflict`) + S4 |
 | D9 | Optional `datacenter_slug` / `datahall_slug` columns, and a rack name built from those slugs rather than from the two names | Deriving the slug from the name forced the name to double as the short code, so a site had to be called `SYD1` rather than "Sydney One" just to keep rack names short. Optional with a derived fallback keeps every existing sheet valid | `columns.py`, `naming.py`, `importers/hierarchy.py`, and the rack-name pattern all three sheets join on |
 | D10 **(proposed)** | Optional `cable_profile` *and* `cable_group` columns, so several rows can describe one multi-connector cable | A breakout is one cable with one A termination and several B terminations. The profile column alone cannot express it: the rows sharing the A port are rejected as duplicate terminations before the profile is read | `columns.py`, `importers/cabling.py` (S3 + planning), one grouping hook on `importers/base.py`, per-line report attribution |
+| D11 **(proposed)** | Optional `loopback_ip4` / `loopback_ip6` / `management_ip4` / `management_ip6`; names from the device type; IPv4 preferred as primary unless the row has none, then management over loopback within the family; first PATCH, scoped to those two fields | Dual-stack cannot fit in two family-agnostic cells. Vendor names belong on the type once. NetBox cannot set `primary_ip4` at device create because the IP does not exist yet | `columns.py`, `importers/devices.py` (S2–S4 + apply), `ipam.ip-addresses` endpoint, Requirement 11.3's exception, devices readiness, empty-instance prep |
 
 ## Component design
 
@@ -408,6 +411,7 @@ than a match. Everything else is a judgement call the author of the column has t
 | `datacenter_slug`, `datahall_slug` | |
 | `rack_u_height`, `rack_width` | `rack_status`, `rack_form_factor`, `status` |
 | a device's `rack`, `bottom_ru`, `rack_face`, `model` | `tenant`, `serial`, `asset_tag` |
+| a device's `loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`, and primary IP | |
 | a cable's `cable_type` and `cable_profile` | a cable's `label`, `color`, `length`, `length_unit` |
 
 The two slug columns are `CONSEQUENTIAL` rather than `IDENTITY`, which is worth a sentence because
@@ -736,8 +740,72 @@ forbids this importer from writing them.
 ### Ordering
 
 Hierarchy creates strictly parents-first: region → site → location → rack. Devices need racks, so
-the device sheet only reads them. Cabling needs devices and their ports, so it only reads those.
-Within a sheet, rows are applied in file order (Req 8.12) so the report lines up with the sheet.
+the device sheet only reads them. A device row that supplies addresses then creates those addresses
+against the device's inherited interfaces and PATCHes only the primary-IP fields (D11). Cabling needs
+devices and their ports, so it only reads those. Within a sheet, rows are applied in file order
+(Req 8.12) so the report lines up with the sheet.
+
+### Device addresses (D11)
+
+The device sheet does not carry interface names. Arista `Management1`, Juniper `fxp0`, Cumulus `eth0`
+are one role; Arista `Loopback0`, Juniper `lo0`, Cumulus `lo` are the other. NetBox already
+discriminates them on the device type: `mgmt_only=true` is the management port, type `loopback` is
+the loopback. Community device-type YAML often types `Loopback0` as `virtual`; that is not this
+tool's loopback, and it is prep to correct (see `docs/empty-instance-prep.md`).
+
+A row supplies addresses; the type supplies names. At least one of the four address cells is
+required when the type defines either interface; all four must be blank when it defines neither
+(a patch panel). Dual-stack is four columns, not two overloaded cells. Primary IP is chosen by
+family first, then by role: IPv4 wins over IPv6 unless the row supplies no IPv4; within a family,
+management wins over loopback. So a row with `management_ip6` and `loopback_ip4` is reached at
+the loopback IPv4, with the management IPv6 still assigned and recorded as `primary_ip6`.
+
+| `primary_ip4` | `primary_ip6` | Address NetBox shows (`primary_ip`) |
+| --- | --- | --- |
+| `management_ip4` if filled, else `loopback_ip4` | `management_ip6` if filled, else `loopback_ip6` | the IPv4 if set, otherwise the IPv6 |
+
+```mermaid
+sequenceDiagram
+    participant I as DeviceImporter
+    participant L as lookups (cached)
+    participant NB as NetBox API
+
+    I->>L: resolve device type
+    I->>L: interface templates: unique mgmt_only, unique type=loopback
+    alt type has neither interface
+        I-->>I: all four IP cells must be blank
+    else type has at least one
+        I-->>I: at least one of four IP cells required
+    end
+    alt device does not exist
+        I->>NB: POST /api/dcim/devices/
+        NB-->>I: 201 + device id (interfaces inherited)
+    else device exists
+        I-->>I: skip the device create; continue with addresses
+    end
+    I->>L: device interfaces by name from the type
+    I->>NB: POST /api/ipam/ip-addresses/<br/>{address, assigned_object_type: dcim.interface,<br/> assigned_object_id, status: active}
+    I->>NB: PATCH /api/dcim/devices/{id}/<br/>{primary_ip4 and/or primary_ip6 only}
+```
+
+The PATCH is the first write that is not a create. It sends only `primary_ip4` / `primary_ip6`, and
+only to set them to an address this run assigned (or found already assigned) on that device. A
+primary already pointing at a different address blocks rather than being overwritten (Req 8.19,
+11.5). `oob_ip` is not written — that is one of D11's open questions.
+
+Apply therefore issues two bulk POSTs (devices, then IP addresses) and one field-scoped PATCH
+(primary IP), which widens D7's half-complete window from "between two endpoints" to those three
+steps. A re-upload is what closes it: an existing device still has its remaining address work
+done (Req 8.10, 8.20).
+
+Facts that still need a read-only probe against 4.6.8 before implementation (task 27a):
+
+| Fact the design leans on | Probe | If it comes back different |
+| --- | --- | --- |
+| `InterfaceTemplate.mgmt_only` is writable and filterable | `OPTIONS` / `GET` on `/api/dcim/interface-templates/` | If the flag is missing or named differently, management resolution has no NetBox-native discriminator and a name column becomes hard to avoid |
+| Interface type `loopback` is a reported choice | `OPTIONS` on the template `type` field | If the instance has no `loopback` type, the community `virtual` convention would have to be adopted, which collides with other virtual interfaces |
+| `IPAddress` accepts `assigned_object_type` + `assigned_object_id` without a parent prefix | `OPTIONS` on `/api/ipam/ip-addresses/` | If a covering prefix is required, the sheet cannot apply against an unprepared IPAM and Requirement 8.17 has to demand one |
+| `Device.primary_ip4` is writable on PATCH and rejected on create when the IP does not yet exist | `OPTIONS` plus a throwaway create | If primary IP can be set in the same POST as the address, the PATCH exception of 8.19 is unnecessary |
 
 ### Cable creation
 
@@ -827,16 +895,24 @@ what a future iteration that *can* update a cable should do with a mismatch.
 ### Every write is a create
 
 With transceiver recording deferred (D3), iteration 1 has **no** code path that modifies an object it
-did not create. That is worth stating as an invariant rather than a coincidence: it makes the blast
+did not create — except the primary-IP PATCH of D11, which is named, field-scoped, and not a general
+update path. That is worth stating as an invariant rather than a coincidence: it makes the blast
 radius of a mistaken import bounded by what it added, and it means a reviewer can verify the property
-by grepping for `PATCH` and `DELETE` and finding none.
+by grepping for `PATCH` and `DELETE` and finding only the device-importer primary-IP call.
 
-**D10 preserves it, and that is why Requirement 9.22 blocks instead of helping.** The obvious thing to
+**D10 preserves the invariant, and that is why Requirement 9.22 blocks instead of helping.** The obvious thing to
 do with a breakout that already has three of its four lanes is to add the fourth, and the only way to
 add a termination to an existing cable is to PATCH it. So the useful behaviour and the invariant are in
 direct conflict, and the invariant wins: a partly cabled group is reported for a human to finish in
 NetBox. Adding terminations to existing cables belongs with the other update operations in iteration 2,
 where the create-only test is being revisited deliberately rather than eroded by one exception.
+
+**D11 is the first exception, and it is a different kind of PATCH.** NetBox will not accept
+`primary_ip4` on the device POST: the IP does not exist yet. The sequence is create device → create
+`ipam.IPAddress` assigned to the inherited interface → PATCH the device with only `primary_ip4`
+and/or `primary_ip6`. The PATCH does not rename, re-parent, or rewrite any other field, and a
+primary IP already set to a *different* address is not patched — it blocks (Req 11.5). Completing a
+partly-cabled breakout stays on the other side of that line.
 
 Why the interface-type route was abandoned: a device type defines interface templates, and devices
 inherit their interfaces — already typed — from them. Requirement 11.3 forbids overwriting an
@@ -1124,12 +1200,13 @@ Iteration 1 targets local/internal use: `runserver` for development, gunicorn be
 reverse proxy otherwise. The development server defaults to port **8080**, since Django's usual 8000
 is where a local netbox-docker instance listens and the two must not fight over it. Requirements: Python 3.12–3.14, `DJANGO_DEBUG=false`, explicit
 `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`, SQLite on a backed-up path, and a rotated NetBox token
-scoped to the DCIM writes this tool needs. `python manage.py check --deploy` must be clean before
+scoped to the DCIM writes this tool needs plus `ipam.IPAddress` create (Requirement 8.17). `python manage.py check --deploy` must be clean before
 anyone else is pointed at it — `test_security.py` runs it as a subprocess with warnings treated as
 failures, so it stays clean rather than being checked once.
 
 Handover documentation lives in `docs/`, split by audience: `operator-runbook.md` for whoever fills the
 sheets in (reading a verdict, fixing a blocked file, recovering from a partway abort — which is to
 re-upload the same sheet, since everything already created is skipped) and `empty-instance-prep.md` for
-whoever prepares NetBox once (local instance, device roles, device types before devices, and a patch
+whoever prepares NetBox once (local instance, device roles, device types before devices — including
+exactly one `mgmt_only` interface and one `loopback`-typed interface on each network type — and a patch
 panel using the 4.5+ `rear_ports` mapping).

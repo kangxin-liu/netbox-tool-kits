@@ -28,6 +28,8 @@ The spreadsheets use the engineers' vocabulary. NetBox's DCIM model is the targe
 | Rack | `dcim.Rack` | Assigned to both the site and the datahall location |
 | Model | `dcim.DeviceType` | Matched by model name (and manufacturer when creating) |
 | Panel | `dcim.Device` with front/rear ports | A patch panel is an ordinary device in NetBox |
+| Management interface | `dcim.Interface` with `mgmt_only=true` | Named on the device type, never in the sheet. Arista `Management1`, Juniper `fxp0`/`em0`/`me0`, Cumulus `eth0` are all the same role |
+| Loopback interface | `dcim.Interface` with type `loopback` | Likewise named on the device type. Arista `Loopback0`, Juniper `lo0`, Cumulus `lo` are all the same role |
 
 **Naming convention.** A rack name is `<datacenter_slug>-<datahall_slug>-<rack>`, for example
 `SYD1-DH1-R01` where the slugs are `syd1` and `dh1`. This is the join key used by all three sheets.
@@ -251,13 +253,25 @@ A column named `rack_type` carrying `4-post-cabinet` would therefore be aimed at
 
 ## Requirement 8: Device import
 
-**User Story:** As an engineer, I want to upload a sheet of devices with their rack positions,
-so that racks are populated without clicking through NetBox device by device.
+**User Story:** As an engineer, I want to upload a sheet of devices with their rack positions and
+their management and loopback addresses, so that racks are populated without clicking through NetBox
+device by device.
 
 ### Acceptance Criteria
 
 Sheet columns — required: `rack`, `rack_face`, `bottom_ru`, `ru_height`, `device_name`, `model`.
-Optional: `serial`, `manufacturer`, `device_role`, `status`, `asset_tag`, `tenant`.
+Optional: `serial`, `manufacturer`, `device_role`, `status`, `asset_tag`, `tenant`,
+`loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`.
+
+The four address columns are optional as *columns* so a sheet written before they existed still
+parses, and so a patch panel — whose device type has neither interface — can leave all four cells
+blank. They are not optional as *values* on a device whose type defines those interfaces: at least
+one of the four cells must be filled, which is decision **D11**. Dual-stack is first-class: each
+role has an IPv4 column and an IPv6 column, and a row may fill any non-empty subset. Interface
+*names* are not columns. Arista, Juniper and Nvidia Cumulus all call the management port something
+different, and the same is true of the loopback; putting those names in the sheet would copy the
+vendor problem onto every row. They belong on the device type, which is where NetBox already keeps
+them.
 
 1. WHEN a row's `rack` does not resolve to exactly one existing rack, THEN the system SHALL
  reject that row and SHALL NOT create the rack.
@@ -281,10 +295,86 @@ Optional: `serial`, `manufacturer`, `device_role`, `status`, `asset_tag`, `tenan
  reject the row, since NetBox requires a role.
 9. The system SHALL default `status` to `active` and SHALL treat `serial` and `asset_tag` as
  optional free text, submitting them only when non-blank.
-10. IF a device name already exists within the same scope, THEN the system SHALL skip the row as
- already present rather than creating a duplicate or renaming.
+10. IF a device name already exists within the same scope, THEN the system SHALL skip creating the
+ device rather than creating a duplicate or renaming, and SHALL still process that row's remaining
+ work — the loopback and management addresses of 8.13–8.26 — against the existing device. A row whose
+ device *and* addresses already match is reported as already present in full.
 11. IF two rows declare the same device name, THEN the system SHALL reject the later row.
 12. The system SHALL create devices in sheet order so that reported results align with the sheet.
+
+Criteria 8.13–8.26 are decision **D11** — dual-stack loopback and management addresses, and the
+primary IP.
+
+13. The system SHALL accept optional `loopback_ip4`, `loopback_ip6`, `management_ip4`, and
+ `management_ip6` columns. A non-blank cell SHALL be a CIDR host address with an explicit prefix
+ length (`10.0.0.1/32`, `2001:db8::1/128`); a host with no prefix is rejected rather than defaulted
+ to `/32` or `/128`, because a silent mask is how two engineers end up with different addresses from
+ the same cell. An `*_ip4` cell SHALL be IPv4 and an `*_ip6` cell SHALL be IPv6; a family that
+ disagrees with its column is rejected against that column, not silently swapped.
+14. WHEN the resolved device type (or, for an existing device, the device itself) has at least one
+ management or loopback interface as defined in 8.16, THEN the system SHALL require at least one of
+ the four address cells to be non-blank, and SHALL reject a row that fills none. WHEN the type has
+ neither interface, THEN all four cells SHALL be blank; a non-blank cell with nowhere to assign it
+ is an ERROR naming the type. This is what lets a patch panel share the sheet with a switch. An
+ autocreated device type (8.7) has no interface templates, so it is treated as a type with neither
+ interface: all four IP cells must be blank, and the device is created with no primary IP.
+15. The system SHALL NOT read, require, or write an interface *name* from the sheet. Vendor names —
+ Arista `Management1` / `Loopback0`, Juniper `fxp0` / `lo0`, Cumulus `eth0` / `lo` — live on the
+ device type, which is the template the device inherits from. A column of names would duplicate that
+ template onto every row and would be wrong the moment a new platform used a fourth name.
+16. The system SHALL resolve the management interface as the unique interface (template, on a device
+ yet to be created; the device's own interface, once it exists) with `mgmt_only` set, and the
+ loopback interface as the unique interface whose type is `loopback`. IF a non-blank IP cell has
+ zero matching interfaces, THEN the system SHALL reject the row naming the type and the role, and
+ SHALL say that the interface must be defined on the device type before the import can proceed. IF
+ a non-blank IP cell has more than one matching interface, THEN the system SHALL reject the row as
+ ambiguous and name them, rather than pick. Both families of one role assign to that same
+ interface — a dual-stack loopback is two addresses on one `loopback` interface, not two
+ interfaces.
+17. WHEN an address is supplied, THEN the system SHALL create an `ipam.IPAddress` assigned to the
+ resolved interface (`assigned_object_type=dcim.interface`, `assigned_object_id` of that interface,
+ `status=active`) and SHALL NOT create prefixes, VRFs, or VLANs. A covering prefix is not required;
+ NetBox accepts an address without one. A row may create up to four addresses.
+18. The system SHALL choose the device's primary IP by family first, then by role: IPv4 is preferred
+ over IPv6 unless no IPv4 address is supplied on that row; within a family, the management address
+ wins over the loopback. Concretely: `primary_ip4` is `management_ip4` if that cell is non-blank,
+ otherwise `loopback_ip4` if that cell is non-blank, otherwise unset; `primary_ip6` is
+ `management_ip6` if that cell is non-blank, otherwise `loopback_ip6` if that cell is non-blank,
+ otherwise unset. Every supplied address is still assigned to its interface. NetBox's own
+ `primary_ip` (the address shown on the device) is `primary_ip4` when it is set and `primary_ip6`
+ only when it is not — so a row that supplies both families is reached at its IPv4, and a
+ v6-only row is reached at its IPv6. `oob_ip` is not written — see D11.
+19. NetBox cannot accept a primary IP at device-create time because the address does not exist yet.
+ After the address creates of 8.17 return, the system MAY PATCH the device with only `primary_ip4`
+ and/or `primary_ip6` pointing at the IPs selected by 8.18, and SHALL send no other field on that
+ PATCH. This is the sole exception to Requirement 11.3 in this iteration. The system SHALL NOT PATCH
+ a primary IP that is already set to a different address — that is the consequential conflict of
+ 11.5.
+20. Applying a device row SHALL be ordered: create the device (or skip it per 8.10), then create the
+ addresses against its interfaces, then PATCH the primary IP fields. A re-upload whose device
+ already exists therefore still creates missing addresses and still sets an unset primary, which is
+ what makes a sheet that gained these columns finish the devices it created last week.
+21. IF an address already exists in NetBox assigned to the intended interface, THEN the system SHALL
+ skip creating it. IF it exists assigned to a different object, or unassigned, THEN the system SHALL
+ raise a blocking ERROR identifying the holder, matching the asset-tag collision of 11.6: the create
+ would fail or, worse, steal an address.
+22. IF two cells in one sheet declare the same address — two rows, or two columns of one row —
+ THEN the system SHALL reject the later cell and name the earlier location.
+23. IF an existing device is missing the interface its type now defines — NetBox does not copy
+ templates onto devices that already exist — THEN the system SHALL reject the row naming the device
+ and the missing interface, rather than create the interface. Creating interfaces on a device the
+ tool did not just create would be an update of that device's inventory, which 11.3 still forbids.
+24. The system SHALL compare addresses as structured IP values, not as strings, so
+ `2001:db8:0:0::1/128` and `2001:db8::1/128` are the same address (Requirement 11.5b).
+25. `loopback_ip4`, `loopback_ip6`, `management_ip4`, and `management_ip6` are **consequential**
+ (Requirement 11.5, decision D8): an existing device whose assigned address or primary IP disagrees
+ with the sheet blocks, because later automation reaching the device by the sheet's address would
+ reach the wrong place. They are not descriptive, and they are not identity — a different address
+ is not a different device.
+26. The plan preview SHALL name, for each supplied address, the resolved interface (so `eth0`
+ versus `Management1` is visible before apply), the address that will be assigned to it, and which
+ address will be `primary_ip4`, which will be `primary_ip6`, and which of those NetBox will show as
+ the device's primary.
 
 ## Requirement 9: Cabling import
 
@@ -457,8 +547,11 @@ can finish a partial import without creating duplicates.
 2. WHEN a matching object exists, THEN the system SHALL skip it, record it as already present,
  and continue with the row's remaining work.
 3. The system SHALL NOT update, rename, re-parent, or delete any existing NetBox object in this
- iteration, without exception, even when sheet values differ from what NetBox holds. Every write
- this iteration performs is the creation of a new object.
+ iteration, even when sheet values differ from what NetBox holds. Every write this iteration
+ performs is the creation of a new object, with one exception: the primary-IP PATCH of Requirement
+ 8.19, which sends only `primary_ip4` / `primary_ip6` and only to set them to an address this run
+ assigned (or found already assigned) on that device. A primary IP already set to a *different*
+ address is not patched — it is the consequential conflict of 11.5.
 4. WHEN an object already exists in NetBox and every value the sheet supplies for it matches, THEN
  the system SHALL classify the row as INFO / skip-already-exists, which does not block apply.
 5. IF an object already exists but a **consequential** value the sheet supplies differs from what
@@ -466,7 +559,9 @@ can finish a partial import without creating duplicates.
  the NetBox value, because iteration 1 cannot reconcile the difference by updating, and because a
  difference in these fields means later rows are built on a false premise (decision D8).
  Consequential fields are: a region's parent; a site's region; a location's site and parent; a
- rack's `u_height` and `width`; a device's rack, position, face, and device type; a cable's `type` and
+ rack's `u_height` and `width`; a device's rack, position, face, and device type; a device's
+ `loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`, and primary IP (Requirement
+ 8.25); a cable's `type` and
  `profile`; and a slug the sheet supplied explicitly for a site or datahall, per Requirement 7.13 — a
  slug the tool merely derived is not consequential, per 7.14. A cable's `profile` sits on this side
  because it is what NetBox traces lanes through: an existing cable profiled differently from the sheet
@@ -481,10 +576,12 @@ can finish a partial import without creating duplicates.
  not reported as a conflict.
 5c. The classification in 11.5 and 11.5a SHALL live in one table in code, so that adding a sheet
  column forces an explicit decision about which side it falls on.
-6. IF a globally unique field — a device name in scope, or an asset tag — is already held by a
- *different* object, THEN the system SHALL raise a blocking ERROR identifying the holder. This
- outranks 11.5a: an asset tag recorded differently *on the matched object* is a descriptive warning,
- but the same tag held by *another* object is a collision and blocks, because the create would fail.
+6. IF a globally unique field — a device name in scope, an asset tag, or an IP address — is already
+ held by a *different* object, THEN the system SHALL raise a blocking ERROR identifying the holder.
+ This outranks 11.5a: an asset tag recorded differently *on the matched object* is a descriptive
+ warning, but the same tag held by *another* object is a collision and blocks, because the create
+ would fail. An IP assigned to a different interface is the same class of collision (Requirement
+ 8.21).
 7. WHEN the same sheet is uploaded twice with no NetBox changes in between, THEN the second
  validation SHALL find zero ERROR issues, report every row as already present, and applying it
  SHALL create nothing.
@@ -575,8 +672,9 @@ explanation, so that I can fix the spreadsheet without hunting for what the tool
 3. WHERE the upload is a `.csv`, the worksheet SHALL be reported as the file name so the format of
  an issue is identical across csv and xlsx.
 4. Each issue SHALL carry a stable machine-readable code — for example `RACK_NAME_MALFORMED`,
- `RU_RANGE_OVERLAP`, `DEVICE_TYPE_NOT_FOUND`, `PORT_ALREADY_CABLED` — so that issues can be
- grouped, counted, and asserted in tests.
+ `RU_RANGE_OVERLAP`, `DEVICE_TYPE_NOT_FOUND`, `PORT_ALREADY_CABLED`, `DEVICE_IP_REQUIRED`,
+ `DEVICE_IP_FAMILY_MISMATCH`, `MGMT_INTERFACE_NOT_FOUND` — so that issues can be grouped, counted,
+ and asserted in tests.
 5. Issue messages SHALL be written for an engineer fixing a sheet, quoting the received value and
  the expectation, and SHALL NOT contain stack traces, request headers, or credentials.
 6. WHEN an issue concerns two rows, such as a duplicate, THEN it SHALL name both line numbers.
@@ -603,20 +701,24 @@ rather than to appear broken.
 
 ### Acceptance Criteria
 
-1. The system SHALL treat a missing referenced device role, manufacturer, device type, tenant, or
- panel as a blocking stage-S4 ERROR that names the missing object and states plainly that it must be
- created in NetBox before the import can proceed.
+1. The system SHALL treat a missing referenced device role, manufacturer, device type, tenant,
+ panel, or — when a device row supplies a loopback or management address — a missing management or
+ loopback interface on that type, as a blocking stage-S4 ERROR that names the missing object and
+ states plainly that it must be created in NetBox before the import can proceed.
 2. Each importer page SHALL show a read-only readiness summary for that importer's prerequisites
- before any upload — for devices, whether the configured default role resolves and how many device
- types exist; for cabling, whether any devices with front or rear ports exist.
+ before any upload — for devices, whether the configured default role resolves, how many device
+ types exist, and how many of those types define a `mgmt_only` interface and a `loopback`-typed
+ interface; for cabling, whether any devices with front or rear ports exist.
 3. IF `NETBOX_DEFAULT_DEVICE_ROLE` does not resolve to an existing role, THEN the system SHALL warn
  prominently on the devices page at page load, not merely at validation time.
 4. The readiness summary SHALL be strictly read-only and SHALL create nothing.
 5. The system SHALL NOT create device roles, tenants, or patch panels in this iteration; device types
  only under the opt-in flag of Requirement 8.7.
 6. The documentation SHALL include a runbook for preparing an empty instance: creating the device
- roles in use, importing device types, and building at least one patch panel whose front-to-rear
- port mappings use the NetBox 4.5+ `rear_ports` format.
+ roles in use, importing device types, marking exactly one `mgmt_only` interface and exactly one
+ `loopback`-typed interface on each network device type (community templates often type a loopback
+ as `virtual` — that is not this tool's loopback), and building at least one patch panel whose
+ front-to-rear port mappings use the NetBox 4.5+ `rear_ports` format.
 7. WHEN the hierarchy importer runs against a completely empty instance, THEN it SHALL succeed
  without prerequisites, since it creates its own parents — so a new instance is always usable for
  sheet 1 first.
@@ -630,7 +732,9 @@ rather than to appear broken.
  arrived in the same 4.5 release, so the supported range guarantees them and the `cable_profile`
  column of Requirement 9.13 needs no version condition of its own — 9.14 covers only their
  disappearance in some later version.
-2. The supplied API token has write permission for DCIM objects and read permission for choices.
+2. The supplied API token has write permission for DCIM objects, write permission for
+ `ipam.IPAddress` (Requirement 8.17), and read permission for choices. It does not need permission
+ to create prefixes, VRFs, or VLANs.
 3. A single operator uses the tool at a time; no concurrent-apply coordination is required.
 4. Device roles and tenants referenced by sheets already exist in NetBox; iteration 1 does not
  create them. On an unprepared instance this is surfaced by Requirement 17 rather than assumed away.
@@ -732,8 +836,46 @@ rather than to appear broken.
  **Cost if reversed:** `columns.py`, the cabling importer's S3 and planning, one new grouping hook on
  `BaseImporter`, and the per-line report attribution. Nothing outside the cabling path changes.
 
-D1–D9 are settled; D3 and D6 are deferred to iteration 2 by choice, not left undecided. **D10 is the
-one open decision**, and two questions inside it are the operator's to answer rather than the
-implementer's: whether grouped rows must repeat the cable's attributes or inherit them from the first
-row (9.18 proposes inherit), and whether lane order can be left as row order (9.21) or needs explicit
-connector columns.
+- **D11 — Dual-stack loopback and management addresses on the device sheet. PROPOSED, awaiting
+ review.** The device sheet gains four optional columns: `loopback_ip4`, `loopback_ip6`,
+ `management_ip4`, `management_ip6`. At least one must be filled on any row whose device type
+ defines those interfaces. Primary IP is chosen by family first, then by role: IPv4 wins over IPv6
+ unless the row supplies no IPv4 at all; within a family, management wins over loopback. Interface
+ names are not columns.
+ **Why four columns rather than two cells that accept either family.** A single `loopback_ip` that
+ might be v4 or v6 cannot say "both". Comma-separated dual values in one cell are how a sheet
+ becomes un-diffable and how a missing mask on one of two addresses is reported against the wrong
+ one. Four columns make family a property of the header, which is what S2 can check.
+ **Why family first, then role.** "IPv4 preferred unless no IPv4 is supplied for the device" is a
+ property of the row, not of a role. A row with `management_ip6` and `loopback_ip4` is therefore
+ reached at the loopback IPv4, with the management IPv6 still assigned and written as
+ `primary_ip6`. Role-first would have made that device v6-primary while an IPv4 sat on it, which is
+ the opposite of the preference. Within the winning family, management still beats loopback, which
+ is the original rule for a single-family row.
+ **Why the names stay on the device type.** Arista uses `Management1` and `Loopback0`, Juniper uses
+ `fxp0` (or `em0`, or `me0`) and `lo0`, Nvidia Cumulus uses `eth0` and `lo`. A sheet column of names
+ would make every row restate a fact the device type already holds, and would be wrong for the next
+ platform. NetBox already has the discriminators: `mgmt_only` on an interface template is the
+ management port, and type `loopback` is the loopback. Both families of one role assign to that
+ same interface. The operator's job is to mark those on the type once — including correcting a
+ community YAML that typed `Loopback0` as `virtual` — and then type only addresses in the sheet.
+ **Why at-least-one, not both-roles-required, and not both-optional.** A device reachable on one
+ address is enough to be the primary IP; forcing both roles would reject a loopback-only box or a
+ management-only OOB box, and forcing both families would reject a v4-only hall. Forcing none would
+ let a switch import with no address at all, which is the gap this change exists to close. A type
+ with neither interface (a patch panel) is the exemption, so a mixed sheet still works.
+ **Why this is the first PATCH.** NetBox will not accept `primary_ip4` on the device create: the IP
+ does not exist yet. The sequence is create device → create addresses on its inherited interfaces →
+ PATCH only the primary-IP fields. That PATCH is scoped to those two fields and does not reopen
+ update-in-general. Completing a partly-cabled breakout (D10 / 9.22) stays deferred for that reason.
+ **Cost if reversed:** `columns.py`, the device importer's S2/S3/S4 and apply (a third endpoint,
+ `ipam.ip-addresses`, and a PATCH), Requirement 11.3's exception, the devices readiness panel, and
+ the device-type prep in the empty-instance runbook. Cabling is untouched.
+ One question inside D11 remains the operator's: whether a supplied management address should also
+ be written to NetBox's `oob_ip` (the sheet rule as stated puts it on `primary_ip*` and leaves
+ `oob_ip` alone). Dual-stack is decided: four columns, family first.
+
+D1–D9 are settled; D3 and D6 are deferred to iteration 2 by choice, not left undecided. **D10 and D11
+are the open decisions.** Inside D10: whether grouped rows must repeat the cable's attributes or
+inherit them from the first row (9.18 proposes inherit), and whether lane order can be left as row
+order (9.21) or needs explicit connector columns. Inside D11: `oob_ip` versus primary-only.

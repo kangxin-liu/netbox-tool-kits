@@ -10,7 +10,9 @@ sheets 2 and 3 do not.
 
 ## The one thing to know
 
-**Iteration 1 only ever creates objects.** It never updates and never deletes. If an object already
+**Iteration 1 only ever creates objects**, with one named exception: after creating a device's
+loopback or management address it PATCHes only that device's primary IP, because NetBox cannot set
+a primary IP at create time. It never updates anything else and never deletes. If an object already
 exists it is skipped, which is why re-uploading the same sheet is safe and why fixing a wrong value
 in NetBox is a job for NetBox, not for this tool.
 
@@ -29,11 +31,54 @@ row, since it is refused as example data.
 | Order | Page | Creates | One row is |
 | --- | --- | --- | --- |
 | 1 | Site & rack hierarchy | region, site, location, racks | one rack |
-| 2 | Devices | devices mounted in racks | one device |
+| 2 | Devices | devices mounted in racks, plus loopback and management addresses | one device |
 | 3 | Cabling | cables between devices and panels | one cable, unless rows share a `cable_group` |
 
 Run them in that order. Sheet 2 resolves racks created by sheet 1; sheet 3 resolves devices created
 by sheet 2.
+
+## Device loopback and management addresses
+
+Four optional columns on the device sheet. Fill at least one of them on every network device. A
+patch panel — whose device type has no management port and no loopback — leaves all four blank.
+
+| Column | What it does |
+| --- | --- |
+| `management_ip4` | IPv4 of the out-of-band / management port |
+| `management_ip6` | IPv6 of the same port |
+| `loopback_ip4` | IPv4 of the loopback |
+| `loopback_ip6` | IPv6 of the same loopback |
+
+Each cell takes a CIDR host address with an explicit mask (`10.0.0.1/32`, `2001:db8::1/128`). A
+bare host with no mask is rejected rather than guessed. An `*_ip4` cell must be IPv4 and an `*_ip6`
+cell must be IPv6.
+
+**Which address is primary.** IPv4 is preferred over IPv6 unless the row supplies no IPv4 at all.
+Within a family, management wins over loopback. Both families are still assigned: a dual-stack
+row has `primary_ip4` *and* `primary_ip6` set, and NetBox shows the IPv4 as the device's primary.
+
+| What you filled | Address NetBox shows as primary |
+| --- | --- |
+| management IPv4, anything else | management IPv4 |
+| loopback IPv4, no management IPv4 | loopback IPv4 |
+| management IPv6 and loopback IPv4, no management IPv4 | loopback IPv4 |
+| only IPv6, management filled | management IPv6 |
+| only loopback IPv6 | loopback IPv6 |
+
+**Do not put the interface name in the sheet.** Arista calls the management port `Management1`,
+Juniper calls it `fxp0` (or `em0`, or `me0`), Nvidia Cumulus calls it `eth0`. The loopback is
+`Loopback0`, `lo0`, or `lo` for the same three. Those names live on the device type in NetBox —
+one `mgmt_only` interface and one interface typed `loopback`. Both families of one role go on that
+same interface. The plan preview shows the name that will be used, so you can see `eth0` versus
+`Management1` before you apply.
+
+If a switch row is rejected because the type has no such interface, that is prep, not a sheet fix:
+edit the device type (community YAML often types `Loopback0` as `virtual`, which this tool will
+not treat as a loopback), then re-upload. NetBox does not copy a newly added template onto devices
+that already exist, so fix the type *before* the first import of that model.
+
+A re-upload of a device that already exists still creates missing addresses and still sets an
+unset primary IP. An address already held by a different device is an error, not a steal.
 
 ## Breakout cables
 

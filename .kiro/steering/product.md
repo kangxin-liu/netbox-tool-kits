@@ -21,7 +21,7 @@ The first iteration deliberately supports **creation of new entries only**. Thre
 one page each, reachable from a shared nav bar:
 
 1. **Site & rack hierarchy** — region, datacenter (site), datahall (room), racks.
-2. **Devices** — placed into racks by face and rack unit.
+2. **Devices** — placed into racks by face and rack unit, with loopback and management addresses.
 3. **Cabling** — device-to-device, device-to-panel, and panel-to-panel links.
 
 Each page offers a downloadable CSV/XLSX template, accepts an upload of the same shape, validates it
@@ -30,8 +30,11 @@ a write to NetBox.
 
 ## Explicitly out of scope for iteration 1
 
-- Updating or deleting existing NetBox objects (creation and idempotent skip only).
-- IPAM (prefixes, IPs, VLANs), virtualization, circuits, power path modelling.
+- Updating or deleting existing NetBox objects (creation and idempotent skip only), with one
+  named exception: the device importer may PATCH only `primary_ip4` / `primary_ip6` after it has
+  created the matching IP address (Requirement 8.19).
+- IPAM beyond the device sheet's loopback and management addresses — no prefixes, VRFs, or VLANs.
+- Virtualization, circuits, power path modelling.
 - SSO / multi-user roles — a single local Django superuser is the only identity.
 - Background workers, queues, scheduled syncs, webhooks.
 - Multi-NetBox-instance switching from the UI.

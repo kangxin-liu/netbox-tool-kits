@@ -1,14 +1,15 @@
 # netbox-tool-kits
 
 An internal Django web app for populating NetBox from spreadsheets. Iteration 1 **creates** DCIM
-objects only — it never updates or deletes anything in NetBox.
+objects only — it never updates or deletes anything in NetBox, except the device importer's
+field-scoped PATCH of a new device's primary IP after the matching address is created.
 
 Three importer pages, one per nav-bar entry:
 
 | Page | Creates | Sheet key |
 | --- | --- | --- |
 | Hierarchy | Location (region), datacenter (site), datahall (location), racks | one row per rack |
-| Devices | Devices mounted in racks by face and rack unit | `rack` name |
+| Devices | Devices mounted in racks by face and rack unit, plus loopback and management addresses | `rack` name |
 | Cabling | Cables between devices and patch panels | end names + port names |
 
 Rack names follow `<datacenter_slug>-<datahall_slug>-<rack>`, e.g. `SYD1-DH1-R01`. That convention

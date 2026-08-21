@@ -5,7 +5,8 @@ or your secret manager, never in a commit.
 
 A brand-new NetBox has no device roles, no manufacturers, no device types, and no patch panels.
 Iteration 1 of this tool creates none of those — it creates the DCIM objects its three sheets
-describe and nothing else — so on an unprepared instance the device and cabling importers have
+describe, and on the device sheet the loopback and management addresses assigned to those devices,
+and nothing else — so on an unprepared instance the device and cabling importers have
 nothing to resolve against. That is expected, and each page's readiness panel says so before you
 upload anything.
 
@@ -14,7 +15,7 @@ What that means in practice:
 | Sheet | On a brand-new instance |
 | --- | --- |
 | 1. Hierarchy | **works immediately.** It creates its own parents: region, site, location, racks |
-| 2. Devices | needs device roles and device types to exist first |
+| 2. Devices | needs device roles and device types to exist first, with `mgmt_only` and `loopback` marked on network types |
 | 3. Cabling | needs devices that have ports, which means device types with port templates |
 
 So a new instance is always usable for sheet 1 first. Everything below is preparation for sheets 2
@@ -87,13 +88,21 @@ carries YAML definitions for most vendors. Two ways in:
   walks the library and imports a chosen list of vendors over the API. Review what it will import
   first: importing every vendor leaves you with thousands of types to search through.
 
-Two things to check on each type you import:
+Three things to check on each type you import:
 
 * **`u_height` must be right.** The device importer validates that a device fits inside its rack and
   does not overlap another, and it takes the height from the device type when the sheet omits it.
 * **Ports must exist on the type.** A type with no interface templates produces devices with no
   interfaces, and every cabling row against them fails to resolve a port. NetBox does **not**
   retro-fit ports onto devices that already exist, so fix the type *before* running sheet 2.
+* **Management and loopback must be marked, not merely present.** Sheet 2 assigns `management_ip4` /
+  `management_ip6` to the unique interface template with `mgmt_only` set, and `loopback_ip4` /
+  `loopback_ip6` to the unique template whose type is `loopback`. Both families of one role land on
+  that same interface. It does not read interface names from the sheet, because Arista, Juniper and
+  Nvidia Cumulus all name those ports differently. Community YAML often types `Loopback0` as
+  `virtual`; that is **not** a loopback for this tool — change it to `loopback` on the type. A type
+  with two `mgmt_only` interfaces is ambiguous and every management address against it will be
+  rejected. A patch-panel type should have neither, so all four IP cells stay blank.
 
 If a type you already created is missing its port templates, `scripts/seed_netbox.py` adds them to
 existing types — interface templates for switches, front/rear port templates for panels. It is a dry
@@ -179,7 +188,7 @@ Load each importer page and read its readiness panel — it is strictly read-onl
 | Page | Tells you |
 | --- | --- |
 | Hierarchy | that it needs no prerequisites |
-| Devices | whether the default role resolves, how many roles and device types exist |
+| Devices | whether the default role resolves, how many roles and device types exist, and how many of those types define a management (`mgmt_only`) and a loopback interface |
 | Cabling | how many devices exist, and how many interfaces and panel ports they have |
 
 Then import in order: **sheet 1 → sheet 2 → sheet 3**, validating each in full before applying it.

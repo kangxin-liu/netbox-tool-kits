@@ -7,7 +7,9 @@ instance; HTTP is stubbed.
 Phases 1–7 are iteration 1 and are complete. **Phase 8 is an addition on top of it** — cable profiles
 and breakout, decision D10 — and is gated on that decision being accepted at review. Task 23 is the one
 exception to the no-live-NetBox rule above: it verifies the API against a real instance, which is how
-every other field in this spec was pinned down.
+every other field in this spec was pinned down. **Phase 9 is the next addition** — loopback and
+management addresses on the device sheet, decision D11 — gated the same way; task 27a is the
+read-only probe.
 
 ## Phase 1 — Scaffold and configuration
 
@@ -575,10 +577,11 @@ every other field in this spec was pinned down.
 
 ## Phase 8 — Cable profiles and breakout (D10, proposed — not started)
 
-Tasks 24–26 are **built**; 23b is not, and it is the one that can still invalidate them, because the
-two facts it has left to check are behavioural rather than field-level. Neither blocks use of the
-columns: a wrong answer on the count rule turns Requirement 9.19's `<=` into `==`, and a wrong answer
-on ordering means lane assignment needs explicit columns instead of row order. Both are contained.
+Tasks 24–26 are **built**; 23b is not, and it is the one that can still invalidate them, because
+what it has left to check is behavioural rather than field-level. Three of its four questions are
+contained — a wrong answer changes one comparison, or a paragraph of documentation. The fourth is
+not: if connectors are not assigned in submitted order, row-order-is-lane-order goes, and with it
+the preview that makes lane assignment reviewable.
 
 - [x] 23a. Verify the cable-profile fields against a 4.6.8 instance — **done 2026-08-20**
   - `OPTIONS /api/dcim/cables/`: `profile` is present, writable, optional, and a plain choice field
@@ -590,15 +593,35 @@ on ordering means lane assignment needs explicit columns instead of row order. B
     yields per-side connector and position counts, and the `-shuffle` suffix is invisible to it
   - Read-only throughout: `OPTIONS` and `GET` only, nothing created
 
-- [ ] 23b. Verify the two behavioural facts — **needs a throwaway instance**
-  - The probed instance held no cables at all, so neither of these could be observed without writing
-  - POST a `breakout-1c4p-4c1p` with four B terminations, then five, then two: settles whether the
-    check in 9.19 is `<=` or `==`, and so whether a partly populated breakout is expressible
-  - Read back each termination's `connector` to confirm assignment follows submitted array order. If
-    it does not, stop — row order as lane order is the whole of D10's answer to lane control, and
-    explicit `a_connector` / `b_connector` columns become mandatory rather than rejected
-  - Amend Requirement 9.19 / 9.21 and the "Still unverified" table where reality disagrees
-  - _Requirements: 9.19, 9.21; assumption 7_
+- [ ] 23b. Verify the behavioural facts — **needs a throwaway instance**
+  - Nothing here is observable without creating a cable, which is why it is a script rather than a
+    test: `scripts/probe_cable_profiles.py`, which creates cables, reads them back, and deletes what
+    it created. It is the only thing in the repository that issues DELETE — the app's HTTP layer
+    refuses any verb outside GET/OPTIONS/POST, and the probe deliberately does not use it
+  - Run it as `--url <target> --i-know-this-is-disposable`. `--url` is never defaulted, so the
+    instance in `.env` cannot be hit by forgetting an argument, and it refuses an instance that
+    already holds cables. Needs nine uncabled interfaces on distinct devices and creates no devices
+    of its own; `docs/empty-instance-prep.md` covers standing an instance up
+  - Four questions, and where each answer lands:
+
+    | Question | If the answer is what we assumed | If it is not |
+    | --- | --- | --- |
+    | May a side carry **fewer** terminations than the profile has connectors? | Requirement 9.19's `<=` stands | It becomes `==` — one `<=` in `_check_group` — and a partly populated breakout stops being expressible at all |
+    | Does NetBox **reject more** terminations than there are connectors? | Belt and braces with our own S3 check | Our check is the only guard; say so in `design.md` rather than implying NetBox backs it up |
+    | Are connectors assigned in **submitted array order**? | Requirement 9.21 stands and the preview is honest | **Stop.** Row order as lane order is the whole of D10's answer to lane control; `a_connector` / `b_connector` become mandatory and `_describe_connectors` is currently a lie |
+    | What does a `-shuffle` profile actually **map**? | Record it, so a harness can be checked against it | A profile whose map does not match the harness must not be used, and the runbook has to say so |
+
+  - The fourth question was added after phase 8 shipped, when a real fabric turned out to need
+    `trunk-4c4p-shuffle`: the shuffle map is NetBox's own, cannot be set, and a mismatch against the
+    harness produces confident wrong traces with nothing to flag them. The probe prints the map and
+    a path trace rather than interpreting either, because only the harness specification can settle it
+  - The probe also posts a trunk with **four terminations on both sides**, which nothing had tried:
+    every earlier check used a breakout's one-A-to-many-B shape
+  - **Acceptance is a working per-lane trace, not a 201.** A 201 proves NetBox accepted the payload;
+    tracing is the feature D10 exists to enable, so the trace output is the finding that matters
+  - Then: record the answers in `design.md`'s "Still unverified" table, amend Requirements 9.19 /
+    9.21 where reality disagreed, and tick this task
+  - _Requirements: 9.19, 9.21, 9.22; assumption 7_
 
 - [x] 24. `cable_profile` column — **done**
   - One `ColumnSpec` in `CABLING_COLUMNS`: optional, `Conflict.CONSEQUENTIAL` per the D8 table, with
@@ -708,10 +731,93 @@ on ordering means lane assignment needs explicit columns instead of row order. B
     device type defining both `swp1` and `swp1s0`/`swp1s1` gives a sheet author two places to land one
     cable, and the children want to be virtual with a `parent` or gone
 
+## Phase 9 — Device loopback and management addresses (D11)
+
+Gated on D11 being accepted at review, including the remaining operator question: whether a
+management address should also be written to `oob_ip`. Dual-stack is decided: four columns, IPv4
+preferred as primary unless the row supplies none. Do not start 27b until 27a has recorded the
+probe results in `design.md`.
+
+- [ ] 27a. Probe IPAM assignment and interface discriminators against 4.6.8
+  - Read-only `OPTIONS` / `GET` on `/api/dcim/interface-templates/` (`mgmt_only`), the interface
+    `type` choices (is `loopback` present), and `/api/ipam/ip-addresses/` (`assigned_object_type` /
+    `assigned_object_id`, whether a parent prefix is required)
+  - Confirm `Device.primary_ip4` / `primary_ip6` are writable on PATCH and not useful on create,
+    and that two addresses of different families can share one interface
+  - Record the answers in `design.md`'s D11 probe table; amend Requirements 8.16–8.19 if reality
+    disagreed
+  - _Requirements: 8.16, 8.17, 8.19_
+
+- [ ] 27b. Dual-stack address columns
+  - Four `ColumnSpec`s in `DEVICE_COLUMNS`: `loopback_ip4`, `loopback_ip6`, `management_ip4`,
+    `management_ip6` — optional, `Conflict.CONSEQUENTIAL`, CIDR examples, no interface-name column
+  - S2: a non-blank cell must be an `ipaddress.ip_interface` with an explicit prefix; a host with
+    no mask is rejected, not defaulted; an `*_ip4` cell that is IPv6 (or the reverse) is
+    `DEVICE_IP_FAMILY_MISMATCH`
+  - S3: the same address in two cells — two rows, or two columns of one row — is
+    `DUPLICATE_IP_IN_FILE` naming both locations
+  - Template guidance states at-least-one of four on a type that defines the interfaces, and all
+    blank on a type that does not
+  - Tests: valid v4 in ip4 / v6 in ip6 accepted; `10.0.0.1` without a mask rejected; v6 in
+    `management_ip4` rejected; duplicate in-file and same-row two-column duplicate blocked
+  - _Requirements: 8.13, 8.22, 8.24, 8.25, 4.2, 11.5c_
+
+- [ ] 28. Resolve interfaces from the device type, not from the sheet
+  - Prefetch interface templates per device type touched by the sheet: unique `mgmt_only`, unique
+    type `loopback`. For an existing device, resolve against the device's own interfaces by the
+    same rules. Both families of one role assign to that same interface
+  - S4: at-least-one of four when the type has either role (8.14); all-blank when it has neither;
+    zero or more-than-one match on a filled column is `MGMT_INTERFACE_NOT_FOUND` /
+    `MGMT_INTERFACE_AMBIGUOUS` or the loopback pair, naming the type and the candidates
+  - An existing device missing the interface its type now defines is `DEVICE_INTERFACE_MISSING`,
+    not an invitation to create the interface (8.23)
+  - Plan preview names the resolved interface, each address, `primary_ip4`, `primary_ip6`, and
+    which of those NetBox will show as primary (8.26)
+  - Devices readiness panel counts types that define each role (17.2)
+  - Tests: Arista-named `Management1` and Cumulus-named `eth0` both resolve as management from
+    `mgmt_only` alone; two `mgmt_only` templates block; a patch panel with no such templates and
+    all cells blank applies; a switch with the templates and all four cells blank is
+    `DEVICE_IP_REQUIRED`; filling `management_ip4` against a type with no `mgmt_only` blocks
+  - _Requirements: 8.14–8.16, 8.23, 8.26, 17.1, 17.2_
+
+- [ ] 29. Create addresses and PATCH the primary IP
+  - Apply order per row: create or skip the device, POST each supplied `ipam.ip-addresses`
+    assigned to the resolved interface (up to four), PATCH the device with only `primary_ip4` /
+    `primary_ip6` per 8.18 — family first (IPv4 unless the row has none), then management over
+    loopback within the family
+  - `CreateAction` (or a sibling) must be able to express that PATCH; cabling still issues none
+  - Idempotency: address already on the intended interface is skipped; address held elsewhere or
+    unassigned is `IP_ALREADY_ASSIGNED`; primary already set to a different address is
+    consequential and blocks; primary unset is patched
+  - An existing device still has its remaining address work done (8.10, 8.20) — this is the
+    behaviour change from "skip the row and resolve nothing further"
+  - `oob_ip` is not written unless D11's review says otherwise
+  - Tests: new device gets IPs then primary; re-upload creates nothing; device-exists-IPs-missing
+    creates the IPs and sets primary; IP held by another device blocks with zero writes; a row
+    with `management_ip6` and `loopback_ip4` sets `primary_ip4` to the loopback and `primary_ip6`
+    to the management address; a v6-only row sets only `primary_ip6`; grep for `PATCH` finds only
+    this call, and the payload has no other keys
+  - _Requirements: 8.17–8.21, 11.3, 11.6, 11.7_
+
+- [ ] 30. Documentation and samples for device addresses
+  - `docs/operator-runbook.md`: at-least-one of four, CIDR with a mask, names are on the type,
+    IPv4 preferred as primary, patch panels leave all four blank
+  - `docs/empty-instance-prep.md`: mark exactly one `mgmt_only` and exactly one type-`loopback`
+    interface on each network device type; community YAML that types `Loopback0` as `virtual` must
+    be corrected before sheet 2 will accept a loopback address
+  - Samples: switch rows in `2_devices_valid.csv` gain CIDR values (at least one family); panel
+    rows stay blank; the invalid sheet gains an all-blank switch, a panel with an address, a
+    mask-less host, a v6 value in an ip4 column, and a duplicate address
+  - `scripts/seed_netbox.py`: add `mgmt_only` and `loopback` templates for the switch types it
+    already seeds, named for the `--naming` scheme
+  - _Requirements: 8.13–8.26, 17.6_
+
 ## Deferred to iteration 2 (do not build now)
 
-Update and delete of existing objects; IPAM and VLANs; multi-user roles and SSO; background workers
-for very large sheets; multi-instance NetBox switching; compensating rollback of applied creates.
+Update and delete of existing objects (other than the primary-IP PATCH of D11); IPAM beyond the
+device sheet's loopback and management addresses (prefixes, VRFs, VLANs); multi-user roles and SSO;
+background workers for very large sheets; multi-instance NetBox switching; compensating rollback of
+applied creates. Dual-stack on the device sheet is in scope for D11 (four columns), not deferred.
 
 **Transceiver recording (D3, D6).** Dropped from iteration 1 because setting `interface.type` cannot
 hold a part number once device types define interface types. Iteration 2 should pick between a
@@ -721,4 +827,4 @@ not create, so the create-only invariant and its test will need revisiting delib
 
 **Completing a partly cabled breakout (D10, Requirement 9.22).** Adding the missing lane to a cable
 that already exists is a PATCH, so it lands with the update operations above rather than with phase 8.
-Until then a half-cabled group blocks and says so.
+Until then a half-cabled group blocks and says so. D11's primary-IP PATCH does not reopen this.
