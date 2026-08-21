@@ -15,6 +15,8 @@ xlsx picklists and to write example rows, and validation always defers to what t
 from dataclasses import dataclass
 from enum import Enum
 
+from importer.cable_profiles import PROFILES as CABLE_PROFILES
+
 # The template's guidance line sits on line 2 and starts with this marker so the parser can drop it
 # without treating it as data (Requirements 4.7, 5.11).
 GUIDANCE_MARKER = "# guidance:"
@@ -389,6 +391,34 @@ CABLING_COLUMNS: tuple[ColumnSpec, ...] = (
         help_text="Validated against the cable-type choices NetBox reports",
         choices=("cat6", "cat6a", "mmf-om3", "mmf-om4", "smf-os2", "dac-passive", "aoc"),
         example="smf-os2",
+    ),
+    ColumnSpec(
+        key="cable_profile",
+        label="cable_profile",
+        # CONSEQUENTIAL, alongside cable_type: the profile is what NetBox traces lanes through, so
+        # an existing cable profiled differently from the sheet means the operator's picture of that
+        # link is wrong, not merely differently labelled (D8, D10).
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text=(
+            "How the cable is built inside, for a breakout or trunk. Blank leaves the cable "
+            "unprofiled, which is what every cable without one looks like today"
+        ),
+        choices=CABLE_PROFILES,
+        example="",
+    ),
+    ColumnSpec(
+        key="cable_group",
+        label="cable_group",
+        # IDENTITY like `a_end_kind` and `*_port_side`: it is this tool's vocabulary for reading the
+        # sheet and is never sent to NetBox, so it cannot disagree with an existing object.
+        required=False,
+        conflict=Conflict.IDENTITY,
+        help_text=(
+            "Rows sharing a tag are one cable with several terminations, which is how a breakout "
+            "is written. Blank means this row is a cable on its own"
+        ),
+        example="",
     ),
     ColumnSpec(
         key="cable_status",

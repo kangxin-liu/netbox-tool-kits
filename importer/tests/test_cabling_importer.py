@@ -19,6 +19,7 @@ from importer.importers.base import ApplyRefused, RowOutcome
 from importer.importers.cabling import CABLES, DEVICES, CablingImporter, read_end
 from importer.services.lookups import Lookups
 from importer.services.sheets import Row, parse_upload
+from importer.tests import fakes
 from importer.tests.fakes import FakeNetBox
 from importer.validation import Code, Severity
 
@@ -575,11 +576,20 @@ class TestNoTransceiverHandling:
     def test_applying_a_sheet_leaves_every_interface_exactly_as_it_was(
         self, importer, netbox, topology
     ):
-        """Requirements 9.8, 11.3: the interface's type is the device type's business, not ours."""
-        before = [dict(record) for record in netbox.stored(INTERFACES)]
+        """Requirements 9.8, 11.3: the interface's type is the device type's business, not ours.
+
+        `cable` is excluded from the comparison because NetBox sets it itself when the cable is
+        created — occupancy is its bookkeeping, not a write this tool issues. That the tool issues
+        no write to the endpoint at all is the assertion below.
+        """
+
+        def without_occupancy(records):
+            return [{k: v for k, v in record.items() if k != "cable"} for record in records]
+
+        before = without_occupancy(netbox.stored(INTERFACES))
         plan = validate(importer, netbox, [row(), row(a_port="swp2", b_port="MPO2")])
         apply_plan(importer, netbox, plan)
-        assert netbox.stored(INTERFACES) == before
+        assert without_occupancy(netbox.stored(INTERFACES)) == before
         assert netbox.posted(INTERFACES) == []
 
 
@@ -853,3 +863,483 @@ class TestRequestBudget:
         fetched = record_fetches(netbox)
         importer.validate(sheet([row()]), Lookups(client=netbox))
         assert REAR_PORTS not in fetched
+
+
+# --- 9.13, 9.14: the cable_profile column (D10) ---------------------------------------------
+
+
+class TestCableProfile:
+    def test_a_blank_profile_leaves_the_key_out_of_the_payload_altogether(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.13: a sheet that does not use profiles posts what it always posted."""
+        plan = validate(importer, netbox, [row()])
+        assert "profile" not in cable_payload(plan)
+
+    def test_a_profile_reaches_the_payload(self, importer, netbox, topology):
+        plan = validate(importer, netbox, [row(cable_profile="single-1c2p")])
+        assert cable_payload(plan)["profile"] == "single-1c2p"
+
+    def test_a_profile_netbox_does_not_accept_is_rejected_with_the_accepted_values(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.13: the choices come from the API, as `cable_type`'s do."""
+        plan = validate(importer, netbox, [row(cable_profile="breakout-1c99p-99c1p")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.VALUE_NOT_IN_CHOICES)
+        assert error.column == "cable_profile"
+        assert "breakout-1c4p-4c1p" in error.expected
+
+    def test_a_profile_is_accepted_case_insensitively_and_normalised(
+        self, importer, netbox, topology
+    ):
+        plan = validate(importer, netbox, [row(cable_profile="Single-1C2P")])
+        assert cable_payload(plan)["profile"] == "single-1c2p"
+
+    def test_a_netbox_reporting_no_profiles_at_all_blocks_a_named_profile(
+        self, importer, netbox, topology, monkeypatch
+    ):
+        """Requirement 9.14: refuse the value rather than silently dropping it."""
+        monkeypatch.setitem(fakes.CHOICES[CABLES], "profile", frozenset())
+        plan = validate(importer, netbox, [row(cable_profile="single-1c2p")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.CABLE_PROFILE_UNSUPPORTED)
+        assert error.column == "cable_profile"
+        assert "no cable profile choices" in error.message
+        assert netbox.posts == []
+
+    def test_a_netbox_reporting_no_profiles_still_accepts_a_sheet_that_names_none(
+        self, importer, netbox, topology, monkeypatch
+    ):
+        monkeypatch.setitem(fakes.CHOICES[CABLES], "profile", frozenset())
+        plan = validate(importer, netbox, [row()])
+        assert plan.verdict.is_applyable() is True
+
+
+# --- 9.15–9.21: cable groups (D10) ----------------------------------------------------------
+
+BREAKOUT = "breakout-1c4p-4c1p"
+
+
+def breakout_rows(group: str = "brk-01", profile: str = BREAKOUT, count: int = 4):
+    """One A-side port fanning out to `count` panel ports — the shape D10 exists for."""
+    rows = []
+    for index in range(1, count + 1):
+        values = row(a_port="swp1", b_port=f"MPO{index}", cable_group=group)
+        if index > 1:
+            # Requirement 9.18: later rows inherit the cable's own values from the first.
+            values["cable_profile"] = ""
+        else:
+            values["cable_profile"] = profile
+        rows.append(values)
+    return rows
+
+
+class TestCableGroup:
+    def test_four_rows_sharing_a_tag_become_one_cable(self, importer, netbox, topology):
+        """Requirement 9.16: one A termination, four B terminations, one create."""
+        plan = validate(importer, netbox, breakout_rows())
+
+        actions = [action for planned in plan.rows for action in planned.actions]
+        assert len(actions) == 1
+        payload = actions[0].payload
+        assert len(payload["a_terminations"]) == 1
+        assert len(payload["b_terminations"]) == 4
+        assert payload["profile"] == BREAKOUT
+
+    def test_the_b_terminations_are_sent_in_row_order(self, importer, netbox, topology):
+        """Requirement 9.21: row order is lane order, because it is the only lever there is."""
+        plan = validate(importer, netbox, breakout_rows())
+        payload = next(action for planned in plan.rows for action in planned.actions).payload
+        assert [term["object_id"] for term in payload["b_terminations"]] == [
+            topology.front_ports[f"MPO{index}"]["id"] for index in range(1, 5)
+        ]
+
+    def test_reordering_the_rows_reorders_the_lanes(self, importer, netbox, topology):
+        rows = breakout_rows()
+        reversed_rows = [rows[0], *reversed(rows[1:])]
+        plan = validate(importer, netbox, reversed_rows)
+        payload = next(action for planned in plan.rows for action in planned.actions).payload
+        assert [term["object_id"] for term in payload["b_terminations"]] == [
+            topology.front_ports[f"MPO{index}"]["id"] for index in (1, 4, 3, 2)
+        ]
+
+    def test_the_shared_a_port_is_not_a_duplicate_termination(self, importer, netbox, topology):
+        """Requirement 9.17: inside a group the repetition is the connector they share."""
+        plan = validate(importer, netbox, breakout_rows())
+        assert plan.verdict.errors == []
+
+    def test_without_the_group_tag_the_same_rows_are_three_duplicates(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.11 still holds: nobody said those rows were one cable."""
+        rows = [dict(values, cable_group="") for values in breakout_rows()]
+        plan = validate(importer, netbox, rows)
+        duplicates = [
+            i for i in plan.verdict.errors if i.code is Code.DUPLICATE_TERMINATION_IN_FILE
+        ]
+        assert [issue.line for issue in duplicates] == [3, 4, 5]
+        assert "same cable_group" in duplicates[0].message
+
+    def test_the_same_port_reused_by_a_second_group_is_still_a_duplicate(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.17 relaxes 9.11 *within* a group, not across two of them."""
+        rows = [
+            row(a_port="swp1", b_port="MPO1", cable_group="brk-01"),
+            row(a_port="swp1", b_port="MPO2", cable_group="brk-02"),
+        ]
+        plan = validate(importer, netbox, rows)
+        duplicate = next(
+            i for i in plan.verdict.errors if i.code is Code.DUPLICATE_TERMINATION_IN_FILE
+        )
+        assert (duplicate.line, duplicate.related_line) == (3, 2)
+
+    def test_a_group_tag_is_matched_case_insensitively(self, importer, netbox, topology):
+        rows = [
+            row(a_port="swp1", b_port="MPO1", cable_group="BRK-01", cable_profile=BREAKOUT),
+            row(a_port="swp1", b_port="MPO2", cable_group="brk-01"),
+        ]
+        plan = validate(importer, netbox, rows)
+        assert plan.verdict.errors == []
+        assert plan.verdict.object_count == 1
+
+    def test_both_ends_on_one_port_is_still_rejected_inside_a_group(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.17: 9.10 is not relaxed."""
+        rows = [
+            row(a_port="swp1", b_port="MPO1", cable_group="brk-01", cable_profile=BREAKOUT),
+            row(
+                a_end=LEAF,
+                a_end_kind="device",
+                a_port="swp2",
+                b_end=LEAF,
+                b_end_kind="device",
+                b_port="swp2",
+                cable_group="brk-01",
+            ),
+        ]
+        plan = validate(importer, netbox, rows)
+        assert any(i.code is Code.SAME_PORT_BOTH_ENDS for i in plan.verdict.errors)
+
+    def test_one_row_carrying_a_tag_is_an_ordinary_cable(self, importer, netbox, topology):
+        plan = validate(importer, netbox, [row(cable_group="brk-01")])
+        payload = cable_payload(plan)
+        assert len(payload["a_terminations"]) == len(payload["b_terminations"]) == 1
+
+    def test_the_verdict_counts_one_object_for_the_four_rows(self, importer, netbox, topology):
+        """The apply button quotes objects, and four rows are one cable."""
+        plan = validate(importer, netbox, breakout_rows())
+        assert plan.verdict.create_count == 4
+        assert plan.verdict.object_count == 1
+
+    def test_rows_are_previewed_in_sheet_order_even_when_groups_interleave(
+        self, importer, netbox, topology
+    ):
+        """Requirement 10.18: the preview reads down the file as the operator wrote it."""
+        rows = [
+            row(a_port="swp1", b_port="MPO1", cable_group="brk-01", cable_profile=BREAKOUT),
+            row(a_port="swp2", b_port="MPO2", cable_group="brk-02", cable_profile=BREAKOUT),
+            row(a_port="swp1", b_port="MPO3", cable_group="brk-01"),
+            row(a_port="swp2", b_port="MPO4", cable_group="brk-02"),
+        ]
+        plan = validate(importer, netbox, rows)
+        assert [planned.line for planned in plan.rows] == [2, 3, 4, 5]
+
+    def test_the_preview_names_the_connector_each_row_will_get(self, importer, netbox, topology):
+        """Requirement 9.21: lane assignment is read before apply, not discovered after."""
+        plan = validate(importer, netbox, breakout_rows())
+        assert plan.rows[0].resolved["connector"] == "B connector 1 of 4"
+        assert plan.rows[3].resolved["connector"] == "B connector 4 of 4"
+
+    def test_an_ungrouped_row_is_given_no_connector_to_read(self, importer, netbox, topology):
+        plan = validate(importer, netbox, [row()])
+        assert "connector" not in plan.rows[0].resolved
+
+    def test_a_blocked_row_blocks_the_whole_cable(self, importer, netbox, topology):
+        """One lane's port cannot be found, so the cable cannot be created as described."""
+        rows = breakout_rows()
+        rows[2]["b_port"] = "MPO99"
+        plan = validate(importer, netbox, rows)
+        assert all(planned.outcome == RowOutcome.BLOCKED for planned in plan.rows)
+        assert netbox.posts == []
+
+
+# --- 9.18: one cable, one set of values -----------------------------------------------------
+
+
+class TestGroupValues:
+    def test_later_rows_inherit_the_cables_values_from_the_first(self, importer, netbox, topology):
+        rows = breakout_rows()
+        rows[0]["label"] = "LNK-0001"
+        rows[0]["cable_status"] = "planned"
+        plan = validate(importer, netbox, rows)
+        payload = next(action for planned in plan.rows for action in planned.actions).payload
+        assert payload["label"] == "LNK-0001"
+        assert payload["status"] == "planned"
+
+    def test_a_value_supplied_only_by_a_later_row_is_still_the_cables_value(
+        self, importer, netbox, topology
+    ):
+        rows = breakout_rows()
+        rows[2]["label"] = "LNK-0002"
+        plan = validate(importer, netbox, rows)
+        payload = next(action for planned in plan.rows for action in planned.actions).payload
+        assert payload["label"] == "LNK-0002"
+
+    @pytest.mark.parametrize(
+        ("column", "first", "second"),
+        [
+            ("cable_type", "smf-os2", "mmf-om4"),
+            ("cable_profile", BREAKOUT, "breakout-1c8p-8c1p"),
+            ("label", "LNK-0001", "LNK-0002"),
+            ("cable_status", "connected", "planned"),
+        ],
+    )
+    def test_two_rows_describing_the_cable_differently_are_rejected(
+        self, importer, netbox, topology, column, first, second
+    ):
+        """Requirement 9.18: a cable has one type and one profile, and the tool picks neither."""
+        rows = breakout_rows()
+        rows[0][column] = first
+        rows[1][column] = second
+        plan = validate(importer, netbox, rows)
+
+        conflict = next(i for i in plan.verdict.errors if i.code is Code.CABLE_GROUP_FIELD_CONFLICT)
+        assert conflict.column == column
+        assert (conflict.line, conflict.related_line) == (3, 2)
+        assert first in conflict.message and second in conflict.message
+
+    def test_a_required_column_may_be_left_blank_where_the_group_supplies_it(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.18: required means required of the cable, not typed on every row.
+
+        This is the case that forced normalisation to run before S2 — `cable_type` is required, so
+        a blank cell would otherwise be rejected before anything could look for the group's value.
+        """
+        rows = breakout_rows()
+        for values in rows[1:]:
+            values["cable_type"] = ""
+        plan = validate(importer, netbox, rows)
+
+        assert plan.verdict.errors == []
+        payload = next(action for planned in plan.rows for action in planned.actions).payload
+        assert payload["type"] == "smf-os2"
+
+    def test_an_ungrouped_row_still_has_to_state_its_required_values(
+        self, importer, netbox, topology
+    ):
+        """Nothing inherits into a cable of one: there is no other row to inherit from."""
+        plan = validate(importer, netbox, [row(cable_type="")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.REQUIRED_VALUE_BLANK)
+        assert error.column == "cable_type"
+
+    def test_a_blank_required_cell_in_a_group_that_never_states_it_is_still_rejected(
+        self, importer, netbox, topology
+    ):
+        rows = [dict(values, cable_type="") for values in breakout_rows()]
+        plan = validate(importer, netbox, rows)
+        blanks = [i for i in plan.verdict.errors if i.code is Code.REQUIRED_VALUE_BLANK]
+        assert [issue.line for issue in blanks] == [2, 3, 4, 5]
+
+    def test_a_repeated_identical_value_is_not_a_conflict(self, importer, netbox, topology):
+        rows = breakout_rows()
+        for values in rows:
+            values["cable_profile"] = BREAKOUT
+        plan = validate(importer, netbox, rows)
+        assert plan.verdict.errors == []
+
+    def test_the_same_value_differently_cased_is_not_a_conflict(self, importer, netbox, topology):
+        rows = breakout_rows()
+        rows[1]["cable_type"] = "SMF-OS2"
+        plan = validate(importer, netbox, rows)
+        assert plan.verdict.errors == []
+
+    def test_two_ungrouped_rows_may_of_course_differ(self, importer, netbox, topology):
+        plan = validate(
+            importer,
+            netbox,
+            [row(), row(a_port="swp2", b_port="MPO2", cable_type="mmf-om4")],
+        )
+        assert plan.verdict.errors == []
+
+
+# --- 9.19, 9.20: the profile and the number of terminations ---------------------------------
+
+
+class TestProfileFitsTheGroup:
+    def test_a_side_with_more_terminations_than_connectors_is_rejected(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.19: `1c2p-2c1p` has two B connectors, so a third lane will not fit."""
+        rows = breakout_rows(profile="breakout-1c2p-2c1p", count=3)
+        plan = validate(importer, netbox, rows)
+
+        overflow = next(i for i in plan.verdict.errors if i.code is Code.PROFILE_CONNECTOR_OVERFLOW)
+        assert overflow.column == "b_port"
+        assert "at most 2" in overflow.expected
+        assert "2 connectors of 1 position" in overflow.message
+
+    def test_a_side_filled_exactly_to_its_connector_count_is_fine(self, importer, netbox, topology):
+        plan = validate(importer, netbox, breakout_rows(count=4))
+        assert plan.verdict.errors == []
+
+    def test_a_partly_populated_breakout_is_allowed(self, importer, netbox, topology):
+        """Two lanes of a four-lane breakout is a real cable, not an error (Requirement 9.19)."""
+        plan = validate(importer, netbox, breakout_rows(count=2))
+        assert plan.verdict.errors == []
+
+    def test_the_a_side_is_checked_against_its_own_limit(self, importer, netbox, topology):
+        """A breakout has one A connector, so two distinct A ports do not fit."""
+        rows = [
+            row(a_port="swp1", b_port="MPO1", cable_group="brk-01", cable_profile=BREAKOUT),
+            row(a_port="swp2", b_port="MPO2", cable_group="brk-01"),
+        ]
+        plan = validate(importer, netbox, rows)
+        overflow = next(i for i in plan.verdict.errors if i.code is Code.PROFILE_CONNECTOR_OVERFLOW)
+        assert overflow.column == "a_port"
+        assert "at most 1" in overflow.expected
+
+    def test_a_trunk_permits_several_terminations_on_both_sides(self, importer, netbox, topology):
+        rows = [
+            row(a_port="swp1", b_port="MPO1", cable_group="trk-01", cable_profile="trunk-2c4p"),
+            row(a_port="swp2", b_port="MPO2", cable_group="trk-01"),
+        ]
+        plan = validate(importer, netbox, rows)
+        assert plan.verdict.errors == []
+        payload = next(action for planned in plan.rows for action in planned.actions).payload
+        assert len(payload["a_terminations"]) == len(payload["b_terminations"]) == 2
+
+    def test_a_profile_whose_shape_cannot_be_read_warns_instead_of_guessing(
+        self, importer, netbox, topology, monkeypatch
+    ):
+        """Requirement 9.19: NetBox accepts it, so do not invent a limit and block it."""
+        monkeypatch.setitem(
+            fakes.CHOICES[CABLES], "profile", frozenset({"mystery-profile", BREAKOUT})
+        )
+        rows = breakout_rows(profile="mystery-profile")
+        plan = validate(importer, netbox, rows)
+
+        assert plan.verdict.errors == []
+        warning = next(i for i in plan.verdict.warnings if i.code is Code.PROFILE_STRUCTURE_UNKNOWN)
+        assert "cannot read how many connectors" in warning.message
+
+    def test_a_grouped_cable_with_no_profile_warns_that_lanes_cannot_be_traced(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.20: NetBox will store it; it just cannot trace it."""
+        rows = [dict(values, cable_profile="") for values in breakout_rows()]
+        plan = validate(importer, netbox, rows)
+
+        assert plan.verdict.errors == []
+        warning = next(
+            i for i in plan.verdict.warnings if i.code is Code.CABLE_GROUP_WITHOUT_PROFILE
+        )
+        assert "trace which lane" in warning.message
+        assert plan.verdict.is_applyable() is False
+
+        plan.verdict.acknowledge()
+        assert plan.verdict.is_applyable() is True
+
+    def test_an_ordinary_row_without_a_profile_is_not_warned_about(
+        self, importer, netbox, topology
+    ):
+        """One termination a side needs no profile: there is only one lane to find."""
+        plan = validate(importer, netbox, [row()])
+        assert plan.verdict.warnings == []
+
+
+# --- 9.22, 9.23: occupancy and reporting over a whole group ---------------------------------
+
+
+class TestGroupOccupancy:
+    def cable_the_group(self, importer, netbox, topology, rows=None):
+        plan = validate(importer, netbox, rows or breakout_rows())
+        apply_plan(importer, netbox, plan)
+        return netbox.stored(CABLES)[0]
+
+    def test_the_group_applies_as_a_single_post(self, importer, netbox, topology):
+        plan = validate(importer, netbox, breakout_rows())
+        apply_plan(importer, netbox, plan)
+        assert [post.size for post in netbox.posted(CABLES)] == [1]
+
+    def test_every_line_of_the_group_gets_a_result_naming_the_one_cable(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.23."""
+        plan = validate(importer, netbox, breakout_rows())
+        report = apply_plan(importer, netbox, plan)
+
+        created = report.created
+        assert [result.line for result in created] == [2, 3, 4, 5]
+        assert len({result.object_id for result in created}) == 1
+        assert "one object for lines 2, 3, 4 and 5" in created[1].message
+
+    def test_the_report_counts_one_object_not_four(self, importer, netbox, topology):
+        plan = validate(importer, netbox, breakout_rows())
+        report = apply_plan(importer, netbox, plan)
+        assert report.created_count == 1
+        assert len(netbox.stored(CABLES)) == 1
+
+    def test_only_one_line_carries_the_write_sequence(self, importer, netbox, topology):
+        """Requirement 12.4: a manual unwind finds each object once."""
+        plan = validate(importer, netbox, breakout_rows())
+        report = apply_plan(importer, netbox, plan)
+        assert [result.sequence for result in report.created] == [1, 0, 0, 0]
+
+    def test_re_uploading_an_applied_group_creates_nothing(self, importer, netbox, topology):
+        """Requirement 9.22: every termination is held by the same cable, so the group skips."""
+        self.cable_the_group(importer, netbox, topology)
+
+        second = validate(importer, netbox, breakout_rows())
+        assert second.verdict.errors == []
+        assert all(planned.outcome == RowOutcome.SKIP_EXISTS for planned in second.rows)
+
+        report = apply_plan(importer, netbox, second)
+        assert report.created_count == 0
+        assert report.skipped_count == 4
+        assert len(netbox.stored(CABLES)) == 1
+
+    def test_a_partly_cabled_group_blocks_rather_than_skipping_the_missing_lanes(
+        self, importer, netbox, topology
+    ):
+        """Requirement 9.22: the lanes that are missing would be lost silently."""
+        existing = netbox.add(CABLES, label="LNK-0001")
+        topology.front_ports["MPO1"]["cable"] = {"id": existing["id"], "label": "LNK-0001"}
+
+        plan = validate(importer, netbox, breakout_rows())
+        error = next(i for i in plan.verdict.errors if i.code is Code.CABLE_GROUP_PARTLY_CABLED)
+        assert "LNK-0001" in error.message
+        assert "cannot add the missing termination" in error.message
+        assert all(planned.outcome == RowOutcome.BLOCKED for planned in plan.rows)
+
+    def test_a_partly_cabled_group_writes_nothing_at_all(self, importer, netbox, topology):
+        topology.front_ports["MPO2"]["cable"] = {"id": 9101}
+        plan = validate(importer, netbox, breakout_rows())
+        with pytest.raises(ApplyRefused):
+            apply_plan(importer, netbox, plan)
+        assert netbox.posted(CABLES) == []
+
+    def test_a_group_whose_terminations_are_spread_over_two_cables_blocks(
+        self, importer, netbox, topology
+    ):
+        for index, cable_id in ((1, 9201), (2, 9202), (3, 9203), (4, 9204)):
+            topology.front_ports[f"MPO{index}"]["cable"] = {"id": cable_id}
+        topology.interfaces["swp1"]["cable"] = {"id": 9201}
+
+        plan = validate(importer, netbox, breakout_rows())
+        assert any(i.code is Code.CABLE_GROUP_PARTLY_CABLED for i in plan.verdict.errors)
+
+    def test_an_ungrouped_row_with_one_occupied_end_still_skips(self, importer, netbox, topology):
+        """Requirement 9.9 is untouched: with one termination a side, a skip loses nothing."""
+        topology.interfaces["swp1"]["cable"] = {"id": 9301}
+        plan = validate(importer, netbox, [row()])
+        assert plan.rows[0].outcome == RowOutcome.SKIP_EXISTS
+        assert plan.verdict.errors == []
+
+    def test_the_skip_message_says_group_when_it_is_one(self, importer, netbox, topology):
+        cable = self.cable_the_group(importer, netbox, topology)
+        second = validate(importer, netbox, breakout_rows())
+        info = next(i for i in second.verdict.infos if i.code is Code.PORT_ALREADY_CABLED)
+        assert "The group was skipped" in info.message
+        assert str(cable["id"]) in info.related_url

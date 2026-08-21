@@ -613,6 +613,12 @@ DEVICES_INVALID = (
 # The physical story: a 400G trunk runs from a switch cage to the panel's rear MPO, and the panel's
 # own front-to-rear mappings fan it out to four LC front ports. The fan-out lives in the panel, not
 # in a cable, so every row here is one termination per end and single-* profiles apply.
+#
+# `cable_profile` used to be an ignored column here and is now real (D10), which costs these rows
+# nothing: the values they already carried are genuine profiles, so they simply reach the payload.
+# `transceiver` stays as the sheet's unrecognised-column demonstration (D3). A fan-out that lives in
+# a *cable* rather than in a panel needs the `cable_group` column, which the breakout sample below
+# carries and these rows deliberately do not.
 
 CABLING_VALID = (
     # 400G trunk into the breakout panel's rear: one cable carrying four lanes.
@@ -907,7 +913,10 @@ CABLING_INVALID = (
         "",
         "unmapped transceiver part number",
     ),
-    # A trunk/breakout profile needs several terminations per end, which a row cannot express.
+    # A length with no unit. The breakout profile on a lone row is *not* the fault: NetBox lets a
+    # profiled cable be only partly populated, so one termination a side is legal, if pointless.
+    # Before D10 this row's fault was the profile itself, back when the column was ignored entirely
+    # and the row therefore carried no fault at all.
     (
         "lab1-dh1-r01-leaf01",
         "device",
@@ -922,10 +931,10 @@ CABLING_INVALID = (
         "breakout-1c4p-4c1p",
         "connected",
         "BAD-0008",
+        "5",
         "",
         "",
-        "",
-        "multi-termination profile: one termination per end only in iteration 1",
+        "a length with no length_unit",
     ),
     (
         "lab1-dh1-r01-leaf01",
@@ -969,6 +978,199 @@ CABLING_INVALID = (
 )
 
 
+# --------------------------------------------------------------------------------------
+# Sheet 3b — cabling, with a breakout cable (D10)
+# --------------------------------------------------------------------------------------
+# A separate sheet rather than more rows on the one above, because a breakout needs the
+# `cable_group` column and the sample above exists partly to prove that a sheet *without* the D10
+# columns still behaves exactly as it did.
+#
+# The physical story: one 400G QSFP-DD cage on the leaf breaks out to four 100G ports. That is one
+# cable, so it is one `cable_group` and one `breakout-1c4p-4c1p` profile, written across four rows.
+# Row order is lane order: row 2 becomes connector 1, row 5 connector 4 (Requirement 9.21).
+#
+# Note what the later rows leave blank. A cable has one type, one profile and one label, so they are
+# stated once on the group's first row and inherited (Requirement 9.18) — including `cable_type`,
+# which is a required *column* but only required of the cable.
+
+BREAKOUT_COLUMNS = (
+    "a_end",
+    "a_end_kind",
+    "a_port",
+    "b_end",
+    "b_end_kind",
+    "b_port",
+    "b_port_side",
+    "cable_type",
+    "cable_profile",
+    "cable_group",
+    "cable_status",
+    "label",
+    "length",
+    "length_unit",
+)
+
+
+def lane(a_port: str, b_port: str, group: str, *note: str) -> tuple[str, ...]:
+    """A row of a breakout group after its first: only the far end differs.
+
+    Every cable-level cell is blank, which is the point being demonstrated — the type, profile and
+    label are stated once on the group's first row and inherited (Requirement 9.18).
+    """
+    return (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        a_port,
+        "lab1-dh1-r01-pp02",
+        "panel",
+        b_port,
+        "front",
+        "",
+        "",
+        group,
+        "",
+        "",
+        "",
+        "",
+        *note,
+    )
+
+
+BREAKOUT_VALID = (
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp3",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F5",
+        "front",
+        "mmf-om4",
+        "breakout-1c4p-4c1p",
+        "leaf01-swp3",
+        "connected",
+        "BRK-0001",
+        "5",
+        "m",
+    ),
+    lane("swp3", "F6", "leaf01-swp3"),
+    lane("swp3", "F7", "leaf01-swp3"),
+    lane("swp3", "F8", "leaf01-swp3"),
+)
+
+BREAKOUT_INVALID = (
+    # A fifth lane on a profile with four B connectors (Requirement 9.19).
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp4",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F9",
+        "front",
+        "mmf-om4",
+        "breakout-1c4p-4c1p",
+        "leaf01-swp4",
+        "connected",
+        "BRK-0002",
+        "5",
+        "m",
+        "first of five lanes on a four-connector profile: the group overflows",
+    ),
+    lane("swp4", "F10", "leaf01-swp4", "lane two"),
+    lane("swp4", "F11", "leaf01-swp4", "lane three"),
+    lane("swp4", "F12", "leaf01-swp4", "lane four, the last one that fits"),
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp4",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F13",
+        "front",
+        "",
+        "",
+        "leaf01-swp4",
+        "",
+        "",
+        "",
+        "",
+        "the fifth lane, which PROFILE_CONNECTOR_OVERFLOW is reported against",
+    ),
+    # Two rows of one cable disagreeing about what the cable is (Requirement 9.18).
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp5",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F14",
+        "front",
+        "mmf-om4",
+        "breakout-1c2p-2c1p",
+        "leaf01-swp5",
+        "connected",
+        "BRK-0003",
+        "5",
+        "m",
+        "states the cable's type and profile",
+    ),
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp5",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F15",
+        "front",
+        "smf-os2",
+        "",
+        "leaf01-swp5",
+        "",
+        "",
+        "",
+        "",
+        "same cable, different cable_type: CABLE_GROUP_FIELD_CONFLICT",
+    ),
+    # The same A port in two different groups is still a duplicate termination (Requirement 9.17
+    # relaxes 9.11 within a group, not across two of them).
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp6",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F16",
+        "front",
+        "mmf-om4",
+        "breakout-1c2p-2c1p",
+        "leaf01-swp6-a",
+        "connected",
+        "BRK-0004",
+        "5",
+        "m",
+        "claims leaf01 swp6",
+    ),
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp6",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F17",
+        "front",
+        "mmf-om4",
+        "breakout-1c2p-2c1p",
+        "leaf01-swp6-b",
+        "connected",
+        "BRK-0005",
+        "5",
+        "m",
+        "a second cable on the same port: DUPLICATE_TERMINATION_IN_FILE",
+    ),
+)
+
+
 SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...] = (
     (
         "1_hierarchy_valid",
@@ -1006,6 +1208,20 @@ SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...
         CABLING_COLUMNS,
         CABLING_INVALID,
         "line 2 is valid and line 12 is a warning; lines 3-11 are errors, so the file is blocked",
+    ),
+    (
+        "3_cabling_breakout_valid",
+        BREAKOUT_COLUMNS,
+        BREAKOUT_VALID,
+        "needs sheets 1 and 2 applied; four rows describing one breakout cable, which validates "
+        "clean and applies as a single cable with four B-side terminations (D10)",
+    ),
+    (
+        "3_cabling_breakout_invalid",
+        BREAKOUT_COLUMNS,
+        BREAKOUT_INVALID,
+        "every group here is faulty: a fifth lane on a four-connector profile, two rows of one "
+        "cable disagreeing, and one port claimed by two groups",
     ),
 )
 

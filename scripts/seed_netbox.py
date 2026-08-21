@@ -7,7 +7,7 @@ WHY THIS EXISTS
 ---------------
 A NetBox device type is a template. Creating a device from a type whose type defines no ports
 produces a device with no ports, and the cabling importer then has nothing to terminate against.
-The six device types in the target instance were created without any interface, front-port, or
+The device types in the target instance were created without any interface, front-port, or
 rear-port templates, so this script fills that gap.
 
 ORDERING MATTERS: NetBox does not retro-fit ports onto devices that already exist. Run this
@@ -68,9 +68,10 @@ NAMING_SCHEMES: dict[str, str] = {
 
 # Physical cages per switch model, as ranges of (count, netbox_interface_type).
 # Sources: NVIDIA hardware manuals — SN2201 48x1GbE RJ45 + 4x100GbE QSFP28;
-# SN4700 32x400GbE QSFP-DD; SN5610 64x800GbE OSFP + 2x25GbE SFP28.
+# SN3700 32x200GbE QSFP56; SN4700 32x400GbE QSFP-DD; SN5610 64x800GbE OSFP + 2x25GbE SFP28.
 SWITCH_INTERFACES: dict[str, tuple[tuple[int, str], ...]] = {
     "Spectrum-SN2201": ((48, "1000base-t"), (4, "100gbase-x-qsfp28")),
+    "Spectrum-SN3700": ((32, "200gbase-x-qsfp56"),),
     "Spectrum-SN4700": ((32, "400gbase-x-qsfpdd"),),
     "Spectrum-SN5610": ((64, "800gbase-x-osfp"), (2, "25gbase-x-sfp28")),
 }

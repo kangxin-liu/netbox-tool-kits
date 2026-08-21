@@ -114,6 +114,18 @@ class CreateAction:
     line: int
     object_kind: str = ""
 
+    lines: tuple[int, ...] = ()
+    """Every spreadsheet line this one object came from, where that is more than one.
+
+    A cable group is several rows describing one cable (Requirement 9.16), and the operator wants a
+    report line for each row they wrote (9.23). `line` stays the primary line — the one an error is
+    attributed to — and this carries the rest.
+    """
+
+    @property
+    def all_lines(self) -> tuple[int, ...]:
+        return self.lines or (self.line,)
+
     def resolved_payload(self, registry: Registry) -> dict[str, Any]:
         resolved: dict[str, Any] = {}
         for name, value in self.payload.items():
@@ -230,7 +242,14 @@ class RunReport:
 
     @property
     def created_count(self) -> int:
-        return len(self.created)
+        """Objects written, not report lines.
+
+        `sequence` is the write order and is zero when nothing was written for that line, so
+        counting non-zero sequences counts objects. The two differ once a cable group gives four
+        rows one cable: four lines report a create, one object was written, and the operator is
+        told the number that appeared in NetBox.
+        """
+        return len([result for result in self.created if result.sequence])
 
     @property
     def skipped_count(self) -> int:
@@ -267,9 +286,51 @@ class BaseImporter(ABC):
 
     # --- sheet-specific hooks ---------------------------------------------------------------
 
-    def extra_cell_checks(self, row: Row) -> list[RowError]:
-        """S2 checks beyond required / numeric / choices."""
+    def extra_cell_checks(self, row: Row, lookups: Lookups) -> list[RowError]:
+        """S2 checks beyond required / numeric / choices.
+
+        Takes `lookups` because some cell rules depend on what the target instance supports rather
+        than on the cell alone — a cable profile named against a NetBox that has no profiles is a
+        problem with this row, reported here, not a problem with the file (Requirement 9.14).
+        """
         return []
+
+    def normalise(self, rows: list[Row]) -> list[Row]:
+        """A last chance to fill in what the sheet left implicit, before S2 judges any cell.
+
+        It runs before S2 because the values it fills in are ones S2 would otherwise reject as
+        blank: a cable group states its type once and the other rows of that cable inherit it
+        (Requirement 9.18), and "required" has to mean "required of the cable" rather than "typed
+        on every row" for that to work.
+
+        Returns new rows rather than editing them, so nothing else in the pipeline has to wonder
+        whether the values it is reading are the ones the operator typed.
+        """
+        return rows
+
+    def group_key(self, row: Row) -> Any:
+        """Rows sharing a key are planned together by `plan_group`.
+
+        The default gives every row its own group, so an importer that has never heard of grouping
+        behaves exactly as it did when the pipeline planned one row at a time.
+        """
+        return row.line
+
+    def plan_group(
+        self,
+        rows: list[Row],
+        lookups: Lookups,
+        registry: Registry,
+        state: dict[str, str],
+        collector: IssueCollector,
+    ) -> list[PlannedRow]:
+        """S4 for one group of rows. Returns one `PlannedRow` per row, in the order given.
+
+        Only the cabling sheet needs this: a breakout is several rows describing one cable, and no
+        per-row hook can see the other rows it shares a cable with. Everything else keeps the
+        row-at-a-time contract through the default below.
+        """
+        return [self.plan_row(row, lookups, registry, state, collector) for row in rows]
 
     def check_consistency(self, rows: list[Row], collector: IssueCollector) -> None:
         """S3: what the rows of this sheet imply about each other.
@@ -326,7 +387,7 @@ class BaseImporter(ABC):
         state: dict[str, str] = {}
         planned: list[PlannedRow] = []
 
-        rows = self._stage_cells(sheet.rows, collector, lookups)
+        rows = self._stage_cells(self.normalise(sheet.rows), collector, lookups)
         stages.append("S2")
         if collector.errors:
             # A malformed cell makes every later stage's answer meaningless for that row, and
@@ -339,8 +400,11 @@ class BaseImporter(ABC):
             return self._plan_from(sheet, collector, stages, planned, registry, state)
 
         self.prefetch(rows, lookups)
-        for row in rows:
-            planned.append(self.plan_row(row, lookups, registry, state, collector))
+        for group in self._grouped(rows):
+            planned.extend(self.plan_group(group, lookups, registry, state, collector))
+        # Groups are planned together but reported in sheet order, so the preview and the report
+        # still read down the file the way the operator wrote it (Requirement 8.12, 10.18).
+        planned.sort(key=lambda row: row.line)
         stages.append("S4")
         if collector.errors:
             return self._plan_from(sheet, collector, stages, planned, registry, state)
@@ -373,9 +437,16 @@ class BaseImporter(ABC):
                         one_of(spec, value, allowed)
                 except RowError as error:
                     collector.add_row_error(error, row.line)
-            for error in self.extra_cell_checks(row):
+            for error in self.extra_cell_checks(row, lookups):
                 collector.add_row_error(error, row.line)
         return rows
+
+    def _grouped(self, rows: list[Row]) -> list[list[Row]]:
+        """Rows bucketed by `group_key`, groups in order of first appearance."""
+        groups: dict[Any, list[Row]] = {}
+        for row in rows:
+            groups.setdefault(self.group_key(row), []).append(row)
+        return list(groups.values())
 
     def _stage_feasibility(self, planned: list[PlannedRow], collector: IssueCollector) -> None:
         """S5: does the plan fit the bounds this deployment is configured for (Requirement 15.3)."""
@@ -574,18 +645,26 @@ class BaseImporter(ABC):
             if object_id is not None:
                 registry.remember(endpoint, action.key, int(object_id))
             report.write_count += 1
-            report.results.append(
-                RowResult(
-                    line=action.line,
-                    outcome=RowOutcome.CREATE,
-                    object_kind=action.object_kind or endpoint,
-                    object_name=action.label,
-                    object_id=object_id,
-                    url=client.object_url(endpoint, object_id) if object_id else "",
-                    message="Created.",
-                    sequence=report.write_count,
+            url = client.object_url(endpoint, object_id) if object_id else ""
+            lines = action.all_lines
+            for index, line in enumerate(lines):
+                report.results.append(
+                    RowResult(
+                        line=line,
+                        outcome=RowOutcome.CREATE,
+                        object_kind=action.object_kind or endpoint,
+                        object_name=action.label,
+                        object_id=object_id,
+                        url=url,
+                        message="Created."
+                        if len(lines) == 1
+                        else f"Created — one object for lines {_join(lines)}.",
+                        # The write happened once, so only the first line carries its sequence
+                        # number. A manual unwind walks the non-zero sequences and finds each
+                        # object exactly once (Requirement 12.4).
+                        sequence=report.write_count if index == 0 else 0,
+                    )
                 )
-            )
 
     def _attribute_rejection(
         self,
@@ -727,6 +806,10 @@ class BaseImporter(ABC):
         shown = "; ".join(differences[: settings.MAX_ISSUES_DISPLAYED])
         more = len(differences) - settings.MAX_ISSUES_DISPLAYED
         return shown + (f"; and {more} more" if more > 0 else "") + "."
+
+
+def _join(lines: tuple[int, ...]) -> str:
+    return ", ".join(str(line) for line in lines[:-1]) + f" and {lines[-1]}"
 
 
 def _distinct_objects(planned: list[PlannedRow]) -> int:

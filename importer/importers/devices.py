@@ -110,7 +110,7 @@ class DeviceImporter(BaseImporter):
 
     # --- S2 ---------------------------------------------------------------------------------
 
-    def extra_cell_checks(self, row: Row) -> list[RowError]:
+    def extra_cell_checks(self, row: Row, lookups: Lookups) -> list[RowError]:
         # The rack name is the join key between all three sheets, so its shape is checked here as
         # well as in sheet 1 (Requirement 6.2) rather than surfacing as a lookup miss.
         try:

@@ -117,7 +117,7 @@ class HierarchyImporter(BaseImporter):
 
     # --- S2 ---------------------------------------------------------------------------------
 
-    def extra_cell_checks(self, row: Row) -> list[RowError]:
+    def extra_cell_checks(self, row: Row, lookups: Lookups) -> list[RowError]:
         errors: list[RowError] = []
         try:
             parse_rack_name(row.get("rack"))

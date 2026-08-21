@@ -32,11 +32,15 @@ EXPECTED_OPTIONAL = {
         "description",
     ),
     "devices": ("serial", "manufacturer", "device_role", "status", "asset_tag", "tenant"),
+    # `cable_profile` and `cable_group` are the D10 pair, both optional: a sheet that uses neither
+    # is every cabling sheet written before them (Requirements 9.13, 9.15).
     "cabling": (
         "a_end_kind",
         "b_end_kind",
         "a_port_side",
         "b_port_side",
+        "cable_profile",
+        "cable_group",
         "cable_status",
         "label",
         "length",
@@ -51,7 +55,9 @@ EXPECTED_CONSEQUENTIAL = {
     # being true the moment an operator types the value themselves (D9, Requirement 7.13).
     "hierarchy": {"datacenter_slug", "datahall_slug", "rack_u_height", "rack_width"},
     "devices": {"rack", "rack_face", "bottom_ru", "ru_height", "model"},
-    "cabling": {"cable_type"},
+    # `cable_profile` joins `cable_type`: it is what NetBox traces lanes through, so an existing
+    # cable profiled differently from the sheet is a wrong picture, not a wrong label (D10).
+    "cabling": {"cable_type", "cable_profile"},
 }
 
 EXPECTED_DESCRIPTIVE = {

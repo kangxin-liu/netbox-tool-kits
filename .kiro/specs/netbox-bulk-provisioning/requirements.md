@@ -116,7 +116,7 @@ so that I do not have to guess column names or ordering.
 3. Each template SHALL contain the header row, at least one example data row using clearly
  synthetic values, and per-column guidance (required/optional, format, allowed values).
 4. The `.xlsx` template SHALL mark optional columns distinctly from required ones and SHALL
- present enumerated fields (rack face, cable type, panel/device kind) as picklists.
+ present enumerated fields (rack face, cable type, cable profile, panel/device kind) as picklists.
 5. WHEN the example row is left in place and uploaded unchanged, THEN the system SHALL flag it as
  example data and refuse to import it rather than creating objects named after the examples.
 6. Template downloads SHALL contain no real site, device, serial, or customer values.
@@ -294,8 +294,8 @@ terminations, so that connectivity is recorded without tracing each link by hand
 ### Acceptance Criteria
 
 Sheet columns — required: `a_end`, `a_port`, `b_end`, `b_port`, `cable_type`. Optional:
-`a_end_kind`, `b_end_kind`, `a_port_side`, `b_port_side`, `cable_status`, `label`, `length`,
-`length_unit`, `color`.
+`a_end_kind`, `b_end_kind`, `a_port_side`, `b_port_side`, `cable_profile`, `cable_group`,
+`cable_status`, `label`, `length`, `length_unit`, `color`.
 
 `a_end_kind` and `b_end_kind` are optional because 9.1 gives them a default. An earlier draft listed
 them as required, which contradicted that default: a required column's blank cell is rejected before
@@ -303,6 +303,14 @@ any default can apply, so the default would have been unreachable. They are opti
 documented default, like every other column that has one.
 
 Transceiver recording is **deferred to iteration 2** — see decision D3.
+
+`cable_profile` and `cable_group` are the breakout pair, added by decision **D10**. Criteria 9.1–9.12
+describe one row as one cable with one termination on each side, and that shape cannot express a
+breakout at all: a fanout from one 400G port to four 100G ports is physically *one* cable, and since a
+termination carries at most one cable, four rows naming the same A port would be one create and three
+rejections under 9.11. `cable_profile` records the internal channel structure NetBox needs for
+per-lane path tracing; `cable_group` is what lets several rows describe the several connectors of a
+single cable. Both are optional, and a sheet that uses neither behaves exactly as it does today.
 
 1. The system SHALL accept `a_end_kind` and `b_end_kind` as `device` or `panel`, defaulting to
  `device` when blank, and SHALL use the value to decide how the port name is resolved.
@@ -316,7 +324,8 @@ Transceiver recording is **deferred to iteration 2** — see decision D3.
  system SHALL reject the row, and SHALL state which side and port name failed.
 6. WHEN both terminations resolve, THEN the system SHALL create the cable by POSTing
  `a_terminations` and `b_terminations` as arrays of `{object_type, object_id}` to the cables
- endpoint, and SHALL NOT write to the read-only cable-terminations endpoint.
+ endpoint, and SHALL NOT write to the read-only cable-terminations endpoint. The arrays hold one
+ entry each for an ungrouped row; what a grouped row contributes is 9.16.
 7. The system SHALL validate `cable_type` against the cable-type choices reported by NetBox and
  SHALL reject unrecognised values, listing the accepted values.
 8. The system SHALL NOT read, require, or write any transceiver or optic information in this
@@ -324,11 +333,64 @@ Transceiver recording is **deferred to iteration 2** — see decision D3.
  column, if present in an uploaded file, SHALL be treated as an unrecognised column per
  Requirement 5.6 — reported as informational and otherwise ignored.
 9. IF either termination is already occupied by an existing cable, THEN the system SHALL skip
- the row as already cabled and identify the existing cable, and SHALL NOT modify or delete it.
+ the row as already cabled and identify the existing cable, and SHALL NOT modify or delete it. This
+ is the rule for a row that is its own cable; a group is judged as a whole by 9.22.
 10. IF a row terminates both ends on the same port, THEN the system SHALL reject it.
-11. IF two rows in one sheet use the same termination, THEN the system SHALL reject the later row.
+11. IF two rows in one sheet use the same termination, THEN the system SHALL reject the later row,
+ unless both rows belong to one cable group, where the repetition is how a shared connector is
+ written (9.17).
 12. The system SHALL default `cable_status` to `connected` and SHALL validate `length_unit`
  against NetBox's choices when `length` is supplied.
+
+Criteria 9.13–9.23 are decision **D10** — cable profiles and the multi-row cables that breakout needs.
+
+13. The system SHALL accept an optional `cable_profile` column and SHALL validate it against the
+ cable `profile` choices reported by NetBox, rejecting an unrecognised value and listing the accepted
+ ones. WHEN the cell is blank, the system SHALL omit `profile` from the payload entirely, so a sheet
+ that does not use profiles produces byte-for-byte the cable it produces today.
+14. IF the target instance reports no `profile` choices for a cable — the field renamed or withdrawn
+ by some later version — THEN the system SHALL reject any non-blank `cable_profile` cell as a
+ blocking ERROR naming the instance version, rather than dropping the value and creating a cable the
+ operator did not describe.
+15. The system SHALL accept an optional `cable_group` column and SHALL treat all rows carrying the
+ same non-blank value — trimmed, matched case-insensitively — as one cable. WHEN the cell is blank,
+ the row SHALL be a cable of its own, which is every sheet written before this column existed.
+16. For a group, the system SHALL send as `a_terminations` the distinct A-side terminations of its
+ rows in order of first appearance, and likewise for `b_terminations`, so that a fanout is written as
+ one cable holding one A termination and several B terminations.
+17. WHERE two rows of one group name the same termination, the system SHALL read the repetition as a
+ connector shared by those rows rather than as the duplicate of 9.11. The prohibition in 9.10 —
+ both ends of a single row on one port — SHALL continue to apply inside a group.
+18. The system SHALL take a group's cable-level values — `cable_profile`, `cable_type`,
+ `cable_status`, `label`, `length`, `length_unit`, `color` — from the first row of the group that
+ supplies one, and SHALL allow every other row to leave them blank; IF a later row supplies a
+ *different* non-blank value, THEN the system SHALL reject it naming both lines and both values,
+ because a cable has one type and one profile and the tool must not choose between two candidates on
+ the operator's behalf. This necessarily relaxes the required-cell rule of stage S2 for a grouped
+ row: `cable_type` is a required column, so "required" here means required of the cable rather than
+ typed on every one of its rows. A group that supplies a required value on *no* row is still
+ rejected, on every row.
+19. WHERE a `cable_profile` is supplied, the system SHALL compare the number of distinct terminations
+ on each side against the number of connectors that profile declares for that side, and IF a side
+ carries more terminations than connectors, THEN the system SHALL reject the group naming the
+ profile, the limit, and the count. IF the profile's connector structure cannot be determined from
+ what NetBox reports, THEN the system SHALL skip the comparison and raise a WARNING rather than
+ invent a limit.
+20. IF a group resolves to more than one distinct termination on either side and no `cable_profile`
+ is supplied, THEN the system SHALL raise a WARNING for acknowledgement: NetBox will store such a
+ cable, but with no profile it cannot trace which lane reaches which far end, which is the entire
+ reason for recording a breakout rather than four separate links.
+21. The system SHALL NOT write `connector` or `positions` on any termination — NetBox derives both
+ from the profile and exposes them read-only — and SHALL therefore treat the order of a group's rows
+ as its lane order. The plan preview SHALL state the connector each row's termination will receive,
+ so lane assignment is read before apply rather than discovered after it.
+22. The system SHALL judge occupancy over a whole group: WHERE every termination is free it SHALL
+ create the cable; WHERE every termination is already held by one and the same cable it SHALL skip
+ the group as already cabled and name that cable; and IF the terminations are split — some free, or
+ held by more than one cable — THEN the system SHALL reject the group, since iteration 1 cannot add a
+ termination to a cable that already exists (11.3) and a half-cabled breakout needs a human decision.
+23. WHEN a group's cable is created, THEN the system SHALL record it against every line of the group
+ in the run report, so each line the operator wrote has a result of its own.
 
 ## Requirement 10: Validation gate — nothing is written until validation is clean
 
@@ -404,9 +466,11 @@ can finish a partial import without creating duplicates.
  the NetBox value, because iteration 1 cannot reconcile the difference by updating, and because a
  difference in these fields means later rows are built on a false premise (decision D8).
  Consequential fields are: a region's parent; a site's region; a location's site and parent; a
- rack's `u_height` and `width`; a device's rack, position, face, and device type; and a slug the sheet
- supplied explicitly for a site or datahall, per Requirement 7.13 — a slug the tool merely derived is
- not consequential, per 7.14.
+ rack's `u_height` and `width`; a device's rack, position, face, and device type; a cable's `type` and
+ `profile`; and a slug the sheet supplied explicitly for a site or datahall, per Requirement 7.13 — a
+ slug the tool merely derived is not consequential, per 7.14. A cable's `profile` sits on this side
+ because it is what NetBox traces lanes through: an existing cable profiled differently from the sheet
+ means the operator's picture of that link is wrong, not merely differently labelled.
 5a. IF the differing value is **descriptive** — one that nothing else in the import depends on —
  THEN the system SHALL raise a WARNING that the operator must acknowledge before applying, rather
  than blocking. Descriptive fields are: `description`, `status`, `tenant`, `serial`, `asset_tag`,
@@ -562,7 +626,10 @@ rather than to appear broken.
 1. The NetBox instance is version 4.6.x (`>=4.6, <4.7`) and reachable from wherever the app runs.
  NetBox 4.5 removed `FrontPort.rear_port` / `rear_port_position` in favour of the `PortMapping`
  model, so the pre-4.5 field names must never be used; the version probe of Requirement 2.6 exists
- partly to catch an instance outside the supported range before an import starts.
+ partly to catch an instance outside the supported range before an import starts. Cable profiles
+ arrived in the same 4.5 release, so the supported range guarantees them and the `cable_profile`
+ column of Requirement 9.13 needs no version condition of its own — 9.14 covers only their
+ disappearance in some later version.
 2. The supplied API token has write permission for DCIM objects and read permission for choices.
 3. A single operator uses the tool at a time; no concurrent-apply coordination is required.
 4. Device roles and tenants referenced by sheets already exist in NetBox; iteration 1 does not
@@ -637,5 +704,36 @@ rather than to appear broken.
  it fixes the rack-name problem by making the names worse, which is the constraint the change set out
  to remove. The cost of D9 is that the delimiter ban of Requirement 6.6 becomes load-bearing, and
  that a multi-word name now needs its slug column filled in.
+- **D10 — Cable profiles and breakout. PROPOSED, awaiting review.** The cabling sheet gains two
+ optional columns: `cable_profile`, validated against NetBox's own profile choices, and `cable_group`,
+ which collects several rows into one cable with several terminations per side.
+ **Why two columns and not one.** The column on its own is nearly useless for the deployments that
+ asked for it. NetBox will accept a breakout profile on a cable with a single termination each side,
+ so a one-column change would validate and apply — but it would still model a 1-to-4 fanout as four
+ separate cables, and it could not even do that: all four share the A-side port, a termination carries
+ one cable, so three of the four rows are rejected by Requirement 9.11 before any profile is read. The
+ profile is the vocabulary; the grouping is what makes the vocabulary sayable.
+ **Grouping is explicit, not inferred.** Rows could have been grouped implicitly by a shared A-side
+ termination, saving the operator a column. Rejected on two grounds. A trunk profile has several
+ connectors on *both* sides — a 2C4P trunk is two A terminations and two B terminations — so the A
+ port is not a group identity in the general case. More importantly, two rows sharing an A port is an
+ ERROR today, and inferring a group would silently reinterpret a mistyped duplicate as a deliberate
+ breakout: exactly the class of quiet reinterpretation the validation gate exists to prevent. A blank
+ `cable_group` therefore keeps today's meaning, and grouping only happens where somebody asked for it.
+ **Lane order is row order, because nothing else is available.** NetBox assigns each termination its
+ connector and positions from the profile and exposes both read-only, so the only lever the API offers
+ is the order of the terminations array (Requirement 9.21). Two alternatives were considered and not
+ taken: an explicit `a_connector` / `b_connector` pair of columns, which is the honest fix but adds two
+ columns and an ordering-validation rule for a benefit no deployment has asked for yet; and doing
+ nothing at all, which leaves lane assignment invisible. The middle position is that the plan preview
+ names the connector each row will get, so re-sorting a sheet changes something the operator can see
+ before consenting rather than after. Revisit if sheets turn out to arrive with lane numbers already in
+ them.
+ **Cost if reversed:** `columns.py`, the cabling importer's S3 and planning, one new grouping hook on
+ `BaseImporter`, and the per-line report attribution. Nothing outside the cabling path changes.
 
-Nothing is open. D3 and D6 are deferred to iteration 2 by choice, not left undecided.
+D1–D9 are settled; D3 and D6 are deferred to iteration 2 by choice, not left undecided. **D10 is the
+one open decision**, and two questions inside it are the operator's to answer rather than the
+implementer's: whether grouped rows must repeat the cable's attributes or inherit them from the first
+row (9.18 proposes inherit), and whether lane order can be left as row order (9.21) or needs explicit
+connector columns.

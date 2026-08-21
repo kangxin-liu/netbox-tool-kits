@@ -34,7 +34,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SNAPSHOT = REPO_ROOT / "netbox-snapshots" / "netbox-inventory.json"
+DEFAULT_SNAPSHOT = REPO_ROOT / "netbox-snapshots" / f"netbox-inventory-{datetime.now().strftime("%Y%m%d%H%M%S")}.json"
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 SUPPORTED_VERSION = (4, 6)
 FORMAT_VERSION = 1

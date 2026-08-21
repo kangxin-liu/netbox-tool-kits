@@ -16,6 +16,7 @@ the operator never has to find that out.
 import logging
 from typing import Any
 
+from django.conf import settings
 from django.contrib import messages
 from django.http import Http404, HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect
@@ -72,6 +73,10 @@ class ImporterPageView(SuperuserRequiredMixin, TemplateView):
         context["page_blurb"] = PAGE_BLURBS[self.page]
         context["column_specs"] = columns.columns_for(self.page)
         context["accepted"] = ", ".join(sheets.ACCEPTED_SUFFIXES)
+        # Requirement 15.3: the bounds are stated before the upload, not discovered by tripping
+        # them. S5 enforces the row count regardless.
+        context["max_rows"] = settings.MAX_APPLY_ROWS
+        context["max_upload_mb"] = settings.MAX_UPLOAD_MB
 
         # Read-only probes: the target's status and this importer's prerequisites, both of which
         # create nothing (Requirements 2.4, 2.5, 17.2, 17.4).

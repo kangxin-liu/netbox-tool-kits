@@ -43,9 +43,15 @@ class Failure(StrEnum):
 
 
 class NetBoxUnavailable(Exception):
-    """A connection-level failure, already classified and redacted."""
+    """A connection-level failure, already classified and redacted.
+
+    The redaction happens here rather than only at the classifier, so the guarantee belongs to the
+    type: every construction site, including ones written later, produces a message that is safe to
+    show and log (Requirement 14.1).
+    """
 
     def __init__(self, category: Failure, host: str, detail: str) -> None:
+        detail = redact(detail)
         super().__init__(f"{category.value}: {detail}")
         self.category = category
         self.host = host
@@ -57,12 +63,17 @@ class NetBoxUnavailable(Exception):
 
 
 class NetBoxWriteRejected(Exception):
-    """NetBox refused a create. Carries the parsed body so a row can be blamed (Req 12.2)."""
+    """NetBox refused a create. Carries the parsed body so a row can be blamed (Req 12.2).
+
+    The body is somebody else's text, and it ends up in the run report and the audit rows verbatim.
+    A server or proxy that echoes the request's headers back in its error body would otherwise
+    persist the token, so the body is redacted on the way in (Requirement 14.1).
+    """
 
     def __init__(self, status_code: int, body: Any, endpoint: str) -> None:
         super().__init__(f"NetBox rejected a create on {endpoint} with HTTP {status_code}")
         self.status_code = status_code
-        self.body = body
+        self.body = redact_deeply(body)
         self.endpoint = endpoint
 
     @property
@@ -90,6 +101,17 @@ def redact(text: str) -> str:
         if marker in cleaned:
             cleaned = cleaned.replace(marker, "[redacted]")
     return cleaned
+
+
+def redact_deeply(value: Any) -> Any:
+    """`redact` over a parsed JSON body, keeping its shape so per-item blame still works."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [redact_deeply(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_deeply(item) for key, item in value.items()}
+    return value
 
 
 class _TimeoutSession(requests.Session):

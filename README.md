@@ -17,6 +17,13 @@ is the join key between all three sheets. The first two segments are the datacen
 columns — so a site can be called "Sydney One" and still sit in a rack named `SYD1-DH1-R01`. Leave a
 slug cell blank and it is derived from the name, which is all a single-token name like `SYD1` needs.
 
+Two runbooks, for the two people who will read this:
+
+- [`docs/operator-runbook.md`](docs/operator-runbook.md) — filling a sheet in, reading a verdict,
+  fixing a blocked file, and what to do when a run aborts partway.
+- [`docs/empty-instance-prep.md`](docs/empty-instance-prep.md) — preparing a NetBox that has never
+  been used: a local instance, device roles, device types, and a patch panel with real port mappings.
+
 ## The validation gate
 
 Every upload is validated in full before anything is written, and **one blocking error makes the
@@ -36,8 +43,8 @@ the first write, aborting with nothing written if anything changed in the meanti
 
 ## Status
 
-**Usable end to end, not yet hardened.** Phases 1–6 of
-`.kiro/specs/netbox-bulk-provisioning/tasks.md` are built:
+**Complete for iteration 1.** All seven phases of `.kiro/specs/netbox-bulk-provisioning/tasks.md` are
+built:
 
 - **Foundation (1–7).** The Django project and its fail-fast environment configuration, superuser-only
   access with audited logins, the three-page nav shell, the shared column contract, template downloads
@@ -59,11 +66,13 @@ the first write, aborting with nothing written if anything changed in the meanti
   be called "Sydney One" without lengthening every rack name under it. A blank slug cell still derives
   one from the name, which is why sheets written before this change keep validating unchanged.
 
-**What is not wired up yet:** phase 7 (tasks 19–22) is hardening and handover — the progress state for
-very large sheets, the security regression suite, the deploy check, and the operator runbook for
-preparing an empty NetBox.
+- **Hardening and handover (19–22).** The row-count bound stated on every page and enforced as a
+  validation error, so a file too large to finish in one request is refused rather than timed out; an
+  end-to-end gate test per importer that fixes a broken file, applies it, and proves the refused
+  attempts wrote nothing; a security regression sweep over every page, log record, audit row, and
+  error path; and the two runbooks above.
 
-The suite is 697 tests and runs in about fifteen seconds, with no live NetBox and no sockets.
+The suite is 757 tests and runs in about twenty seconds, with no live NetBox and no sockets.
 
 The design lives in `.kiro/`:
 
@@ -140,9 +149,17 @@ a socket. HTTP is stubbed with `responses` for the client and lookup layers; imp
 query parameters, atomic list POSTs, and injectable failures.
 
 The view tests drive the real forms through Django's test client against `FakeNetBox`, so a request
-that should never write is checked by asserting the fake received no POST at all. `test_apply_gate.py`
-is the file to read first: it tries a forged POST on a blocked plan, a stale fingerprint, an expired
-verdict, unacknowledged warnings, a second apply, and a NetBox that moved after validation, and every
-one of them ends with zero writes.
+that should never write is checked by asserting the fake received no POST at all. Three files are
+worth reading first:
+
+- `test_apply_gate.py` tries a forged POST on a blocked plan, a stale fingerprint, an expired verdict,
+  unacknowledged warnings, a second apply, and a NetBox that moved after validation. Every one ends
+  with zero writes.
+- `test_gate_integration.py` runs the whole flow once per importer: a file with one bad row is refused
+  having written nothing, the row is fixed, the file applies, and then a NetBox that changes underneath
+  a clean plan aborts it before the first write.
+- `test_security.py` is the sweep that catches a *new* surface leaking something — a sentinel token
+  checked against every page, log record, audit row, download, and error path, plus autoescaping,
+  `check --deploy`, and the assertion that no tracked file carries a secret.
 
 Fixtures are synthetic only: no production site names, serials, or customer identifiers.

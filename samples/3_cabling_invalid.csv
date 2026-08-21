@@ -7,6 +7,6 @@ lab1-dh1-r01-leaf01,device,swp5,,lab1-dh1-r01-leaf01,device,swp5,,smf-os2,,,conn
 lab1-dh1-r01-leaf01,device,swp3,,lab1-dh1-r02-pp01,panel,MPO2,rear,smf-os2,,,connected,BAD-0005,,,
 lab1-dh1-r01-leaf01,device,swp6,,lab1-dh1-r01-pp01,panel,MPO6,rear,cat99,,,connected,BAD-0006,,,
 lab1-dh1-r01-leaf01,device,swp7,,lab1-dh1-r01-pp01,panel,MPO7,rear,smf-os2,QSFP-100G-SR4,,connected,BAD-0007,,,
-lab1-dh1-r01-leaf01,device,swp8,,lab1-dh1-r01-pp01,panel,MPO8,rear,smf-os2,400gbase-x-qsfpdd,breakout-1c4p-4c1p,connected,BAD-0008,,,
+lab1-dh1-r01-leaf01,device,swp8,,lab1-dh1-r01-pp01,panel,MPO8,rear,smf-os2,400gbase-x-qsfpdd,breakout-1c4p-4c1p,connected,BAD-0008,5,,
 lab1-dh1-r01-leaf01,device,swp9,,lab1-dh1-r02-pp01,panel,MPO3,rear,smf-os2,400gbase-x-qsfpdd,single-9c9p,connected,BAD-0009,,,
 lab1-dh1-r02-leaf01,device,swp7,,lab1-dh1-r02-pp01,panel,MPO4,rear,smf-os2,,single-1c4p,connected,WARN-0001,,,

@@ -10,7 +10,11 @@ surface and records what was posted. It deliberately reproduces two real behavio
   understand returns every record — the same trap the lookup cache guards against;
 * a list POST is atomic: if the batch is rejected, nothing in it is stored;
 * an endpoint's choices are fetched once and then cached, as `NetBoxClient` caches them, so a
-  request-budget assertion measures the importer rather than the double.
+  request-budget assertion measures the importer rather than the double;
+* creating a cable **occupies its terminations**: NetBox writes the new cable's id onto each
+  terminated interface, front port, and rear port. Without that, re-uploading a cabling sheet would
+  look like it created duplicates here while being correctly skipped against a real NetBox, so the
+  double would hide the bug it exists to expose (Requirements 9.9, 11.7).
 
 All data is synthetic: example names, no real hosts, no credentials.
 """
@@ -19,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from importer.cable_profiles import PROFILES as CABLE_PROFILES
 from importer.services.netbox_client import NetBoxStatus, NetBoxWriteRejected
 
 # Enough of NetBox's OPTIONS choices for the sheets to validate against, spelled as NetBox spells
@@ -60,7 +65,22 @@ CHOICES: dict[str, dict[str, frozenset[str]]] = {
         ),
         "status": frozenset({"connected", "planned", "decommissioning"}),
         "length_unit": frozenset({"km", "m", "cm", "mi", "ft", "in"}),
+        # The whole catalogue NetBox 4.6.8 reports, from the same constant the templates use. An
+        # earlier version of this double carried a representative slice instead, on the grounds
+        # that validation reads whatever the API returns — which was true and still made a
+        # perfectly ordinary profile like `trunk-4c4p-shuffle` fail against the double alone.
+        "profile": frozenset(CABLE_PROFILES),
     },
+}
+
+
+CABLES = "dcim.cables"
+
+# A cable's terminations name their model, not their endpoint (Requirement 9.6).
+TERMINATION_ENDPOINTS: dict[str, str] = {
+    "dcim.interface": "dcim.interfaces",
+    "dcim.frontport": "dcim.front-ports",
+    "dcim.rearport": "dcim.rear-ports",
 }
 
 
@@ -153,8 +173,21 @@ class FakeNetBox:
         for item in payloads:
             record = {"id": self._take_id(), **self._expand(item)}
             self.objects.setdefault(endpoint, []).append(record)
+            if endpoint == CABLES:
+                self._occupy_terminations(record)
             created.append(record)
         return created
+
+    def _occupy_terminations(self, cable: dict[str, Any]) -> None:
+        """What NetBox does for you: a cabled port carries the cable's id from then on."""
+        for side in ("a_terminations", "b_terminations"):
+            for termination in cable.get(side) or []:
+                endpoint = TERMINATION_ENDPOINTS.get(termination.get("object_type", ""))
+                if endpoint is None:
+                    continue
+                for record in self.objects.get(endpoint, []):
+                    if record.get("id") == termination.get("object_id"):
+                        record["cable"] = {"id": cable["id"]}
 
     def object_url(self, endpoint: str, object_id: int) -> str:
         app, _, name = endpoint.partition(".")

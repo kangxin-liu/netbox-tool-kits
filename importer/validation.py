@@ -59,6 +59,12 @@ class Code(StrEnum):
     RACK_NAME_MALFORMED = "RACK_NAME_MALFORMED"
     COLOR_MALFORMED = "COLOR_MALFORMED"
     LENGTH_UNIT_MISSING = "LENGTH_UNIT_MISSING"
+    CABLE_PROFILE_UNSUPPORTED = "CABLE_PROFILE_UNSUPPORTED"
+    """The sheet named a cable profile and this NetBox reports no profile choices at all.
+
+    Distinct from VALUE_NOT_IN_CHOICES: the value is not wrong, the target cannot hold it. Dropping
+    it silently would create a cable the operator did not describe (Requirement 9.14).
+    """
     SLUG_NOT_DERIVABLE = "SLUG_NOT_DERIVABLE"
     SLUG_INVALID = "SLUG_INVALID"
     """Outside NetBox's own slug charset (decision D9)."""
@@ -78,6 +84,21 @@ class Code(StrEnum):
     RU_RANGE_OVERLAP = "RU_RANGE_OVERLAP"
     DUPLICATE_TERMINATION_IN_FILE = "DUPLICATE_TERMINATION_IN_FILE"
     SAME_PORT_BOTH_ENDS = "SAME_PORT_BOTH_ENDS"
+    CABLE_GROUP_FIELD_CONFLICT = "CABLE_GROUP_FIELD_CONFLICT"
+    """Two rows of one cable group describe the same cable differently (Requirement 9.18)."""
+
+    PROFILE_CONNECTOR_OVERFLOW = "PROFILE_CONNECTOR_OVERFLOW"
+    """More terminations on a side than the profile has connectors there (Requirement 9.19)."""
+
+    PROFILE_STRUCTURE_UNKNOWN = "PROFILE_STRUCTURE_UNKNOWN"
+    """A profile NetBox accepts whose connector counts this tool cannot read (Requirement 9.19).
+
+    A warning, not an error: the value is legal and NetBox will validate it: what is lost is only
+    this tool's ability to catch an over-populated side before apply.
+    """
+
+    CABLE_GROUP_WITHOUT_PROFILE = "CABLE_GROUP_WITHOUT_PROFILE"
+    """Several terminations on a side and no profile, so NetBox cannot trace lanes (Req 9.20)."""
     SLUG_INCONSISTENT_IN_FILE = "SLUG_INCONSISTENT_IN_FILE"
     """One name given two different slugs by two rows. One object cannot hold both (Req 7.12)."""
 
@@ -94,6 +115,13 @@ class Code(StrEnum):
     END_NOT_FOUND = "END_NOT_FOUND"
     PORT_NOT_FOUND = "PORT_NOT_FOUND"
     PORT_ALREADY_CABLED = "PORT_ALREADY_CABLED"
+    CABLE_GROUP_PARTLY_CABLED = "CABLE_GROUP_PARTLY_CABLED"
+    """A multi-termination cable is half in place already (Requirement 9.22).
+
+    Not a skip, because skipping would silently drop the lanes that are missing, and not a create,
+    because adding a termination to an existing cable is an update this iteration does not do.
+    """
+
     SLUG_COLLISION = "SLUG_COLLISION"
     UNIQUE_FIELD_TAKEN = "UNIQUE_FIELD_TAKEN"
     RU_RANGE_EXCEEDS_RACK = "RU_RANGE_EXCEEDS_RACK"

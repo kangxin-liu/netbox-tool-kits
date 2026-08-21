@@ -4,6 +4,11 @@ Dependency-ordered. Each task is small enough to review on its own and ends in a
 Tests are written with the task they cover, not batched at the end. No task contacts a live NetBox
 instance; HTTP is stubbed.
 
+Phases 1–7 are iteration 1 and are complete. **Phase 8 is an addition on top of it** — cable profiles
+and breakout, decision D10 — and is gated on that decision being accepted at review. Task 23 is the one
+exception to the no-live-NetBox rule above: it verifies the API against a real instance, which is how
+every other field in this spec was pinned down.
+
 ## Phase 1 — Scaffold and configuration
 
 - [x] 1. Create the Django project skeleton — **done**
@@ -66,6 +71,8 @@ instance; HTTP is stubbed.
     so a choice list going stale cannot silently reject a value NetBox accepts (Requirement 7.7)
   - Synthetic example values only — the example region is `Example Region`, the site `EXA1`
   - **Extended by task 18a (D9):** the hierarchy sheet gains `datacenter_slug` and `datahall_slug`
+  - **To be extended by tasks 24–25 (D10, proposed):** the cabling sheet gains `cable_profile` and
+    `cable_group`
   - Tests: required and optional columns match the requirements tables; the D8 split matches the
     design table exactly; every column carries a `Conflict` and help text; no example value looks
     like production data; `transceiver` is absent (D3) and `rack_type` is not a column name
@@ -293,6 +300,8 @@ instance; HTTP is stubbed.
     column, reported as informational and dropped, and no interface's `type` is ever written
   - Tests: 71 in `test_cabling_importer.py`, one per criterion in Requirement 9, asserting the exact
     payload shape, plus the assertion that the importer issues no `PATCH`, `PUT`, or `DELETE` at all
+  - **One row, one cable, one termination per side** — which is what phase 8 revisits: that shape
+    cannot express a breakout, because the rows sharing the fanout's A port are rejected by 9.11
   - _Requirements: 9.1–9.12, 11.3_
 
 ## Phase 6 — Operator flow
@@ -441,13 +450,32 @@ instance; HTTP is stubbed.
 
 ## Phase 7 — Hardening and handover
 
-- [ ] 19. Row-count bound and progress
+- [x] 19. Row-count bound and progress
   - Enforce a documented maximum row count per apply as an S5 check, telling the operator to split
     larger files rather than timing out mid-run; show progress or a busy state while applying
   - Test: a sheet over the limit is blocked with the limit stated and nothing created
   - _Requirements: 15.3, 15.4_
 
-- [ ] 20. Gate integration test — the one that matters most
+  **How it came out.**
+  - The mechanism was already there from task 11: S5 reads `MAX_APPLY_ROWS` and `apply.js` puts the
+    button into a busy state. What was missing was **telling the operator before they upload** — the
+    limit was discoverable only by tripping it. Both bounds now render on every page's upload panel,
+    with the advice to split attached, so the number and what to do about it arrive together
+  - The bound counts **rows, not objects**, and there is a test asserting that on purpose. Rows are
+    what the request's cost tracks; counting objects would refuse a small sheet that happens to create
+    a deep hierarchy, which is the opposite of the intent
+  - A test at exactly the limit guards the off-by-one, because a limit stated in the UI that refuses
+    the file it invited would be worse than no limit
+  - The scale test measures the **request count for 2,000 rows** rather than wall-clock time: under 40
+    requests where one-per-row would be 2,000. That is the property that makes the 2,000 default a
+    policy about request duration rather than a symptom of a slow implementation. It runs against the
+    importer directly, since going through a view would add the page probe's requests and obscure it
+  - Tests: 10 new in `test_scale_and_limits.py`
+  - Also fixed here: the upload panel still described rack names as `<datacenter>-<datahall>-<rack>`,
+    which D9 had made wrong. Template text escapes its angle brackets, so the earlier sweep for the
+    old wording missed it
+
+- [x] 20. Gate integration test — the one that matters most
   - End-to-end per importer against a stubbed NetBox: upload a file with one bad row, assert the
     response is blocked, the issue names the right file/sheet/line/column, and **zero write requests
     were issued**; then fix the row, re-upload, and assert the apply succeeds
@@ -455,7 +483,27 @@ instance; HTTP is stubbed.
     apply: assert the abort happens with zero writes
   - _Requirements: 10.1, 10.6, 10.7, 10.14, 16.1_
 
-- [ ] 21. Security regression suite and deploy check
+  **How it came out.**
+  - The three sheets are described as **data** — a good pair of rows, one deliberately broken row, the
+    correction, the column the issue must name, and the drift to apply — and one parametrised fixture
+    runs the same seven tests over all three. A per-importer copy of each test would have been three
+    chances for the assertions to drift apart, which for the gate is the one thing that must not happen
+  - **This found two real defects**, which is the argument for writing it:
+    - `FakeNetBox` did not reproduce NetBox marking a termination as occupied when a cable is created.
+      Every cabling test that needed occupancy had been setting `port["cable"]` by hand, so the
+      *end-to-end* claim — re-upload a cabling sheet and nothing is created — was untestable and, in
+      the double, false. The double now does what NetBox does, and the one unit test that asserted
+      interfaces are untouched had to be narrowed to exclude `cable`, since occupancy is NetBox's
+      bookkeeping rather than a write this tool issues
+    - the first drift scenarios were unrelated objects, and they did **not** trip the drift check —
+      correctly, because `plan.state` records only what the plan depends on. Rewritten as the races
+      that actually happen: somebody else mounts a device in the U the plan wants, somebody else
+      patches the port the plan wants. Both abort with zero writes
+  - The refusal tests assert on `netbox.posts == []` rather than on stored objects, because an empty
+    write log is the only evidence that distinguishes a refusal from a rollback
+  - Tests: 27 new in `test_gate_integration.py` (nine per importer)
+
+- [x] 21. Security regression suite and deploy check
   - Assert the token appears in no rendered page, log record, exception, or audit row, including on
     error paths; autoescaping verified with a cell containing markup
   - `python manage.py check --deploy` clean with `DEBUG=false`; confirm `.env` is git-ignored and no
@@ -463,7 +511,35 @@ instance; HTTP is stubbed.
   - Confirm every test fixture is synthetic
   - _Requirements: 14.1–14.7, 5.7, 12.7_
 
-- [ ] 22. README and operator runbook
+  **How it came out.**
+  - The sweep is written against a **sentinel token that is token-shaped** — 40 hex characters, as
+    NetBox issues — rather than the settings value, so a leak through a path that formats
+    `Token <credential>` is unmistakable instead of invisible in a page of prose
+  - **This found two leaks, both on error paths, and both fixed in the type rather than at the call
+    site**:
+    - `NetBoxWriteRejected` carried NetBox's error body verbatim into the abort reason, the audit rows,
+      and the run report. A server or proxy that echoes request headers back in a 4xx body would have
+      persisted the token. The body is now redacted on construction, walked recursively so the per-item
+      shape that attributes an error to a row survives
+    - `NetBoxUnavailable` relied on its *callers* having redacted the detail first. True for the
+      classifier, not guaranteed for anything written later, so it now redacts its own message
+    Both changes move the guarantee from "every construction site remembers" to "the type cannot
+    produce an unsafe message", which is the only version that survives new code
+  - `every_stored_value()` walks each run's fields and its related issues and results reflectively, so
+    a **new model field** joins the sweep without anyone remembering to add it
+  - Autoescaping is tested on both directions of untrusted input: a sheet cell containing `<script>`,
+    which is quoted back by design because Requirement 16.1 asks for the received value, and a NetBox
+    object whose name contains markup. There is also a check that no template uses `|safe` or
+    `autoescape off` on operator text, which is the way this protection would actually be lost
+  - `check --deploy` runs as a subprocess with `--fail-level WARNING` under a production-shaped
+    environment, so a warning is a failure. Clean, including HSTS and the SSL redirect
+  - The fixture-synthetic check is a **host and email allow-list** rather than a search for
+    "suspicious" strings: every URL in the test tree must name an RFC 2606 reserved name, loopback, or
+    `testserver`, and every email must be `example.com`. A real hostname in a fixture is the realistic
+    way production detail arrives in a repository, and that is what this catches
+  - Tests: 23 new in `test_security.py`
+
+- [x] 22. README and operator runbook
   - Setup, environment variables, creating the admin user, running the server
   - The rack naming convention, the three sheet formats, and where to get templates
   - The slug columns of D9: what they are for, that `-` is not allowed inside one, and that a
@@ -476,6 +552,162 @@ instance; HTTP is stubbed.
     the note that sheet 1 works on an empty instance while sheets 2 and 3 need this prep first
   - _Requirements: 12.5, 6.1, 16.1, 17.6, 17.7_
 
+  **How it came out.**
+  - Split by **audience, not by topic**: `README.md` stays the engineer's entry point (setup,
+    configuration, how the suite is built), `docs/operator-runbook.md` is for whoever fills the sheets
+    in, and `docs/empty-instance-prep.md` is for whoever prepares NetBox once. Folding all three into
+    the README would have buried the operator's material under the developer's
+  - The operator runbook leads with the two facts that change behaviour — create-only, and one error
+    blocks the whole file — because every other instruction depends on them. The D9 slug columns are
+    documented as a decision table ("fill it in when the name is more than one word") rather than as a
+    rule about characters, since that is the form the operator needs
+  - **"A run aborted partway" is the section that mattered most** (Requirement 12.5), and its answer is
+    that re-uploading the same sheet *is* the recovery path: everything already created is skipped, so
+    the second run finishes the job. That is worth stating plainly, because the instinct on seeing a
+    partial import is to delete what exists first
+  - The prep runbook is ordered by dependency and says why: device types before devices, because NetBox
+    does not retro-fit ports onto devices that already exist. It documents the 4.5+ `rear_ports` mapping
+    with the actual payload shape, and points at `scripts/seed_netbox.py`, which already builds three
+    panel layouts in that format — including the MPO panel whose front and rear ports share names, which
+    is the reason the cabling sheet has a `b_port_side` column at all
+  - `netbox-docker`'s quickstart was re-read rather than recalled. Its example override maps
+    `8000:8080`, which is the reason this app serves 8080
+
+## Phase 8 — Cable profiles and breakout (D10, proposed — not started)
+
+Tasks 24–26 are **built**; 23b is not, and it is the one that can still invalidate them, because the
+two facts it has left to check are behavioural rather than field-level. Neither blocks use of the
+columns: a wrong answer on the count rule turns Requirement 9.19's `<=` into `==`, and a wrong answer
+on ordering means lane assignment needs explicit columns instead of row order. Both are contained.
+
+- [x] 23a. Verify the cable-profile fields against a 4.6.8 instance — **done 2026-08-20**
+  - `OPTIONS /api/dcim/cables/`: `profile` is present, writable, optional, and a plain choice field
+    rather than a foreign key, with 26 values. Recorded in `design.md` alongside the other 4.6.8
+    findings, together with the family-by-family connector table
+  - `OPTIONS /api/dcim/cable-terminations/` returns `actions: []` — no write verb offered at all, so
+    `connector` and `positions` cannot be set by any request and Requirement 9.21 stands
+  - The `(\d+)C(\d+)P` parse of Requirement 9.19 was run against all 26 reported values: every one
+    yields per-side connector and position counts, and the `-shuffle` suffix is invisible to it
+  - Read-only throughout: `OPTIONS` and `GET` only, nothing created
+
+- [ ] 23b. Verify the two behavioural facts — **needs a throwaway instance**
+  - The probed instance held no cables at all, so neither of these could be observed without writing
+  - POST a `breakout-1c4p-4c1p` with four B terminations, then five, then two: settles whether the
+    check in 9.19 is `<=` or `==`, and so whether a partly populated breakout is expressible
+  - Read back each termination's `connector` to confirm assignment follows submitted array order. If
+    it does not, stop — row order as lane order is the whole of D10's answer to lane control, and
+    explicit `a_connector` / `b_connector` columns become mandatory rather than rejected
+  - Amend Requirement 9.19 / 9.21 and the "Still unverified" table where reality disagrees
+  - _Requirements: 9.19, 9.21; assumption 7_
+
+- [x] 24. `cable_profile` column — **done**
+  - One `ColumnSpec` in `CABLING_COLUMNS`: optional, `Conflict.CONSEQUENTIAL` per the D8 table, with
+    the 26 values recorded in `design.md` as the picklist and an empty example so the template's
+    example row stays the common case
+  - `choice_sources["cable_profile"] = (CABLES, "profile")`, which is the whole of the S2 check; and
+    the 9.14 branch — a non-blank cell against an instance reporting no such choices is an ERROR
+    naming the version, not a silently dropped value
+  - `_cable()` adds `profile` only when the cell is non-blank, so an unprofiled cable's payload is
+    unchanged byte for byte
+  - `profile_structure(code)` parses `(\d+)C(\d+)P` tokens into per-side connector counts, returning
+    None when it cannot; a test asserts every one of the 26 values task 23a recorded still parses
+  - Tests: blank cell omits the key; a bad value is rejected listing the accepted ones; the template
+    picklist offers the API's values; a target reporting no profiles blocks a named profile and still
+    accepts a sheet that names none
+  - _Requirements: 9.13, 9.14, 11.5, 4.4_
+
+  **How it came out.**
+  - `cable_profiles.py` is a new module beside `naming.py` rather than more surface on the cabling
+    importer, because the 26 values are picklist material for `columns.py` *and* the parse is domain
+    logic with its own test file. Nothing in it imports the rest of the app
+  - **9.14 could not use the generic choice machinery.** `BaseImporter.choices` falls back to the
+    sheet's own list when the API reports nothing for a field — deliberately, so a stale list cannot
+    reject a value NetBox accepts — which means it cannot tell "no profiles at all" from "not one of
+    them". So `extra_cell_checks` gained a `lookups` argument and the check lives there. Three
+    importers implement that hook; the other two ignore the new argument
+  - The `CONSEQUENTIAL` class on `cable_profile` is **declarative**: cabling never reaches
+    `compare_to_existing`, because an occupied termination is a skip long before a field is compared.
+    Exactly as true of `cable_type` today. Recorded in `design.md` rather than left to be discovered
+  - Tests: 6 in `test_cabling_importer.py`, plus 71 in the new `test_cable_profiles.py` — the guard
+    being that every one of the 26 probed values still parses into per-side connector counts
+
+- [x] 25. `cable_group` — several rows, one cable — **done**
+  - `group_key` / `plan_group` hooks on `BaseImporter`, defaulting to one group per row so hierarchy
+    and devices are untouched; `CreateAction.line` becomes a tuple of lines
+  - Cabling groups on the folded `cable_group`; terminations deduped per side in first-appearance
+    order (9.16); 9.11 relaxed inside a group and 9.10 still enforced (9.17)
+  - S3: attributes inherited from the group's first row with a contradicting non-blank later value
+    rejected naming both lines (9.18); connector-count check against the profile (9.19); the
+    no-profile-multi-termination warning (9.20)
+  - S4: the occupancy tri-state of 9.22 — all free creates, all held by one cable skips every line,
+    anything else blocks
+  - Preview shows each row's connector number (9.21); the report records the created cable against
+    every line of the group (9.23)
+  - `FakeNetBox`: occupy every termination in a submitted array, not one per side, and report
+    `profile` among the cable choices
+  - New codes: `CABLE_GROUP_FIELD_CONFLICT`, `PROFILE_CONNECTOR_OVERFLOW`,
+    `CABLE_GROUP_WITHOUT_PROFILE`, `CABLE_GROUP_PARTLY_CABLED`, `CABLE_PROFILE_UNSUPPORTED`
+  - Tests: the design's four-row breakout example end to end, then re-uploaded to assert zero writes;
+    the same block with `cable_group` removed producing one create and three duplicate errors
+  - _Requirements: 9.15–9.23, 10.14, 11.3, 12.2, 16.6_
+
+  **How it came out.**
+  - **A third base hook was needed, and it is the one the design missed.** Requirement 9.18 lets a
+    group state the cable's values once, but `cable_type` is a *required* column, so S2 rejected the
+    blank cell on the later rows before any group-aware stage could look for the value. `normalise`
+    runs before S2 and copies a group's cable-level values into its blank cells only — never over a
+    non-blank one, so a genuine disagreement still reaches S3. Requirement 9.18 now says explicitly
+    that "required" means required of the cable rather than typed on every row
+  - **`created_count` had to change meaning**, from report lines to objects written. Four lines
+    reporting one cable would otherwise have read as "4 created". It now counts results with a
+    non-zero `sequence`, which already meant "this line wrote an object", so no new field was needed
+    and the manual-unwind property of Requirement 12.4 is unchanged
+  - `FakeNetBox` needed **less** work than planned: `_occupy_terminations` already looped over every
+    entry in both termination arrays, so a four-lane breakout correctly occupies all five ports. The
+    plan had assumed it occupied one per side. Only the `profile` choices were added
+  - Groups are planned together and then re-sorted by line, so two interleaved groups still preview in
+    sheet order (Requirement 10.18). Worth knowing that this makes row order load-bearing twice: for
+    lanes, and for the preview
+  - The occupancy tri-state of 9.22 is written so that **the pre-D10 behaviour of 9.9 is untouched**:
+    "partly cabled blocks" applies only where a side has more than one termination. With one a side a
+    skip loses nothing, which is why all 71 original cabling tests still pass unmodified
+  - Tests: 46 new in `test_cabling_importer.py` (118 in the file), including the four-row breakout
+    applied and re-uploaded, lane order following row order, the same rows without the tag producing
+    three duplicate errors, and a partly cabled group blocking with zero writes
+
+- [x] 26. Documentation and samples for breakout — **done**
+  - `docs/operator-runbook.md`: when to fill the two columns in, that a group's later rows can be left
+    blank, and that row order is lane order — with the plan preview as the place to check it
+  - `samples/`: `cable_profile` stops being an ignored column, so the sample sheets need a real
+    breakout group; `transceiver` stays as the unrecognised-column demonstration. Update
+    `scripts/make_sample_sheets.py` accordingly
+  - `docs/empty-instance-prep.md`: a note that tracing a lane *through a panel* also needs
+    position-aware front-to-rear mappings, which is prep rather than import
+  - _Requirements: 9.13–9.23, 5.6, 17.6_
+
+  **How it came out.**
+  - The runbook's breakout section leads with "a breakout is **one** cable, not several", because every
+    other instruction in it follows from that. The five sub-points are the ones that actually catch
+    people: blanks inherit, count far ends rather than fibres to pick the profile, row order is lane
+    order and the preview shows it, cable the cage rather than the `swpNsM` children, and a half-built
+    breakout is refused rather than skipped
+  - **The samples are a new pair rather than edits to the old ones.** `CABLING_COLUMNS`' rows are
+    fixed-width positional tuples with an optional trailing note, and `check_arity` cannot tell a note
+    from a value — so adding a column would have meant re-indexing eighteen tuples with the silent
+    shift that check exists to catch as the failure mode. `3_cabling_breakout_valid` /
+    `_invalid` carry their own column tuple instead, and the original pair keeps its job of proving a
+    sheet *without* the D10 columns is unaffected
+  - Verified by generating them and validating both through the importer: the valid one is four rows,
+    one cable, four B terminations, lanes 1–4; the invalid one is exactly three errors —
+    `PROFILE_CONNECTOR_OVERFLOW`, `CABLE_GROUP_FIELD_CONFLICT`, `DUPLICATE_TERMINATION_IN_FILE`
+  - **One old sample row had to change.** Its declared fault was "a multi-termination profile, which a
+    row cannot express" — which was never true (the column was ignored, so the row had no fault at
+    all) and is now doubly untrue, since NetBox allows a profiled cable to be partly populated. It
+    carries a length without a unit instead, a fault no other row covered
+  - `docs/empty-instance-prep.md` gained the switch-side half of the prep, not just the panel half: a
+    device type defining both `swp1` and `swp1s0`/`swp1s1` gives a sheet author two places to land one
+    cable, and the children want to be virtual with a `parent` or gone
+
 ## Deferred to iteration 2 (do not build now)
 
 Update and delete of existing objects; IPAM and VLANs; multi-user roles and SSO; background workers
@@ -486,3 +718,7 @@ hold a part number once device types define interface types. Iteration 2 should 
 `dcim.InventoryItem` bound to the interface and a module in a module bay, then build the part-number
 map from the transceiver models actually in use. Note this reintroduces writes to objects the tool did
 not create, so the create-only invariant and its test will need revisiting deliberately.
+
+**Completing a partly cabled breakout (D10, Requirement 9.22).** Adding the missing lane to a cable
+that already exists is a PATCH, so it lands with the update operations above rather than with phase 8.
+Until then a half-cabled group blocks and says so.
