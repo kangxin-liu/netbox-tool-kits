@@ -66,6 +66,13 @@ NAMING_SCHEMES: dict[str, str] = {
     "generic": "Ethernet{n}",
 }
 
+# Management and loopback templates per naming scheme. The device importer assigns
+# loopback_ip* / management_ip* to these (mgmt_only / type=loopback), not to the cage ports.
+MGMT_LOOPBACK: dict[str, tuple[tuple[str, str, bool], ...]] = {
+    "cumulus": (("eth0", "1000base-t", True), ("lo", "loopback", False)),
+    "generic": (("Management1", "1000base-t", True), ("Loopback0", "loopback", False)),
+}
+
 # Physical cages per switch model, as ranges of (count, netbox_interface_type).
 # Sources: NVIDIA hardware manuals — SN2201 48x1GbE RJ45 + 4x100GbE QSFP28;
 # SN3700 32x200GbE QSFP56; SN4700 32x400GbE QSFP-DD; SN5610 64x800GbE OSFP + 2x25GbE SFP28.
@@ -249,6 +256,19 @@ def seed_switches(nb: NetBox, naming: str, verbose: bool) -> None:
                 f"{model}/{name}",
             )
         nb.skipped += len(planned) - len(todo)
+        for name, iface_type, mgmt_only in MGMT_LOOPBACK[naming]:
+            if name in existing:
+                nb.skipped += 1
+                continue
+            payload = {
+                "device_type": dt_id,
+                "name": name,
+                "type": iface_type,
+            }
+            if mgmt_only:
+                payload["mgmt_only"] = True
+            nb.create("interface-templates", payload, f"{model}/{name}")
+            existing.add(name)
         summary = ", ".join(f"{c}x {t}" for c, t in groups)
         print(
             f"  {model:<34} {len(todo):>3} to create, "

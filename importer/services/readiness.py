@@ -186,6 +186,39 @@ def _devices_readiness(client: NetBoxClient) -> Readiness:
             "them, so create the roles you use first."
         )
 
+    mgmt = client.count("dcim.interface-templates", mgmt_only=True)
+    loopback = client.count("dcim.interface-templates", type="loopback")
+    facts.append(
+        Fact(
+            label="Device types with a management interface",
+            value=str(mgmt),
+            level="ok" if mgmt else "warn",
+            detail=(
+                ""
+                if mgmt
+                else (
+                    "No interface template is marked mgmt_only. A device sheet with a management "
+                    "address will not resolve until each network device type has exactly one."
+                )
+            ),
+        )
+    )
+    facts.append(
+        Fact(
+            label="Device types with a loopback interface",
+            value=str(loopback),
+            level="ok" if loopback else "warn",
+            detail=(
+                ""
+                if loopback
+                else (
+                    "No interface template is typed loopback. A device sheet with a loopback "
+                    "address will not resolve until each network device type has exactly one."
+                )
+            ),
+        )
+    )
+
     return Readiness(importer="devices", ready=not blockers, facts=facts, blockers=blockers)
 
 

@@ -23,11 +23,12 @@ prevent.
 The app holds no copy of NetBox's inventory. Its only persistent data is the local user table and
 an audit log of what each run submitted. NetBox stays the system of record.
 
-Design status: **verified against NetBox 4.6.8 on 2026-08-18, implementation under way.** Decisions
-D1–D9 in `requirements.md` are settled and built; each one's blast radius if reversed is named in the
-table below. **D10 — cable profiles and breakout — is proposed and not yet built.** Its field-level
-facts were probed on 2026-08-20 and hold; two behavioural questions remain open because answering them
-needs a cable to be created, and are listed under "Still unverified". **D11 — loopback and management
+Design status: **verified against NetBox 4.6.8, implementation complete.** Decisions D1–D9 in
+`requirements.md` are settled and built; each one's blast radius if reversed is named in the table
+below. **D10 — cable profiles and breakout — is built and verified**: its field-level facts were
+probed read-only on 2026-08-20 and its behavioural ones by creating and deleting cables on
+2026-08-24. Every assumption held, so nothing in Requirement 9 needed amending. The one thing still
+taken on trust is the internal position map of a `-shuffle` profile, which NetBox does not serve. **D11 — loopback and management
 addresses on the device sheet — is proposed and not yet built.** Its IPAM field names still need a
 read-only probe against 4.6.8 before implementation. Field names in this document were checked against the target instance's own
 `OPTIONS` responses rather than from memory — see "Verified against the target instance".
@@ -293,19 +294,34 @@ The breakout family is worth one note for sheet authors: `1c4p-4c1p` permits **o
 to four B terminations, which is the asymmetry a fanout needs and the reason 9.19 checks each side against
 its own limit rather than against a single number.
 
-#### Still unverified — the two facts that need a write
+#### Measured: how NetBox behaves with a profile (task 23b, 2026-08-24)
 
-Both remaining questions can only be answered by creating a cable. The 2026-08-20 probe was read-only
-against a local 4.6.8 instance, and it held no cables at all (`/api/dcim/cable-terminations/` count 0),
-so these stay open until task 23b runs them on a throwaway:
+Run by `scripts/probe_cable_profiles.py` against 4.6.8, creating cables and deleting them again. The
+cable count was 24 before and 24 after. Every assumption D10 was built on held:
 
-| Fact the design leans on | Probe | If it comes back different |
-| --- | --- | --- |
-| NetBox permits *up to* the connector count, so a partly populated breakout is legal | POST a `breakout-1c4p-4c1p` with 4 B terminations, then 5, then 2 | If it demands exactly the connector count, Requirement 9.19 becomes an equality check and a half-populated breakout stops being expressible at all |
-| Connectors are assigned in submitted array order | POST a 4-lane breakout and read back each termination's `connector` | If assignment is not positional, the preview promised by Requirement 9.21 cannot be computed and the explicit `a_connector` / `b_connector` columns rejected in D10 become mandatory |
+| Question | Answer |
+| --- | --- |
+| Does `breakout-1c4p-4c1p` accept its full four connectors? | Yes, `201`. The A termination is given `connector 1, positions [1,2,3,4]` and each B termination `connector n, positions [1]` — the profile's shape, assigned by NetBox |
+| May a side carry **fewer** terminations than connectors? | **Yes.** A partly populated breakout is legal, so Requirement 9.19's `<=` is right and two lanes of a four-lane breakout is a real cable |
+| Does NetBox reject **more** terminations than connectors? | **Yes**, and precisely: `B side of cable has 5 terminations but only 4 are permitted for profile 1C4P:4C1P breakout` |
+| Are connectors assigned in **submitted array order**? | **Yes.** Four terminations submitted in order came back as connectors 1, 2, 3, 4. Requirement 9.21 stands, and the plan preview's lane numbers are honest |
+| Does a trunk accept four terminations on **both** sides? | Yes. `trunk-4c4p-shuffle` with 4 A + 4 B returns `201`, connectors 1–4 each side, every one carrying `positions [1,2,3,4]` |
 
-The second is the one that matters. Row order being lane order is the whole of D10's answer to lane
-control, and it rests on an ordering guarantee that NetBox documents but that has not been observed here.
+Two consequences worth drawing out.
+
+**The connector-count check of Requirement 9.19 is belt and braces, not the only guard.** NetBox
+enforces the same limit itself, with a better message than most. Ours still earns its place by
+reporting at validation time rather than at apply time — a rejection during apply is the failure
+mode the whole gate exists to prevent — but a bug in our parse cannot let a malformed cable through.
+
+**Per-connector tracing works; per-*position* tracing is not visible over the API.** Tracing from one
+A-side interface of the 4c4p shuffle returns all four far-end terminations, which is correct — that
+interface is one connector carrying four positions, and they fan out to four different far ends, so
+the mesh is real. What the trace does not say is which of those four positions reaches which far end.
+The `positions` array is exposed per termination, but the mapping *between* sides lives inside the
+profile definition and is not served. So a harness whose internal shuffle differs from NetBox's
+cannot be detected through the REST API; that comparison has to be made against NetBox's own profile
+definitions, and until someone does it, a `-shuffle` profile is an assertion rather than a check.
 
 Advanced Port Mappings landed alongside profiles in 4.5 and matter for the same use case — tracing a
 lane through a panel needs position-aware front-to-rear mappings — but they are panel *preparation*,

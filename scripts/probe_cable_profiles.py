@@ -68,6 +68,10 @@ CABLE_TYPE = "mmf-om4"
 # How many free interfaces the probes need between them: the trunk probe wants four a side.
 NEEDED_INTERFACES = 9
 
+# Interface types NetBox refuses to cable at all. Filtered out when choosing the fixture, so a
+# refusal during a probe is always about the thing being probed.
+NON_CABLEABLE_TYPES = {"virtual", "bridge", "lag"}
+
 
 class NetBox:
     """Minimal client. Separate from the app's on purpose — this one has to be able to DELETE."""
@@ -154,15 +158,23 @@ def termination(interface_id: int) -> dict[str, Any]:
 
 
 def free_interfaces(nb: NetBox) -> list[dict[str, Any]]:
-    """Uncabled interfaces, at most one per device, so a probe looks like real cabling.
+    """Uncabled *physical* interfaces, at most one per device, so a probe looks like real cabling.
 
     `cabled=false` is sent as a hint and every record is re-checked locally, because this NetBox
     ignores an unrecognised query parameter and returns everything with HTTP 200.
+
+    The type filter is not cosmetic. A switch's first free interface is often `br_default`, and
+    NetBox answers `Cables cannot be terminated to Bridge interfaces` with the same HTTP 400 it uses
+    for a profile violation — so picking one would have made every probe fail for a reason that has
+    nothing to do with cable profiles, and made the over-population probe *pass* for the wrong one.
     """
     seen: set[int] = set()
     chosen: list[dict[str, Any]] = []
     for record in nb.get_all("/api/dcim/interfaces/", cabled="false"):
         if record.get("cable") is not None or record.get("mark_connected"):
+            continue
+        kind = str((record.get("type") or {}).get("value") or "").lower()
+        if kind in NON_CABLEABLE_TYPES or not kind:
             continue
         device_id = (record.get("device") or {}).get("id")
         if device_id is None or device_id in seen:
@@ -214,6 +226,18 @@ class Probe:
             self.created.append(int(body["id"]))
         return status, body
 
+    def drop(self, cable_id: int | None) -> None:
+        """Remove one cable now, so the next probe can reuse its interfaces.
+
+        Without this the probes interfere with each other: the second create lands on a termination
+        the first is still holding and NetBox answers `Duplicate termination found`, which looks
+        exactly like a profile refusal and is nothing of the kind.
+        """
+        if cable_id is None:
+            return
+        if self.nb.delete(f"/api/dcim/cables/{cable_id}/") in (200, 204):
+            self.created = [c for c in self.created if c != cable_id]
+
     def cleanup(self) -> list[int]:
         """Delete what this run created. Returns whatever could not be removed."""
         stubborn = []
@@ -243,9 +267,28 @@ class Probe:
                 detail=[] if exact_ok else [json.dumps(body)[:300]],
             )
         )
-        full_id = body.get("id") if exact_ok and isinstance(body, dict) else None
+        if not exact_ok:
+            # Everything below reads a rejection as an answer about cable profiles. If the simplest
+            # legal cable will not go in, the fixture is wrong and those readings would be fiction.
+            self.findings.append(
+                Finding(
+                    "remaining probes",
+                    "can the rest of the questions be answered on this fixture?",
+                    "skipped — the baseline cable was refused, so a later refusal would prove "
+                    "nothing about profiles",
+                    expected="a fixture NetBox will accept an ordinary cable on",
+                    ok=False,
+                    detail=["Fix the reason above and re-run before believing any of this."],
+                )
+            )
+            return None
+        full_id = body.get("id") if isinstance(body, dict) else None
+        # Read the connector assignment off this cable before it goes, then free the interfaces.
+        if full_id:
+            self.connector_order(int(full_id), bs[:4])
+        self.drop(int(full_id) if full_id else None)
 
-        status, body = self.create_cable([a["id"]], [b["id"] for b in bs[4:5]], BREAKOUT)
+        status, body = self.create_cable([a["id"]], [b["id"] for b in bs[:1]], BREAKOUT)
         under_ok = status in (200, 201)
         self.findings.append(
             Finding(
@@ -263,6 +306,7 @@ class Probe:
                 ],
             )
         )
+        self.drop(int(body["id"]) if under_ok and isinstance(body, dict) else None)
 
         status, body = self.create_cable([a["id"]], [b["id"] for b in bs[:5]], BREAKOUT)
         over_rejected = status not in (200, 201)
@@ -273,7 +317,9 @@ class Probe:
                 f"rejected with HTTP {status}" if over_rejected else "accepted (!)",
                 expected="rejected",
                 ok=over_rejected,
-                detail=[]
+                # The body is always printed: a 400 for an unrelated reason looks identical to a 400
+                # about the profile, and only the message distinguishes them.
+                detail=[f"NetBox said: {json.dumps(body)[:300]}"]
                 if over_rejected
                 else [
                     "NetBox accepted an over-populated profile, so our S3 check is the only guard. "
@@ -349,13 +395,33 @@ class Probe:
         )
 
     def trace(self, interface: dict) -> list[str]:
-        """Whatever NetBox reports for a per-lane trace, printed rather than interpreted."""
+        """What NetBox says this interface reaches, rendered rather than dumped.
+
+        The trace is the whole point of a profile — it is the difference between "this cable goes
+        somewhere" and "this lane arrives there" — so it is worth reading, not just recording.
+        """
         status, body = self.nb._request("GET", f"/api/dcim/interfaces/{interface['id']}/trace/")
         if status != 200:
             return [f"  trace unavailable: HTTP {status}"]
         if not body:
             return ["  trace returned nothing"]
-        return [f"  {json.dumps(hop)[:200]}" for hop in body]
+
+        def name(node: Any) -> str:
+            if isinstance(node, dict):
+                device = (node.get("device") or {}).get("display") or ""
+                label = node.get("display") or node.get("name") or node.get("id")
+                return f"{device}:{label}" if device else str(label)
+            return str(node)
+
+        lines = [f"  from {describe(interface)}"]
+        for index, hop in enumerate(body, start=1):
+            if isinstance(hop, list):
+                lines.append(f"    hop {index}: " + ", ".join(name(node) for node in hop))
+            elif isinstance(hop, dict):
+                lines.append(f"    hop {index}: {name(hop)}")
+            else:
+                lines.append(f"    hop {index}: {hop}")
+        return lines
 
 
 def main() -> int:
@@ -419,9 +485,7 @@ def main() -> int:
     probe = Probe(nb)
     stubborn: list[int] = []
     try:
-        full_id = probe.count_rule(pool[0], pool[1:6])
-        if full_id:
-            probe.connector_order(full_id, pool[1:5])
+        probe.count_rule(pool[0], pool[1:6])
         probe.cleanup()
         probe.trunk_and_shuffle(pool[0:4], pool[4:8])
     finally:

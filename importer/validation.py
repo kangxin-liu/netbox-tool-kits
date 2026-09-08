@@ -102,6 +102,15 @@ class Code(StrEnum):
     SLUG_INCONSISTENT_IN_FILE = "SLUG_INCONSISTENT_IN_FILE"
     """One name given two different slugs by two rows. One object cannot hold both (Req 7.12)."""
 
+    DEVICE_IP_INVALID = "DEVICE_IP_INVALID"
+    """A loopback/management cell is not a CIDR with an explicit prefix (Requirement 8.13)."""
+
+    DEVICE_IP_FAMILY_MISMATCH = "DEVICE_IP_FAMILY_MISMATCH"
+    """An `*_ip4` cell is IPv6, or an `*_ip6` cell is IPv4 (Requirement 8.13)."""
+
+    DUPLICATE_IP_IN_FILE = "DUPLICATE_IP_IN_FILE"
+    """The same address appears in two cells of this sheet (Requirement 8.22)."""
+
     # S4 — cross-reference against NetBox
     RACK_NOT_FOUND = "RACK_NOT_FOUND"
     DEVICE_TYPE_NOT_FOUND = "DEVICE_TYPE_NOT_FOUND"
@@ -126,6 +135,22 @@ class Code(StrEnum):
     UNIQUE_FIELD_TAKEN = "UNIQUE_FIELD_TAKEN"
     RU_RANGE_EXCEEDS_RACK = "RU_RANGE_EXCEEDS_RACK"
     RU_HEIGHT_DISAGREES_WITH_TYPE = "RU_HEIGHT_DISAGREES_WITH_TYPE"
+    DEVICE_IP_REQUIRED = "DEVICE_IP_REQUIRED"
+    """The type defines a management or loopback interface and every IP cell is blank."""
+
+    DEVICE_IP_NOT_APPLICABLE = "DEVICE_IP_NOT_APPLICABLE"
+    """An address was supplied on a type that has nowhere to assign it (Requirement 8.14)."""
+
+    MGMT_INTERFACE_NOT_FOUND = "MGMT_INTERFACE_NOT_FOUND"
+    MGMT_INTERFACE_AMBIGUOUS = "MGMT_INTERFACE_AMBIGUOUS"
+    LOOPBACK_INTERFACE_NOT_FOUND = "LOOPBACK_INTERFACE_NOT_FOUND"
+    LOOPBACK_INTERFACE_AMBIGUOUS = "LOOPBACK_INTERFACE_AMBIGUOUS"
+    DEVICE_INTERFACE_MISSING = "DEVICE_INTERFACE_MISSING"
+    """The type defines the role interface; this existing device was never given it (8.23)."""
+
+    IP_ALREADY_ASSIGNED = "IP_ALREADY_ASSIGNED"
+    """The address exists in IPAM assigned to a different object, or unassigned (8.21)."""
+
     ALREADY_EXISTS = "ALREADY_EXISTS"
     EXISTS_BUT_DIFFERS = "EXISTS_BUT_DIFFERS"
     PREREQUISITE_MISSING = "PREREQUISITE_MISSING"

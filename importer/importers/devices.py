@@ -20,10 +20,10 @@ exists to be cross-checked against that type (Requirement 8.6) — a row that di
 draw a rack elevation the operator is not expecting — and to size a device type that autocreate
 creates.
 
-A device that already exists is left completely alone (Requirements 8.10, 11.2, 11.3), and such a
-row resolves nothing else. Nothing will be written for it, so the only questions worth asking are
-whether the sheet disagrees with what NetBox holds and whether its asset tag belongs to someone
-else; resolving prerequisites the row does not need could only report problems twice.
+A device that already exists is not recreated (Requirements 8.10, 11.2, 11.3). Remaining work
+on that row — loopback and management addresses, then a field-scoped PATCH of the primary IP —
+is still planned (Requirements 8.20, 8.19). A row whose device *and* addresses already match is
+skipped in full. Device-field disagreements still block; they are never patched.
 """
 
 from dataclasses import dataclass, field
@@ -31,6 +31,18 @@ from typing import Any, ClassVar
 
 from django.conf import settings
 
+from importer.device_addresses import (
+    ADDRESS_COLUMNS,
+    ParsedAddress,
+    canonical,
+    choice_value,
+    displayed_primary,
+    parse_device_ip,
+    parse_row_addresses,
+    primary_columns,
+    related_id,
+    resolve_roles,
+)
 from importer.importers.base import (
     BaseImporter,
     CreateAction,
@@ -40,7 +52,7 @@ from importer.importers.base import (
     RowOutcome,
 )
 from importer.naming import derive_slug, parse_rack_name
-from importer.services.lookups import Lookups, fold
+from importer.services.lookups import CHUNK_SIZE, Lookups, fold
 from importer.services.sheets import Row
 from importer.validation import (
     Code,
@@ -57,8 +69,20 @@ DEVICES = "dcim.devices"
 RACKS = "dcim.racks"
 ROLES = "dcim.device-roles"
 TENANTS = "tenancy.tenants"
+INTERFACE_TEMPLATES = "dcim.interface-templates"
+INTERFACES = "dcim.interfaces"
+IP_ADDRESSES = "ipam.ip-addresses"
 
 DEFAULT_STATUS = "active"
+
+NOT_FOUND = {
+    "management": Code.MGMT_INTERFACE_NOT_FOUND,
+    "loopback": Code.LOOPBACK_INTERFACE_NOT_FOUND,
+}
+AMBIGUOUS = {
+    "management": Code.MGMT_INTERFACE_AMBIGUOUS,
+    "loopback": Code.LOOPBACK_INTERFACE_AMBIGUOUS,
+}
 
 
 def units(bottom: int, height: int) -> tuple[int, int]:
@@ -97,7 +121,15 @@ class TypeResolution:
 
 class DeviceImporter(BaseImporter):
     name = "devices"
-    endpoint_order = (MANUFACTURERS, DEVICE_TYPES, DEVICES)
+    endpoint_order = (MANUFACTURERS, DEVICE_TYPES, DEVICES, INTERFACES, IP_ADDRESSES)
+    apply_phases: ClassVar[tuple[tuple[str, str], ...]] = (
+        (MANUFACTURERS, "post"),
+        (DEVICE_TYPES, "post"),
+        (DEVICES, "post"),
+        (INTERFACES, "post"),
+        (IP_ADDRESSES, "post"),
+        (DEVICES, "patch"),
+    )
 
     choice_sources: ClassVar[dict[str, tuple[str, str]]] = {
         "status": (DEVICES, "status"),
@@ -107,17 +139,27 @@ class DeviceImporter(BaseImporter):
     def __init__(self) -> None:
         self._devices_by_rack: dict[int, list[dict[str, Any]]] = {}
         self._asset_tag_owners: dict[str, dict[str, Any]] = {}
+        self._templates_by_type: dict[int, list[dict[str, Any]]] = {}
 
     # --- S2 ---------------------------------------------------------------------------------
 
     def extra_cell_checks(self, row: Row, lookups: Lookups) -> list[RowError]:
         # The rack name is the join key between all three sheets, so its shape is checked here as
         # well as in sheet 1 (Requirement 6.2) rather than surfacing as a lookup miss.
+        errors: list[RowError] = []
         try:
             parse_rack_name(row.get("rack"))
         except RowError as error:
-            return [error]
-        return []
+            errors.append(error)
+        for column in ADDRESS_COLUMNS:
+            raw = row.get(column)
+            if not str(raw).strip():
+                continue
+            try:
+                parse_device_ip(column, raw)
+            except RowError as error:
+                errors.append(error)
+        return errors
 
     # --- S3 ---------------------------------------------------------------------------------
 
@@ -125,11 +167,13 @@ class DeviceImporter(BaseImporter):
         seen_devices: dict[str, int] = {}
         seen_tags: dict[str, tuple[str, int]] = {}
         claimed: dict[tuple[str, str], list[tuple[tuple[int, int], str, int]]] = {}
+        seen_ips: dict[str, tuple[int, str]] = {}
 
         for row in rows:
             name = row.get("device_name").strip()
             self._check_duplicate_name(row, name, seen_devices, collector)
             self._check_duplicate_tag(row, name, seen_tags, collector)
+            self._check_duplicate_ips(row, seen_ips, collector)
 
             occupied = self._occupied(row)
             if occupied is None:
@@ -213,6 +257,40 @@ class DeviceImporter(BaseImporter):
             related_line=owner[1],
         )
 
+    def _check_duplicate_ips(
+        self,
+        row: Row,
+        seen: dict[str, tuple[int, str]],
+        collector: IssueCollector,
+    ) -> None:
+        """Requirement 8.22: the same address in two cells — two rows, or two columns."""
+        for column in ADDRESS_COLUMNS:
+            raw = row.get(column).strip()
+            if not raw or "/" not in raw:
+                continue
+            try:
+                key = canonical(raw)
+            except ValueError:
+                continue
+            previous = seen.get(key)
+            if previous is None:
+                seen[key] = (row.line, column)
+                continue
+            other_line, other_column = previous
+            collector.add(
+                Severity.ERROR,
+                Code.DUPLICATE_IP_IN_FILE,
+                line=row.line,
+                column=column,
+                value=raw,
+                expected="an address no other cell in this file uses",
+                message=(
+                    f"{raw!r} is already declared on line {other_line} ({other_column}). "
+                    f"An address can only be assigned once."
+                ),
+                related_line=other_line,
+            )
+
     @staticmethod
     def _occupied(row: Row) -> tuple[int, int] | None:
         try:
@@ -245,6 +323,42 @@ class DeviceImporter(BaseImporter):
             # Requirement 8.5 costs no request per row (Requirement 15.2).
             lookups.prefetch(DEVICES, rack_id=rack_ids)
         self._index_devices(lookups)
+        self._prefetch_addresses(rows, lookups)
+
+    def _prefetch_addresses(self, rows: list[Row], lookups: Lookups) -> None:
+        """Interface templates, existing device interfaces, and any IPAM row the sheet names."""
+        type_ids = {int(record["id"]) for record in lookups.all_records(DEVICE_TYPES)}
+        for device in lookups.all_records(DEVICES):
+            type_id = related_id(device.get("device_type"))
+            if type_id is not None:
+                type_ids.add(type_id)
+        if type_ids:
+            lookups.prefetch(INTERFACE_TEMPLATES, device_type_id=sorted(type_ids))
+        self._templates_by_type = {}
+        for template in lookups.all_records(INTERFACE_TEMPLATES):
+            type_id = related_id(template.get("device_type"))
+            if type_id is None:
+                continue
+            self._templates_by_type.setdefault(type_id, []).append(template)
+
+        device_ids = [int(device["id"]) for device in lookups.all_records(DEVICES)]
+        if device_ids:
+            lookups.prefetch_terminations(device_ids, ("interface",))
+            lookups.prefetch(IP_ADDRESSES, device_id=device_ids)
+
+        wanted: list[str] = []
+        for row in rows:
+            for column in ADDRESS_COLUMNS:
+                raw = row.get(column).strip()
+                if not raw or "/" not in raw:
+                    continue
+                try:
+                    wanted.append(canonical(raw))
+                except ValueError:
+                    continue
+        unique = sorted(set(wanted))
+        for start in range(0, len(unique), CHUNK_SIZE):
+            lookups.prefetch(IP_ADDRESSES, address=unique[start : start + CHUNK_SIZE])
 
     def _prefetch_roles(self, rows: list[Row], lookups: Lookups) -> None:
         supplied = [row.get("device_role") for row in rows if row.get("device_role")]
@@ -319,6 +433,18 @@ class DeviceImporter(BaseImporter):
             self._device_action(row, name, rack, device_type, role_id, tenant_id)
         )
         planned.resolved["device_name"] = f"{name} (create)"
+        self._plan_addresses(
+            row,
+            lookups,
+            registry,
+            state,
+            collector,
+            planned,
+            device_name=name,
+            existing=None,
+            device_type=device_type.existing,
+            device_ref=Ref(DEVICES, Registry.key(name)),
+        )
         return planned
 
     # --- one reference at a time ------------------------------------------------------------
@@ -804,7 +930,7 @@ class DeviceImporter(BaseImporter):
         collector: IssueCollector,
         planned: PlannedRow,
     ) -> None:
-        """Requirements 8.10, 11.2: an existing device is skipped, never renamed or updated."""
+        """Requirements 8.10, 11.2: the device is not recreated; remaining IP work still is."""
         specs = self.specs()
         label = f"Device {existing.get('name')}"
         url = self._url(lookups, DEVICES, existing)
@@ -847,12 +973,35 @@ class DeviceImporter(BaseImporter):
             f"id={existing['id']},rack={(existing.get('rack') or {}).get('id')},"
             f"position={netbox_text(existing.get('position'))},"
             f"face={netbox_text(existing.get('face'))},"
-            f"type={(device_type or {}).get('id')}",
+            f"type={(device_type or {}).get('id')},"
+            f"primary_ip4={netbox_text(existing.get('primary_ip4'))},"
+            f"primary_ip6={netbox_text(existing.get('primary_ip6'))}",
         )
         planned.resolved["device_name"] = f"{existing.get('name')} (existing)"
         planned.resolved["object"] = str(existing.get("name") or "")
 
+        remaining = False
+        if planned.outcome != RowOutcome.BLOCKED:
+            remaining = self._plan_addresses(
+                row,
+                lookups,
+                registry,
+                state,
+                collector,
+                planned,
+                device_name=str(existing.get("name") or row.get("device_name")),
+                existing=existing,
+                device_type=(
+                    existing.get("device_type")
+                    if isinstance(existing.get("device_type"), dict)
+                    else None
+                ),
+                device_ref=int(existing["id"]),
+            )
         if planned.outcome == RowOutcome.BLOCKED:
+            return
+        if remaining:
+            planned.outcome = RowOutcome.CREATE
             return
         planned.outcome = RowOutcome.SKIP_EXISTS
         collector.add(
@@ -868,6 +1017,391 @@ class DeviceImporter(BaseImporter):
             related_object=label,
             related_url=url,
         )
+
+    def _plan_addresses(
+        self,
+        row: Row,
+        lookups: Lookups,
+        registry: Registry,
+        state: dict[str, str],
+        collector: IssueCollector,
+        planned: PlannedRow,
+        *,
+        device_name: str,
+        existing: dict[str, Any] | None,
+        device_type: dict[str, Any] | None,
+        device_ref: Any,
+    ) -> bool:
+        """Create missing addresses and PATCH primary IP (Requirements 8.14–8.21).
+
+        Returns True when this row still has writes. A fully-matching existing device returns False
+        so the caller can report already-present.
+        """
+        addresses = parse_row_addresses(row.get)
+        type_id = related_id(device_type) if device_type is not None else None
+        if type_id is None and existing is not None:
+            type_id = related_id(existing.get("device_type"))
+        templates = self._templates_by_type.get(type_id or -1, [])
+        type_roles = resolve_roles(templates)
+
+        if existing is not None:
+            ifaces = list(lookups.terminations_for(int(existing["id"]), "interface").values())
+            device_roles = resolve_roles(ifaces)
+        else:
+            ifaces = []
+            device_roles = type_roles
+
+        defines = any(
+            match.found or match.ambiguous
+            for match in (type_roles["management"], type_roles["loopback"])
+        )
+        has_on_device = any(
+            match.found or match.ambiguous
+            for match in (device_roles["management"], device_roles["loopback"])
+        )
+        need_ip = has_on_device if existing is not None else defines
+
+        if need_ip and not addresses:
+            collector.add(
+                Severity.ERROR,
+                Code.DEVICE_IP_REQUIRED,
+                line=row.line,
+                column="management_ip4",
+                value="(blank)",
+                expected="at least one of the four address cells",
+                message=(
+                    f"{device_name!r} is a type that defines a management or loopback interface, "
+                    f"so at least one of the four address cells must be filled."
+                ),
+            )
+            planned.outcome = RowOutcome.BLOCKED
+            return False
+
+        if not addresses:
+            return False
+
+        roles_needed = {item.role for item in addresses}
+        iface_for_role: dict[str, Any] = {}
+        create_iface_for_role: dict[str, dict[str, Any]] = {}
+        for role in roles_needed:
+            live = device_roles[role]
+            typed = type_roles[role]
+            column = next(item.column for item in addresses if item.role == role)
+            if live.ambiguous or typed.ambiguous:
+                names = ", ".join(live.candidates or typed.candidates or [])
+                collector.add(
+                    Severity.ERROR,
+                    AMBIGUOUS[role],
+                    line=row.line,
+                    column=column,
+                    value=row.get(column),
+                    expected=f"exactly one {role} interface on the device type",
+                    message=(
+                        f"{role.capitalize()} is ambiguous on this type: {names}. Mark exactly "
+                        f"one interface as "
+                        + (
+                            "mgmt_only"
+                            if role == "management"
+                            else "type loopback"
+                        )
+                        + " before importing."
+                    ),
+                )
+                planned.outcome = RowOutcome.BLOCKED
+                continue
+            if live.found:
+                iface_for_role[role] = live.record
+                object_id = live.record.get("id")
+                if object_id is not None:
+                    registry.remember(
+                        INTERFACES, Registry.key(device_name, live.name), int(object_id)
+                    )
+                continue
+            if typed.found and existing is not None:
+                # The type defines the port; this device was created before the template existed.
+                # Creating that one interface is remaining work so the address can land (8.20).
+                create_iface_for_role[role] = typed.record
+                iface_for_role[role] = typed.record
+                continue
+            if typed.found:
+                iface_for_role[role] = typed.record
+                continue
+            collector.add(
+                Severity.ERROR,
+                NOT_FOUND[role] if defines or typed.found else Code.DEVICE_IP_NOT_APPLICABLE,
+                line=row.line,
+                column=column,
+                value=row.get(column),
+                expected=f"a unique {role} interface on the device type",
+                message=(
+                    f"Nowhere to assign {column} on {device_name!r}. Define a unique "
+                    f"{'mgmt_only' if role == 'management' else 'type=loopback'} interface on "
+                    f"the device type, then re-upload."
+                ),
+            )
+            planned.outcome = RowOutcome.BLOCKED
+
+        if planned.outcome == RowOutcome.BLOCKED:
+            return False
+
+        for template in create_iface_for_role.values():
+            planned.actions.append(
+                CreateAction(
+                    endpoint=INTERFACES,
+                    payload={
+                        "device": int(existing["id"]) if existing is not None else device_ref,
+                        "name": template.get("name"),
+                        "type": choice_value(template.get("type")),
+                        "mgmt_only": bool(template.get("mgmt_only")),
+                    },
+                    key=Registry.key(device_name, template.get("name")),
+                    label=f"{device_name} {template.get('name')}",
+                    line=row.line,
+                    object_kind="interface",
+                )
+            )
+
+        added = bool(create_iface_for_role)
+        for addr in addresses:
+            iface = iface_for_role[addr.role]
+            iface_name = str(iface.get("name") or "")
+            action = self._address_action(
+                row,
+                lookups,
+                registry,
+                state,
+                collector,
+                planned,
+                device_name=device_name,
+                existing=existing,
+                addr=addr,
+                iface=iface,
+                iface_name=iface_name,
+            )
+            if planned.outcome == RowOutcome.BLOCKED:
+                return False
+            if action is not None:
+                planned.actions.append(action)
+                added = True
+            planned.resolved[addr.column] = f"{addr.cidr} on {iface_name}"
+
+        patch = self._primary_patch(
+            row,
+            lookups,
+            registry,
+            collector,
+            planned,
+            device_name=device_name,
+            existing=existing,
+            device_ref=device_ref,
+            addresses=addresses,
+        )
+        if planned.outcome == RowOutcome.BLOCKED:
+            return False
+        if patch is not None:
+            planned.actions.append(patch)
+            added = True
+        ip4_col, ip6_col = primary_columns(addresses)
+        by_col = {item.column: item for item in addresses}
+        if ip4_col:
+            planned.resolved["primary_ip4"] = by_col[ip4_col].cidr
+        if ip6_col:
+            planned.resolved["primary_ip6"] = by_col[ip6_col].cidr
+        shown = displayed_primary(ip4_col, ip6_col)
+        if shown:
+            planned.resolved["displayed_primary"] = shown
+        return added
+
+    def _address_action(
+        self,
+        row: Row,
+        lookups: Lookups,
+        registry: Registry,
+        state: dict[str, str],
+        collector: IssueCollector,
+        planned: PlannedRow,
+        *,
+        device_name: str,
+        existing: dict[str, Any] | None,
+        addr: ParsedAddress,
+        iface: dict[str, Any],
+        iface_name: str,
+    ) -> CreateAction | None:
+        held = self._ip_record(lookups, addr.cidr)
+        iface_id = iface.get("id")
+        assigned: Any
+        if existing is not None and iface_id is not None:
+            assigned = int(iface_id)
+        else:
+            assigned = Ref(INTERFACES, Registry.key(device_name, iface_name))
+
+        if held is None:
+            state[f"{IP_ADDRESSES}:{addr.cidr}"] = "absent"
+            return CreateAction(
+                endpoint=IP_ADDRESSES,
+                payload={
+                    "address": addr.cidr,
+                    "status": "active",
+                    "assigned_object_type": "dcim.interface",
+                    "assigned_object_id": assigned,
+                },
+                key=Registry.key(addr.cidr),
+                label=f"{addr.cidr} on {device_name} {iface_name}",
+                line=row.line,
+                object_kind="ip address",
+            )
+
+        object_id = int(held["id"])
+        registry.remember(IP_ADDRESSES, Registry.key(addr.cidr), object_id)
+        obj_type = str(held.get("assigned_object_type") or "")
+        obj_id = held.get("assigned_object_id")
+        state[f"{IP_ADDRESSES}:{addr.cidr}"] = f"id={object_id},assigned={obj_type}:{obj_id}"
+
+        same_iface = (
+            obj_type == "dcim.interface"
+            and iface_id is not None
+            and obj_id is not None
+            and int(obj_id) == int(iface_id)
+        )
+        if same_iface:
+            return None
+
+        holder = self._ip_holder_label(held)
+        collector.add(
+            Severity.ERROR,
+            Code.IP_ALREADY_ASSIGNED,
+            line=row.line,
+            column=addr.column,
+            value=addr.cidr,
+            expected="an address that is free, or already on this interface",
+            message=(
+                f"{addr.cidr} already exists in NetBox"
+                + (f" ({holder})" if holder else "")
+                + ". It cannot be assigned here."
+            ),
+            related_object=holder or None,
+        )
+        planned.outcome = RowOutcome.BLOCKED
+        return None
+
+    def _primary_patch(
+        self,
+        row: Row,
+        lookups: Lookups,
+        registry: Registry,
+        collector: IssueCollector,
+        planned: PlannedRow,
+        *,
+        device_name: str,
+        existing: dict[str, Any] | None,
+        device_ref: Any,
+        addresses: list[ParsedAddress],
+    ) -> CreateAction | None:
+        ip4_col, ip6_col = primary_columns(addresses)
+        if ip4_col is None and ip6_col is None:
+            return None
+        by_col = {item.column: item for item in addresses}
+        payload: dict[str, Any] = {
+            "id": int(existing["id"]) if existing is not None else device_ref
+        }
+
+        def intended(column: str) -> Any:
+            cidr = by_col[column].cidr
+            found = registry.id_for(IP_ADDRESSES, Registry.key(cidr))
+            return found if found is not None else Ref(IP_ADDRESSES, Registry.key(cidr))
+
+        if existing is not None:
+            for field, column in (("primary_ip4", ip4_col), ("primary_ip6", ip6_col)):
+                if column is None:
+                    continue
+                held = existing.get(field)
+                held_addr = held.get("address") if isinstance(held, dict) else None
+                if not held or not held_addr:
+                    payload[field] = intended(column)
+                    continue
+                try:
+                    matches = canonical(held_addr) == canonical(by_col[column].cidr)
+                except ValueError:
+                    matches = False
+                if matches:
+                    continue
+                collector.add(
+                    Severity.ERROR,
+                    Code.EXISTS_BUT_DIFFERS,
+                    line=row.line,
+                    column=column,
+                    value=by_col[column].cidr,
+                    expected=str(held_addr),
+                    message=(
+                        f"Device {device_name!r} already has {field} {held_addr!r}, which is not "
+                        f"{by_col[column].cidr}. Primary IP is not overwritten."
+                    ),
+                    related_object=f"Device {device_name}",
+                    related_url=self._url(lookups, DEVICES, existing),
+                )
+                planned.outcome = RowOutcome.BLOCKED
+                return None
+        else:
+            if ip4_col:
+                payload["primary_ip4"] = intended(ip4_col)
+            if ip6_col:
+                payload["primary_ip6"] = intended(ip6_col)
+
+        if "primary_ip4" not in payload and "primary_ip6" not in payload:
+            return None
+        return CreateAction(
+            endpoint=DEVICES,
+            payload=payload,
+            key=Registry.key(device_name, "primary"),
+            label=f"{device_name} primary IP",
+            line=row.line,
+            object_kind="device primary IP",
+            method="patch",
+        )
+
+    def _ip_record(self, lookups: Lookups, cidr: str) -> dict[str, Any] | None:
+        wanted = canonical(cidr)
+        for record in lookups.all_records(IP_ADDRESSES):
+            held = record.get("address")
+            if not held:
+                continue
+            try:
+                if canonical(held) == wanted:
+                    return record
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _ip_holder_label(record: dict[str, Any]) -> str:
+        assigned = record.get("assigned_object") or {}
+        if isinstance(assigned, dict) and assigned.get("name"):
+            device = assigned.get("device") or {}
+            device_name = device.get("name") if isinstance(device, dict) else ""
+            place = f"{device_name} {assigned.get('name')}".strip()
+            return f"assigned to {place}" if place else "assigned elsewhere"
+        if record.get("assigned_object_type") and record.get("assigned_object_id"):
+            return (
+                f"assigned to {record['assigned_object_type']} "
+                f"{record['assigned_object_id']}"
+            )
+        return "unassigned"
+
+    def after_phase(
+        self,
+        endpoint: str,
+        method: str,
+        registry: Registry,
+        lookups: Lookups,
+    ) -> None:
+        """After devices are created, index the interfaces NetBox inherited from the type."""
+        if endpoint != DEVICES or method != "post":
+            return
+        for key, object_id in registry.remembered(DEVICES):
+            for iface in lookups.client.get_all(INTERFACES, device_id=[object_id]):
+                registry.remember(
+                    INTERFACES, Registry.key(*key, iface.get("name")), int(iface["id"])
+                )
 
     def _device_action(
         self,

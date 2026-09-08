@@ -197,6 +197,8 @@ HIERARCHY_COLUMNS: tuple[ColumnSpec, ...] = (
 
 
 # --- Sheet 2: devices ----------------------------------------------------------------------
+# D11 adds four optional address columns. Interface names stay on the device type
+# (`mgmt_only` / type `loopback`); the sheet carries CIDR addresses only.
 DEVICE_COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec(
         key="rack",
@@ -305,6 +307,47 @@ DEVICE_COLUMNS: tuple[ColumnSpec, ...] = (
         conflict=Conflict.DESCRIPTIVE,
         help_text="Name of an existing tenant. This importer never creates tenants",
         example="",
+    ),
+    ColumnSpec(
+        key="loopback_ip4",
+        label="loopback_ip4",
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text=(
+            "IPv4 CIDR of the loopback (type=loopback on the device type). At least one of "
+            "the four address cells is required on a type that defines those interfaces"
+        ),
+        example="192.0.2.1/32",
+    ),
+    ColumnSpec(
+        key="loopback_ip6",
+        label="loopback_ip6",
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text="IPv6 CIDR of the same loopback. Prefix length is required, not defaulted",
+        example="2001:db8::1/128",
+    ),
+    ColumnSpec(
+        key="management_ip4",
+        label="management_ip4",
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text=(
+            "IPv4 CIDR of the management port (mgmt_only on the device type). Wins as "
+            "primary_ip4 over the loopback when filled"
+        ),
+        example="192.0.2.10/24",
+    ),
+    ColumnSpec(
+        key="management_ip6",
+        label="management_ip6",
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text=(
+            "IPv6 CIDR of the same management port. Becomes the device's primary only when "
+            "no IPv4 is supplied"
+        ),
+        example="2001:db8:1::10/64",
     ),
 )
 

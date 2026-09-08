@@ -575,13 +575,13 @@ read-only probe.
   - `netbox-docker`'s quickstart was re-read rather than recalled. Its example override maps
     `8000:8080`, which is the reason this app serves 8080
 
-## Phase 8 — Cable profiles and breakout (D10, proposed — not started)
+## Phase 8 — Cable profiles and breakout (D10) — complete
 
-Tasks 24–26 are **built**; 23b is not, and it is the one that can still invalidate them, because
-what it has left to check is behavioural rather than field-level. Three of its four questions are
-contained — a wrong answer changes one comparison, or a paragraph of documentation. The fourth is
-not: if connectors are not assigned in submitted order, row-order-is-lane-order goes, and with it
-the preview that makes lane assignment reviewable.
+All four tasks are done and D10's assumptions are measured rather than assumed: task 23a checked the
+fields read-only, task 23b checked the behaviour by creating and deleting cables on 4.6.8, and every
+expectation held, so no requirement needed amending. One thing is still taken on trust and is called
+out in `design.md`: the internal position map of a `-shuffle` profile, which NetBox does not serve
+over the API, so it cannot be checked against a harness specification from here.
 
 - [x] 23a. Verify the cable-profile fields against a 4.6.8 instance — **done 2026-08-20**
   - `OPTIONS /api/dcim/cables/`: `profile` is present, writable, optional, and a plain choice field
@@ -593,7 +593,7 @@ the preview that makes lane assignment reviewable.
     yields per-side connector and position counts, and the `-shuffle` suffix is invisible to it
   - Read-only throughout: `OPTIONS` and `GET` only, nothing created
 
-- [ ] 23b. Verify the behavioural facts — **needs a throwaway instance**
+- [x] 23b. Verify the behavioural facts — **done 2026-08-24, every assumption held**
   - Nothing here is observable without creating a cable, which is why it is a script rather than a
     test: `scripts/probe_cable_profiles.py`, which creates cables, reads them back, and deletes what
     it created. It is the only thing in the repository that issues DELETE — the app's HTTP layer
@@ -622,6 +622,33 @@ the preview that makes lane assignment reviewable.
   - Then: record the answers in `design.md`'s "Still unverified" table, amend Requirements 9.19 /
     9.21 where reality disagreed, and tick this task
   - _Requirements: 9.19, 9.21, 9.22; assumption 7_
+
+  **How it came out.** All five expectations held, so **no requirement needed amending** and the
+  answers are recorded in `design.md` under "Measured: how NetBox behaves with a profile".
+
+  - Fewer terminations than connectors is accepted, so 9.19's `<=` was right and a partly populated
+    breakout is a real cable. More than the connector count is rejected — and precisely: `B side of
+    cable has 5 terminations but only 4 are permitted for profile 1C4P:4C1P breakout`. **Our check
+    is therefore belt and braces rather than the only guard**, which is worth knowing: its value is
+    reporting at validation time instead of at apply time, not catching something NetBox misses
+  - Connectors are assigned in submitted array order — four terminations came back as 1, 2, 3, 4 —
+    so 9.21 stands and the preview's lane numbers are the ones NetBox will use. This was the answer
+    that could have cost the most; it did not
+  - `trunk-4c4p-shuffle` accepts four terminations on **both** sides, connectors 1–4 each way, each
+    carrying `positions [1,2,3,4]`. The shape a leaf-spine shuffle fabric needs is expressible
+  - **Per-connector tracing works; per-position tracing is not served.** A trace from one A-side
+    interface of the shuffle returns all four far ends, which is right — that connector's four
+    positions genuinely fan out — but nothing says *which* position reaches which. So a harness whose
+    internal shuffle differs from NetBox's cannot be detected over the API, and a `-shuffle` profile
+    stays an assertion. Recorded as the one thing D10 still takes on trust
+  - **Two bugs in the probe itself, both of the kind that fake a result.** It first picked each
+    device's first free interface, which is `br_default` — a bridge, which NetBox refuses to cable —
+    so every probe failed for a reason unrelated to profiles *and the over-population probe passed*,
+    because it only checked for a rejection and got one. Then the under-population probe reused the
+    A interface of a cable still in place and was refused as a duplicate termination. Both are fixed:
+    the fixture skips virtual/bridge/LAG types, each cable is dropped before its interfaces are
+    reused, a failed baseline now skips the rest rather than reporting fiction, and every rejection
+    prints NetBox's own message so "rejected" can be read rather than assumed
 
 - [x] 24. `cable_profile` column — **done**
   - One `ColumnSpec` in `CABLING_COLUMNS`: optional, `Conflict.CONSEQUENTIAL` per the D8 table, with

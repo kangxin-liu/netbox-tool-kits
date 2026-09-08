@@ -98,6 +98,11 @@ DEVICE_COLUMNS = (
     "status",
     "asset_tag",
     "tenant",
+    # Decision D11: names live on the device type; the sheet carries addresses only.
+    "loopback_ip4",
+    "loopback_ip6",
+    "management_ip4",
+    "management_ip6",
 )
 
 CABLING_COLUMNS = (
@@ -320,9 +325,55 @@ HIERARCHY_INVALID = (
 PANEL_BREAKOUT = "Patch Panel - 8 Group 4x Breakout 1U"
 PANEL_LC = "Patch Panel - 24 pair LC-LC-SM - 1U"
 
+
+def device(
+    rack: str,
+    face: str,
+    bottom: str,
+    height: str,
+    name: str,
+    model: str,
+    serial: str,
+    manufacturer: str,
+    role: str,
+    status: str,
+    asset: str = "",
+    tenant: str = "",
+    *,
+    loopback_ip4: str = "",
+    loopback_ip6: str = "",
+    management_ip4: str = "",
+    management_ip6: str = "",
+    note: str = "",
+) -> tuple[str, ...]:
+    """One device row. Panels leave the four address cells blank; switches fill at least one.
+
+    Addresses are RFC 5737 / RFC 3849 documentation ranges only.
+    """
+    row = (
+        rack,
+        face,
+        bottom,
+        height,
+        name,
+        model,
+        serial,
+        manufacturer,
+        role,
+        status,
+        asset,
+        tenant,
+        loopback_ip4,
+        loopback_ip6,
+        management_ip4,
+        management_ip6,
+    )
+    return row + (note,) if note else row
+
+
 DEVICES_VALID = (
-    # Panels at the top of the rack. Both are 1U Commscope types.
-    (
+    # Panels at the top of the rack. Both are 1U Commscope types, no mgmt/loopback interfaces.
+    device(
         "LAB1-DH1-R01",
         "front",
         "44",
@@ -333,10 +384,8 @@ DEVICES_VALID = (
         "Commscope",
         "patch-panel",
         "active",
-        "",
-        "",
     ),
-    (
+    device(
         "LAB1-DH1-R01",
         "front",
         "42",
@@ -347,10 +396,9 @@ DEVICES_VALID = (
         "Commscope",
         "patch-panel",
         "active",
-        "",
-        "",
     ),
-    (
+    # Dual-stack on both roles: IPv4 is still the displayed primary (management_ip4).
+    device(
         "LAB1-DH1-R01",
         "front",
         "1",
@@ -361,10 +409,12 @@ DEVICES_VALID = (
         "Nvidia",
         "oob-leaf",
         "active",
-        "",
-        "",
+        loopback_ip4="192.0.2.101/32",
+        loopback_ip6="2001:db8:0:1::101/128",
+        management_ip4="192.0.2.11/24",
+        management_ip6="2001:db8:1::11/64",
     ),
-    (
+    device(
         "LAB1-DH1-R01",
         "front",
         "10",
@@ -375,11 +425,12 @@ DEVICES_VALID = (
         "Nvidia",
         "ns-leaf",
         "active",
-        "",
-        "",
+        loopback_ip4="192.0.2.102/32",
+        management_ip4="192.0.2.12/24",
     ),
     # The only 2U type: ru_height must be 2 or it is an "exists but differs" style conflict.
-    (
+    # Loopback only — that address is the primary, which is the no-management-IPv4 case.
+    device(
         "LAB1-DH1-R01",
         "front",
         "20",
@@ -390,11 +441,10 @@ DEVICES_VALID = (
         "Nvidia",
         "ns-spine",
         "active",
-        "",
-        "",
+        loopback_ip4="192.0.2.103/32",
     ),
     # A second rack, so the cabling sheet can show a panel-to-panel trunk between racks.
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "44",
@@ -405,10 +455,8 @@ DEVICES_VALID = (
         "Commscope",
         "patch-panel",
         "active",
-        "",
-        "",
     ),
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "10",
@@ -419,11 +467,10 @@ DEVICES_VALID = (
         "Nvidia",
         "ns-leaf",
         "active",
-        "",
-        "",
+        management_ip4="192.0.2.22/24",
     ),
     # Serial omitted: it is optional.
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "1",
@@ -434,13 +481,13 @@ DEVICES_VALID = (
         "Nvidia",
         "oob-leaf",
         "active",
-        "",
-        "",
+        loopback_ip4="192.0.2.201/32",
+        management_ip4="192.0.2.21/24",
     ),
 )
 
 DEVICES_INVALID = (
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "30",
@@ -451,11 +498,10 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-leaf",
         "active",
-        "",
-        "",
-        "this row is valid",
+        management_ip4="192.0.2.30/24",
+        note="this row is valid",
     ),
-    (
+    device(
         "LAB9-DH1-R99",
         "front",
         "10",
@@ -466,11 +512,10 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-leaf",
         "active",
-        "",
-        "",
-        "unknown rack",
+        management_ip4="192.0.2.31/24",
+        note="unknown rack",
     ),
-    (
+    device(
         "LAB1-DH1-R01",
         "left",
         "26",
@@ -481,13 +526,12 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-leaf",
         "active",
-        "",
-        "",
-        "rack_face must be front or rear",
+        management_ip4="192.0.2.32/24",
+        note="rack_face must be front or rear",
     ),
     # 45 + 2 - 1 = 46, one unit past the top of a 45U rack. ru_height matches the model, so
     # overflow is the only fault in this row.
-    (
+    device(
         "LAB1-DH1-R01",
         "front",
         "45",
@@ -498,12 +542,11 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-spine",
         "active",
-        "",
-        "",
-        "overflows the top of the rack",
+        loopback_ip4="192.0.2.33/32",
+        note="overflows the top of the rack",
     ),
     # U10 front is occupied by leaf01 from the valid sheet.
-    (
+    device(
         "LAB1-DH1-R01",
         "front",
         "10",
@@ -514,12 +557,11 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-leaf",
         "active",
-        "",
-        "",
-        "needs 2_devices_valid applied: overlaps leaf01",
+        management_ip4="192.0.2.34/24",
+        note="needs 2_devices_valid applied: overlaps leaf01",
     ),
     # These two overlap each other, not anything already in NetBox.
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "20",
@@ -530,11 +572,10 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-spine",
         "active",
-        "",
-        "",
-        "U20-U21 overlaps the next row",
+        loopback_ip4="192.0.2.35/32",
+        note="U20-U21 overlaps the next row",
     ),
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "21",
@@ -545,11 +586,10 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-spine",
         "active",
-        "",
-        "",
-        "U21-U22 overlaps the previous row",
+        loopback_ip4="192.0.2.36/32",
+        note="U21-U22 overlaps the previous row",
     ),
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "28",
@@ -560,12 +600,11 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-leaf",
         "active",
-        "",
-        "",
-        "unknown model, autocreate is off by default",
+        management_ip4="192.0.2.37/24",
+        note="unknown model, autocreate is off by default",
     ),
     # SN5610 is 2U; claiming 1U would misplace the rack elevation.
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "32",
@@ -576,11 +615,10 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-spine",
         "active",
-        "",
-        "",
-        "ru_height 1 disagrees with the model's 2U",
+        loopback_ip4="192.0.2.38/32",
+        note="ru_height 1 disagrees with the model's 2U",
     ),
-    (
+    device(
         "LAB1-DH1-R02",
         "front",
         "34",
@@ -591,9 +629,78 @@ DEVICES_INVALID = (
         "Nvidia",
         "chief-router",
         "active",
+        management_ip4="192.0.2.39/24",
+        note="unknown device role",
+    ),
+    # D11 faults. Each switch below occupies a free RU so the address rule is the only issue.
+    device(
+        "LAB1-DH1-R02",
+        "front",
+        "36",
+        "1",
+        "lab1-dh1-r02-leaf-noip",
+        "Spectrum-SN4700",
         "",
+        "Nvidia",
+        "ns-leaf",
+        "active",
+        note="network device with no address: at least one of the four IP cells is required",
+    ),
+    device(
+        "LAB1-DH1-R02",
+        "front",
+        "38",
+        "1",
+        "lab1-dh1-r02-pp-with-ip",
+        PANEL_LC,
         "",
-        "unknown device role",
+        "Commscope",
+        "patch-panel",
+        "active",
+        management_ip4="192.0.2.50/24",
+        note="a patch panel has nowhere to assign an address",
+    ),
+    device(
+        "LAB1-DH1-R02",
+        "front",
+        "40",
+        "1",
+        "lab1-dh1-r02-leaf-nomask",
+        "Spectrum-SN4700",
+        "",
+        "Nvidia",
+        "ns-leaf",
+        "active",
+        management_ip4="192.0.2.41",
+        note="host with no prefix length: the mask is not defaulted",
+    ),
+    device(
+        "LAB1-DH1-R02",
+        "front",
+        "41",
+        "1",
+        "lab1-dh1-r02-leaf-family",
+        "Spectrum-SN4700",
+        "",
+        "Nvidia",
+        "ns-leaf",
+        "active",
+        management_ip4="2001:db8::1/128",
+        note="IPv6 in an *_ip4 column",
+    ),
+    device(
+        "LAB1-DH1-R02",
+        "front",
+        "42",
+        "1",
+        "lab1-dh1-r02-leaf-dup",
+        "Spectrum-SN4700",
+        "",
+        "Nvidia",
+        "ns-leaf",
+        "active",
+        management_ip4="192.0.2.30/24",
+        note="duplicate of line 2's management_ip4",
     ),
 )
 
@@ -1189,13 +1296,14 @@ SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...
         "2_devices_valid",
         DEVICE_COLUMNS,
         DEVICES_VALID,
-        "needs sheet 1 applied and port templates seeded; then validates clean",
+        "needs sheet 1 applied and port templates seeded; then validates clean. Switch rows "
+        "carry documentation-range CIDRs (D11); panel rows leave those cells blank",
     ),
     (
         "2_devices_invalid",
         DEVICE_COLUMNS,
         DEVICES_INVALID,
-        "line 2 is valid; lines 3-11 each carry one fault, so the whole file must be blocked",
+        "line 2 is valid; lines 3-16 each carry one fault, so the whole file must be blocked",
     ),
     (
         "3_cabling_valid",

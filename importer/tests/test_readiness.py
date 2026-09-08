@@ -101,6 +101,8 @@ class TestDevicesReadiness:
         """Requirement 17.1/17.2: say what is missing rather than appearing broken."""
         stub_count("dcim/device-types", 0)
         stub_count("dcim/device-roles", 0)
+        stub_count("dcim/interface-templates", 0)
+        stub_count("dcim/interface-templates", 0)
         summary = readiness.readiness_for("devices", netbox)
         assert summary.ready is False
         assert any("no device types" in blocker for blocker in summary.blockers)
@@ -113,6 +115,8 @@ class TestDevicesReadiness:
         stub_count("dcim/device-types", 6)
         stub_count("dcim/device-roles", 1)  # the default-role lookup
         stub_count("dcim/device-roles", 4)  # the total
+        stub_count("dcim/interface-templates", 4)
+        stub_count("dcim/interface-templates", 4)
         summary = readiness.readiness_for("devices", netbox)
         assert summary.ready is True
         assert summary.blockers == []
@@ -126,6 +130,8 @@ class TestDevicesReadiness:
         stub_count("dcim/device-types", 6)
         stub_count("dcim/device-roles", 0)  # the default-role lookup finds nothing
         stub_count("dcim/device-roles", 4)  # roles do exist, just not that one
+        stub_count("dcim/interface-templates", 0)
+        stub_count("dcim/interface-templates", 0)
         summary = readiness.readiness_for("devices", netbox)
         role = next(fact for fact in summary.facts if fact.label == "Default device role")
         assert role.level == "warn"
@@ -138,6 +144,8 @@ class TestDevicesReadiness:
     def test_an_unset_default_role_is_reported_as_a_warning(self, netbox):
         stub_count("dcim/device-types", 6)
         stub_count("dcim/device-roles", 4)
+        stub_count("dcim/interface-templates", 0)
+        stub_count("dcim/interface-templates", 0)
         summary = readiness.readiness_for("devices", netbox)
         role = next(fact for fact in summary.facts if fact.label == "Default device role")
         assert role.level == "warn"
@@ -236,6 +244,8 @@ class TestPageIntegration:
         stub_count("dcim/device-types", 6)
         stub_count("dcim/device-roles", 0)
         stub_count("dcim/device-roles", 4)
+        stub_count("dcim/interface-templates", 0)
+        stub_count("dcim/interface-templates", 0)
         html = signed_in.get(reverse("importer:devices")).content.decode()
         assert "no-such-role" in html
         assert "Prerequisites in NetBox" in html

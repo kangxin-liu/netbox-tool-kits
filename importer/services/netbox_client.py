@@ -24,10 +24,12 @@ from pynetbox.core.query import RequestError
 
 logger = logging.getLogger("importer.netbox")
 
-# Reads are GET/OPTIONS; creation is the only write (Requirement 11.3). The client exposes no
-# update or delete method at all, and the session refuses those verbs outright, so the create-only
-# invariant is structural rather than a rule someone has to remember.
-PERMITTED_METHODS = frozenset({"GET", "OPTIONS", "HEAD", "POST"})
+# Reads are GET/OPTIONS; creation is POST. PATCH is permitted only for the device primary-IP
+# exception of Requirement 8.19 / 11.3 — the `patch` method below refuses any other field or
+# endpoint. PUT and DELETE are still refused at the session.
+PERMITTED_METHODS = frozenset({"GET", "OPTIONS", "HEAD", "POST", "PATCH"})
+
+PRIMARY_IP_PATCH_FIELDS = frozenset({"id", "primary_ip4", "primary_ip6"})
 
 
 class Failure(StrEnum):
@@ -125,10 +127,11 @@ class _TimeoutSession(requests.Session):
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         kwargs.setdefault("timeout", self.timeout)
         if method.upper() not in PERMITTED_METHODS:
-            # Belt and braces for Requirement 11.3: iteration 1 has no update or delete path, so a
-            # PATCH or DELETE reaching here is a bug, not a request to make.
+            # Belt and braces for Requirement 11.3: PUT/DELETE reaching here is a bug. PATCH is
+            # allowed only through `NetBoxClient.patch`, which scopes it to primary IP.
             raise RuntimeError(
-                f"{method} is not permitted: this tool only creates objects in NetBox."
+                f"{method} is not permitted: this tool only creates objects in NetBox, "
+                f"except a field-scoped PATCH of a device's primary IP."
             )
         return super().request(method, url, **kwargs)
 
@@ -243,7 +246,7 @@ def _looks_like_dns(exception: Exception, text: str) -> bool:
 
 
 class NetBoxClient:
-    """Reads and creates. There is no update or delete method, by design (Requirement 11.3)."""
+    """Reads and creates, plus the field-scoped primary-IP PATCH of Requirement 8.19."""
 
     def __init__(self, url: str, token: str, *, verify_ssl: bool, timeout: int, host: str) -> None:
         self.host = host
@@ -341,6 +344,55 @@ class NetBoxClient:
         if isinstance(created, list):
             return [dict(record) for record in created]
         return [dict(created)]
+
+    def patch(self, endpoint: str, payload: dict | list[dict]) -> list[dict[str, Any]]:
+        """The D11 exception: PATCH `dcim.devices` with only `primary_ip4` / `primary_ip6`.
+
+        Any other endpoint or field is refused here, so a caller cannot accidentally reopen
+        update-in-general (Requirement 8.19, 11.3).
+        """
+        if endpoint != "dcim.devices":
+            raise RuntimeError(
+                f"PATCH of {endpoint} is not permitted: this tool only PATCHes a device's "
+                f"primary IP."
+            )
+        payloads = payload if isinstance(payload, list) else [payload]
+        for item in payloads:
+            extra = set(item) - PRIMARY_IP_PATCH_FIELDS
+            if extra:
+                raise RuntimeError(
+                    "device PATCH may only set primary_ip4 / primary_ip6, not "
+                    + ", ".join(sorted(extra))
+                )
+            if "id" not in item:
+                raise RuntimeError("device PATCH needs the device id.")
+            if "primary_ip4" not in item and "primary_ip6" not in item:
+                raise RuntimeError("device PATCH needs primary_ip4 and/or primary_ip6.")
+
+        updated: list[dict[str, Any]] = []
+        try:
+            for item in payloads:
+                self.request_count += 1
+                object_id = int(item["id"])
+                body = {key: value for key, value in item.items() if key != "id"}
+                app, _, name = endpoint.partition(".")
+                url = (
+                    f"{str(self._api.base_url).rstrip('/')}/{app}/"
+                    f"{name.replace('_', '-')}/{object_id}/"
+                )
+                response = self._api.http_session.patch(url, json=body)
+                if not response.ok:
+                    raise RequestError(response)
+                payload = response.json() if response.content else {"id": object_id, **body}
+                updated.append(dict(payload))
+        except RequestError as exception:
+            status = getattr(exception.req, "status_code", 0)
+            if status in {401, 403}:
+                raise classify(exception, self.host) from None
+            raise NetBoxWriteRejected(status, _body_of(exception), endpoint) from None
+        except Exception as exception:
+            raise classify(exception, self.host) from None
+        return updated
 
     def object_url(self, endpoint: str, object_id: int) -> str:
         """A deep link an operator can click (Requirements 12.1, 16.7)."""

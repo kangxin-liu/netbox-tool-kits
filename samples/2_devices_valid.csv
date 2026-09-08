@@ -1,9 +1,9 @@
-rack,rack_face,bottom_ru,ru_height,device_name,model,serial,manufacturer,device_role,status,asset_tag,tenant
-LAB1-DH1-R01,front,44,1,lab1-dh1-r01-pp01,Patch Panel - 8 Group 4x Breakout 1U,,Commscope,patch-panel,active,,
-LAB1-DH1-R01,front,42,1,lab1-dh1-r01-pp02,Patch Panel - 24 pair LC-LC-SM - 1U,,Commscope,patch-panel,active,,
-LAB1-DH1-R01,front,1,1,lab1-dh1-r01-oob01,Spectrum-SN2201,LAB-SERIAL-0001,Nvidia,oob-leaf,active,,
-LAB1-DH1-R01,front,10,1,lab1-dh1-r01-leaf01,Spectrum-SN4700,LAB-SERIAL-0002,Nvidia,ns-leaf,active,,
-LAB1-DH1-R01,front,20,2,lab1-dh1-r01-spine01,Spectrum-SN5610,LAB-SERIAL-0003,Nvidia,ns-spine,active,,
-LAB1-DH1-R02,front,44,1,lab1-dh1-r02-pp01,Patch Panel - 8 Group 4x Breakout 1U,,Commscope,patch-panel,active,,
-LAB1-DH1-R02,front,10,1,lab1-dh1-r02-leaf01,Spectrum-SN4700,,Nvidia,ns-leaf,active,,
-LAB1-DH1-R02,front,1,1,lab1-dh1-r02-oob01,Spectrum-SN2201,,Nvidia,oob-leaf,active,,
+rack,rack_face,bottom_ru,ru_height,device_name,model,serial,manufacturer,device_role,status,asset_tag,tenant,loopback_ip4,loopback_ip6,management_ip4,management_ip6
+LAB1-DH1-R01,front,44,1,lab1-dh1-r01-pp01,Patch Panel - 8 Group 4x Breakout 1U,,Commscope,patch-panel,active,,,,,,
+LAB1-DH1-R01,front,42,1,lab1-dh1-r01-pp02,Patch Panel - 24 pair LC-LC-SM - 1U,,Commscope,patch-panel,active,,,,,,
+LAB1-DH1-R01,front,1,1,lab1-dh1-r01-oob01,Spectrum-SN2201,LAB-SERIAL-0001,Nvidia,oob-leaf,active,,,192.0.2.101/32,2001:db8:0:1::101/128,192.0.2.11/24,2001:db8:1::11/64
+LAB1-DH1-R01,front,10,1,lab1-dh1-r01-leaf01,Spectrum-SN4700,LAB-SERIAL-0002,Nvidia,ns-leaf,active,,,192.0.2.102/32,,192.0.2.12/24,
+LAB1-DH1-R01,front,20,2,lab1-dh1-r01-spine01,Spectrum-SN5610,LAB-SERIAL-0003,Nvidia,ns-spine,active,,,192.0.2.103/32,,,
+LAB1-DH1-R02,front,44,1,lab1-dh1-r02-pp01,Patch Panel - 8 Group 4x Breakout 1U,,Commscope,patch-panel,active,,,,,,
+LAB1-DH1-R02,front,10,1,lab1-dh1-r02-leaf01,Spectrum-SN4700,,Nvidia,ns-leaf,active,,,,,192.0.2.22/24,
+LAB1-DH1-R02,front,1,1,lab1-dh1-r02-oob01,Spectrum-SN2201,,Nvidia,oob-leaf,active,,,192.0.2.201/32,,192.0.2.21/24,

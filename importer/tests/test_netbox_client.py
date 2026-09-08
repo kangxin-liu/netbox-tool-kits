@@ -306,15 +306,24 @@ class TestCreates:
 class TestCreateOnlyInvariant:
     """Requirement 11.3: the transport itself refuses to update or delete."""
 
-    @pytest.mark.parametrize("method", ["PATCH", "PUT", "DELETE"])
+    @pytest.mark.parametrize("method", ["PUT", "DELETE"])
     def test_the_session_refuses_modifying_verbs(self, client, method):
         session = client._api.http_session
         with pytest.raises(RuntimeError, match="only creates objects"):
             session.request(method, f"{BASE}/api/dcim/racks/1/")
 
-    def test_the_client_exposes_no_update_or_delete_method(self):
+    def test_the_client_exposes_patch_but_no_delete(self):
         surface = {name for name in dir(netbox_client.NetBoxClient) if not name.startswith("_")}
-        assert not surface & {"update", "patch", "delete", "save", "remove"}
+        assert "patch" in surface
+        assert not surface & {"update", "delete", "save", "remove"}
+
+    def test_patch_refuses_any_endpoint_other_than_devices(self, client):
+        with pytest.raises(RuntimeError, match="only PATCHes"):
+            client.patch("dcim.racks", {"id": 1, "primary_ip4": 1})
+
+    def test_patch_refuses_fields_other_than_primary_ip(self, client):
+        with pytest.raises(RuntimeError, match="primary_ip4"):
+            client.patch("dcim.devices", {"id": 1, "primary_ip4": 1, "name": "leaf01"})
 
 
 class TestFactory:

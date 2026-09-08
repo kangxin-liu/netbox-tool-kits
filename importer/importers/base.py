@@ -99,6 +99,9 @@ class Registry:
     def id_for(self, endpoint: str, key: tuple[Any, ...]) -> int | None:
         return self._ids.get((endpoint, key))
 
+    def remembered(self, endpoint: str) -> list[tuple[tuple[Any, ...], int]]:
+        return [(key, object_id) for (ep, key), object_id in self._ids.items() if ep == endpoint]
+
     def __contains__(self, item: tuple[str, tuple[Any, ...]]) -> bool:
         return item in self._ids
 
@@ -113,6 +116,8 @@ class CreateAction:
     label: str
     line: int
     object_kind: str = ""
+    method: str = "post"
+    """`post` creates; `patch` is the device primary-IP exception of Requirement 8.19."""
 
     lines: tuple[int, ...] = ()
     """Every spreadsheet line this one object came from, where that is more than one.
@@ -176,13 +181,13 @@ class Plan:
     state: dict[str, str] = field(default_factory=dict)
     """S4's view of NetBox, re-checked immediately before the first write (Requirement 10.14)."""
 
-    def actions_for(self, endpoint: str) -> list[CreateAction]:
+    def actions_for(self, endpoint: str, *, method: str = "post") -> list[CreateAction]:
         return [
             action
             for row in self.rows
             if row.outcome == RowOutcome.CREATE
             for action in row.actions
-            if action.endpoint == endpoint
+            if action.endpoint == endpoint and action.method == method
         ]
 
     @property
@@ -280,6 +285,11 @@ class BaseImporter(ABC):
 
     name: str = ""
     endpoint_order: tuple[str, ...] = ()
+    apply_phases: tuple[tuple[str, str], ...] | None = None
+    """(endpoint, method) pairs. Defaults to one POST per `endpoint_order` entry.
+
+    The device importer inserts a PATCH of `dcim.devices` after the IP creates (Requirement 8.19).
+    """
 
     choice_sources: ClassVar[dict[str, tuple[str, str]]] = {}
     """Column key → (NetBox endpoint, field) whose choices the value must belong to (Req 7.7)."""
@@ -345,6 +355,16 @@ class BaseImporter(ABC):
 
         Not abstract for the same reason: an importer may have nothing to resolve.
         """
+        return None
+
+    def after_phase(
+        self,
+        endpoint: str,
+        method: str,
+        registry: Registry,
+        lookups: Lookups,
+    ) -> None:
+        """Run after one apply phase succeeds. Devices use this to index inherited interfaces."""
         return None
 
     @abstractmethod
@@ -562,13 +582,18 @@ class BaseImporter(ABC):
                     )
                 )
 
-        for endpoint in self.endpoint_order:
-            actions = plan.actions_for(endpoint)
+        phases = self.apply_phases or tuple((endpoint, "post") for endpoint in self.endpoint_order)
+        for endpoint, method in phases:
+            actions = plan.actions_for(endpoint, method=method)
             if not actions:
+                self.after_phase(endpoint, method, plan.registry, lookups)
                 continue
             report.endpoints_attempted.append(endpoint)
             try:
-                self._apply_endpoint(endpoint, actions, plan.registry, report, client)
+                if method == "patch":
+                    self._apply_patches(endpoint, actions, plan.registry, report, client)
+                else:
+                    self._apply_endpoint(endpoint, actions, plan.registry, report, client)
             except NetBoxUnavailable as unavailable:
                 # Requirement 12.3: connection loss or auth failure aborts the run.
                 report.aborted = True
@@ -585,6 +610,7 @@ class BaseImporter(ABC):
                 )
                 break
             report.endpoints_completed.append(endpoint)
+            self.after_phase(endpoint, method, plan.registry, lookups)
 
         report.finished_at = timezone.now()
         logger.info(
@@ -620,12 +646,68 @@ class BaseImporter(ABC):
 
         self._record_created(endpoint, batch, created, registry, report, client)
 
+    def _apply_patches(
+        self,
+        endpoint: str,
+        actions: list[CreateAction],
+        registry: Registry,
+        report: RunReport,
+        client: Any,
+    ) -> None:
+        """Field-scoped PATCH. One request per action; not a list POST (Requirement 8.19)."""
+        batch = self._dedupe(actions, registry)
+        if not batch:
+            return
+        payloads = [action.resolved_payload(registry) for action in batch]
+        try:
+            updated = client.patch(endpoint, payloads)
+        except NetBoxWriteRejected as rejected:
+            detail = self._rejection_detail(rejected)
+            for action in batch:
+                report.results.append(
+                    RowResult(
+                        line=action.line,
+                        outcome=RowOutcome.BLOCKED,
+                        object_kind=action.object_kind or "device primary IP",
+                        object_name=action.label,
+                        message=f"NetBox rejected this primary-IP PATCH: {detail}",
+                    )
+                )
+            raise BatchRejected(detail) from None
+
+        for action, record in zip(batch, updated, strict=False):
+            object_id = record.get("id") or action.payload.get("id")
+            if isinstance(object_id, Ref):
+                object_id = registry.id_for(object_id.endpoint, object_id.key)
+            report.write_count += 1
+            url = client.object_url(endpoint, int(object_id)) if object_id else ""
+            report.results.append(
+                RowResult(
+                    line=action.line,
+                    outcome=RowOutcome.CREATE,
+                    object_kind=action.object_kind or "device primary IP",
+                    object_name=action.label,
+                    object_id=int(object_id) if object_id else None,
+                    url=url,
+                    message="Primary IP set.",
+                    sequence=report.write_count,
+                )
+            )
+
     def _dedupe(self, actions: list[CreateAction], registry: Registry) -> list[CreateAction]:
         """Two rows naming the same new parent create it once (Requirement 7.6)."""
         seen: set[tuple[Any, ...]] = set()
         batch: list[CreateAction] = []
+        patching = bool(actions) and actions[0].method == "patch"
         for action in actions:
-            if action.key in seen or registry.id_for(action.endpoint, action.key) is not None:
+            if action.key in seen:
+                continue
+            # A PATCH targets an object that already has an id in the registry; skipping it
+            # for that reason would drop the primary-IP write of Requirement 8.19.
+            if (
+                not patching
+                and registry.id_for(action.endpoint, action.key) is not None
+            ):
                 continue
             seen.add(action.key)
             batch.append(action)

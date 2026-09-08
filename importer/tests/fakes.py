@@ -74,6 +74,10 @@ CHOICES: dict[str, dict[str, frozenset[str]]] = {
 }
 
 
+DEVICES = "dcim.devices"
+INTERFACES = "dcim.interfaces"
+INTERFACE_TEMPLATES = "dcim.interface-templates"
+IP_ADDRESSES = "ipam.ip-addresses"
 CABLES = "dcim.cables"
 
 # A cable's terminations name their model, not their endpoint (Requirement 9.6).
@@ -102,6 +106,7 @@ class FakeNetBox:
     version: str = "4.6.8"
     host: str = "netbox.example.com"
     posts: list[Post] = field(default_factory=list)
+    patches: list[Post] = field(default_factory=list)
     rejections: dict[str, Callable[[list[dict[str, Any]]], Any]] = field(default_factory=dict)
     unavailable_on: dict[str, Exception] = field(default_factory=dict)
     """Endpoint → transport failure raised on *writes*, for mid-apply abort tests."""
@@ -141,7 +146,14 @@ class FakeNetBox:
         if endpoint in self.unavailable_on_read:
             raise self.unavailable_on_read[endpoint]
         records = self.objects.get(endpoint, [])
-        return [record for record in records if self._matches(record, filters)]
+        filters = dict(filters)
+        device_ids = filters.pop("device_id", None) if endpoint == IP_ADDRESSES else None
+        matched = [record for record in records if self._matches(record, filters)]
+        if device_ids is None:
+            return matched
+        wanted_ids = device_ids if isinstance(device_ids, list) else [device_ids]
+        wanted = {int(value) for value in wanted_ids}
+        return [record for record in matched if self._ip_device_id(record) in wanted]
 
     def count(self, endpoint: str, **filters: Any) -> int:
         return len(self.get_all(endpoint, **filters))
@@ -175,8 +187,102 @@ class FakeNetBox:
             self.objects.setdefault(endpoint, []).append(record)
             if endpoint == CABLES:
                 self._occupy_terminations(record)
+            if endpoint == DEVICES:
+                self._inherit_interfaces(record)
+            if endpoint == IP_ADDRESSES:
+                self._bind_ip(record)
             created.append(record)
         return created
+
+    def patch(self, endpoint: str, payload: dict | list[dict]) -> list[dict[str, Any]]:
+        self.request_count += 1
+        payloads = payload if isinstance(payload, list) else [payload]
+        self.patches.append(Post(endpoint=endpoint, payloads=[dict(item) for item in payloads]))
+        if endpoint in self.unavailable_on:
+            raise self.unavailable_on[endpoint]
+        decide = self.rejections.get(f"PATCH:{endpoint}")
+        if decide is not None:
+            verdict = decide(payloads)
+            if verdict is not None:
+                status, body = verdict
+                raise NetBoxWriteRejected(status, body, endpoint)
+        return [self._apply_primary_patch(item) for item in payloads]
+
+    def _inherit_interfaces(self, device: dict[str, Any]) -> None:
+        """What NetBox does on device create: copy the type's interface templates."""
+        device_type = device.get("device_type")
+        type_id = device_type.get("id") if isinstance(device_type, dict) else device_type
+        if type_id is None:
+            return
+        for template in self.objects.get(INTERFACE_TEMPLATES, []):
+            held = template.get("device_type")
+            held_id = held.get("id") if isinstance(held, dict) else held
+            if held_id != type_id:
+                continue
+            iface_type = template.get("type")
+            if isinstance(iface_type, str):
+                iface_type = {"value": iface_type, "label": iface_type}
+            self.objects.setdefault(INTERFACES, []).append(
+                {
+                    "id": self._take_id(),
+                    "device": {"id": device["id"], "name": device.get("name")},
+                    "name": template.get("name"),
+                    "type": iface_type,
+                    "mgmt_only": bool(template.get("mgmt_only")),
+                }
+            )
+
+    def _bind_ip(self, record: dict[str, Any]) -> None:
+        object_id = record.get("assigned_object_id")
+        object_type = record.get("assigned_object_type") or "dcim.interface"
+        record["assigned_object_type"] = object_type
+        if object_id is None:
+            return
+        for iface in self.objects.get(INTERFACES, []):
+            if iface.get("id") == object_id:
+                record["assigned_object"] = {
+                    "id": object_id,
+                    "name": iface.get("name"),
+                    "device": iface.get("device"),
+                }
+                return
+
+    def _ip_device_id(self, record: dict[str, Any]) -> int | None:
+        assigned = record.get("assigned_object") or {}
+        device = assigned.get("device") if isinstance(assigned, dict) else None
+        if isinstance(device, dict) and device.get("id") is not None:
+            return int(device["id"])
+        object_id = record.get("assigned_object_id")
+        if record.get("assigned_object_type") != "dcim.interface" or object_id is None:
+            return None
+        for iface in self.objects.get(INTERFACES, []):
+            if iface.get("id") != object_id:
+                continue
+            held = iface.get("device")
+            held_id = held.get("id") if isinstance(held, dict) else held
+            return int(held_id) if held_id is not None else None
+        return None
+
+    def _apply_primary_patch(self, item: dict[str, Any]) -> dict[str, Any]:
+        object_id = int(item["id"])
+        for record in self.objects.get(DEVICES, []):
+            if record.get("id") != object_id:
+                continue
+            for ip_field in ("primary_ip4", "primary_ip6"):
+                if ip_field not in item:
+                    continue
+                ip_id = item[ip_field]
+                ip_record = next(
+                    (ip for ip in self.objects.get(IP_ADDRESSES, []) if ip.get("id") == ip_id),
+                    None,
+                )
+                record[ip_field] = (
+                    {"id": ip_id, "address": ip_record.get("address")}
+                    if ip_record is not None
+                    else {"id": ip_id}
+                )
+            return record
+        return {"id": object_id, **{k: v for k, v in item.items() if k != "id"}}
 
     def _occupy_terminations(self, cable: dict[str, Any]) -> None:
         """What NetBox does for you: a cabled port carries the cable's id from then on."""
@@ -208,6 +314,19 @@ class FakeNetBox:
                 related = record.get(field_name)
                 held = related.get("id") if isinstance(related, dict) else related
                 if held not in {int(value) for value in values}:
+                    return False
+            elif name == "mgmt_only":
+                wanted_bool = {str(value).casefold() in {"1", "true", "yes"} for value in values}
+                if bool(record.get("mgmt_only")) not in wanted_bool:
+                    return False
+            elif name == "type":
+                held = record.get("type")
+                held_value = held.get("value") if isinstance(held, dict) else held
+                if str(held_value).casefold() not in {str(value).casefold() for value in values}:
+                    return False
+            elif name == "address":
+                held = str(record.get("address") or "")
+                if held.casefold() not in {str(value).casefold() for value in values}:
                     return False
             # Anything else is ignored, exactly as NetBox ignores an unrecognised parameter: the
             # response comes back unfiltered rather than as an error.

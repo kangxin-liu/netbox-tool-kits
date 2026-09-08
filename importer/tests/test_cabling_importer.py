@@ -551,6 +551,7 @@ class TestCablePayload:
         apply_plan(importer, netbox, plan)
         assert netbox.posted(CABLE_TERMINATIONS) == []
         assert {post.endpoint for post in netbox.posts} == {CABLES}
+        assert netbox.patches == []
 
 
 # --- 9.8 and decision D3: no transceivers, no interface changes -------------------------------

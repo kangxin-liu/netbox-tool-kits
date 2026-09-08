@@ -465,7 +465,9 @@ Criteria 9.13–9.23 are decision **D10** — cable profiles and the multi-row c
  carries more terminations than connectors, THEN the system SHALL reject the group naming the
  profile, the limit, and the count. IF the profile's connector structure cannot be determined from
  what NetBox reports, THEN the system SHALL skip the comparison and raise a WARNING rather than
- invent a limit.
+ invent a limit. Measured on 4.6.8: NetBox permits *fewer* terminations than connectors, so a partly
+ populated breakout is legal and this check is `<=`; and NetBox enforces the upper bound itself, so
+ this check exists to report at validation time rather than to be the only guard.
 20. IF a group resolves to more than one distinct termination on either side and no `cable_profile`
  is supplied, THEN the system SHALL raise a WARNING for acknowledgement: NetBox will store such a
  cable, but with no profile it cannot trace which lane reaches which far end, which is the entire
@@ -473,7 +475,9 @@ Criteria 9.13–9.23 are decision **D10** — cable profiles and the multi-row c
 21. The system SHALL NOT write `connector` or `positions` on any termination — NetBox derives both
  from the profile and exposes them read-only — and SHALL therefore treat the order of a group's rows
  as its lane order. The plan preview SHALL state the connector each row's termination will receive,
- so lane assignment is read before apply rather than discovered after it.
+ so lane assignment is read before apply rather than discovered after it. Measured on 4.6.8: four
+ terminations submitted in order come back as connectors 1, 2, 3, 4, so the assignment is positional
+ and the preview's numbers are the ones NetBox will use.
 22. The system SHALL judge occupancy over a whole group: WHERE every termination is free it SHALL
  create the cable; WHERE every termination is already held by one and the same cable it SHALL skip
  the group as already cabled and name that cable; and IF the terminations are split — some free, or
