@@ -9,7 +9,9 @@ and breakout, decision D10 — and is gated on that decision being accepted at r
 exception to the no-live-NetBox rule above: it verifies the API against a real instance, which is how
 every other field in this spec was pinned down. **Phase 9 is the next addition** — loopback and
 management addresses on the device sheet, decision D11 — gated the same way; task 27a is the
-read-only probe.
+read-only probe. **Phase 10 follows it** — creating a device interface the cabling sheet names,
+decision D12 — gated the same way, with task 31a as its probe. Phase 10 depends on phase 9 only for
+Requirement 8.23, which D12 amends; the cabling work itself is independent of it.
 
 ## Phase 1 — Scaffold and configuration
 
@@ -796,8 +798,10 @@ probe results in `design.md`.
   - S4: at-least-one of four when the type has either role (8.14); all-blank when it has neither;
     zero or more-than-one match on a filled column is `MGMT_INTERFACE_NOT_FOUND` /
     `MGMT_INTERFACE_AMBIGUOUS` or the loopback pair, naming the type and the candidates
-  - An existing device missing the interface its type now defines is `DEVICE_INTERFACE_MISSING`,
-    not an invitation to create the interface (8.23)
+  - An existing device missing the interface its type now defines has that interface created from
+    the template, by the same rule as 9.25 — **8.23 as amended by D12**, which reverses what this
+    bullet used to say. A type that defines no such template is still `DEVICE_INTERFACE_MISSING`,
+    because the device sheet has no name or type column to create one from
   - Plan preview names the resolved interface, each address, `primary_ip4`, `primary_ip6`, and
     which of those NetBox will show as primary (8.26)
   - Devices readiness panel counts types that define each role (17.2)
@@ -839,6 +843,109 @@ probe results in `design.md`.
     already seeds, named for the `--naming` scheme
   - _Requirements: 8.13–8.26, 17.6_
 
+## Phase 10 — Creating a missing device interface from the cabling sheet (D12)
+
+Gated on D12 being accepted at review, including its two open questions: whether the
+template-backed create of 9.25 needs the flag at all, and whether Requirement 8.23's device-sheet
+create shares it.
+
+The regression guard runs through every task in this phase: with `NETBOX_AUTOCREATE_INTERFACES`
+off, every existing cabling test must pass unmodified and an unknown port name must still be
+`PORT_NOT_FOUND`. A sheet in use today does not change behaviour because this phase landed.
+
+**Status.** 31b–34 are built and under test; 31a is written but **not yet run**, because it needs a
+disposable 4.6.8 to write to. The order this phase was planned in said 31b waits for 31a, and it did
+not: the implementation instead made the unverified part cheap to correct. `TEMPLATE_CHOICE_FIELDS`
+and `TEMPLATE_PLAIN_FIELDS` in `cabling.py` are the whole of the guess, they copy only keys the
+template actually carries — so a field NetBox names differently is copied as nothing rather than
+wrongly — and `scripts/probe_interface_creation.py` prints exactly the diff needed to correct them.
+Run it before this phase is called done, and amend 9.25's field list if reality disagreed.
+
+- [ ] 31a. Probe interface creation and template fidelity against 4.6.8
+  - **Script written (`scripts/probe_interface_creation.py`), not yet run against a live instance.**
+    It answers all four questions below and exits non-zero if any expectation is violated
+  - Read-only first: `OPTIONS` on `/api/dcim/interfaces/` for the required fields and the `type`
+    choice list, and `GET` on `/api/dcim/interface-templates/` for the fields a template actually
+    carries. The open question is which template fields `dcim.Interface` accepts verbatim —
+    `type`, `mgmt_only`, `speed`, `duplex`, `label`, `description`, `poe_mode`, `poe_type`,
+    `rf_role` are the candidates — because Requirement 9.25 promises the interface the device type
+    would have produced, and a silently dropped field makes that false
+  - Then create one interface on a throwaway device from a template, diff it field by field against
+    an interface the same template produced at device-create time, and delete it. Follow
+    `scripts/probe_cable_profiles.py`: create, measure, delete, and leave nothing behind
+  - Confirm a bulk POST to `dcim.interfaces` is atomic like every other endpoint (D7), and that a
+    duplicate `(device, name)` is rejected — 9.32's drift check assumes it is
+  - Record the answers in `design.md`; amend 9.25's field list if reality disagreed
+  - _Requirements: 9.25, 9.32, D7_
+
+- [x] 31b. The two columns and the flag
+  - `NETBOX_AUTOCREATE_INTERFACES` in `config/settings.py` via `env.flag`, default `false`, beside
+    `NETBOX_AUTOCREATE_DEVICE_TYPES`; `false` in `config/settings_test.py` so the suite's default is
+    today's behaviour and a test must opt in with `override_settings`
+  - Two `ColumnSpec`s in `CABLING_COLUMNS`: `a_interface_type` / `b_interface_type`, optional,
+    `Conflict.DESCRIPTIVE` with the declarative caveat recorded in `design.md`, blank examples so
+    the template's example row stays the common case
+  - `choice_sources` gains both against the interface `type` choices — the whole of 9.27's S2 check
+  - Help text states the column is read only when the device type does not define the port
+  - Tests: the columns parse and validate; an unrecognised type is rejected listing accepted values;
+    with the flag off both columns are accepted and unused; no default secret or default type exists
+  - _Requirements: 9.24, 9.27, 4.3, 11.5c_
+
+- [x] 32. Resolution fallback and planning
+  - `_resolve_end` gains the two steps after the interface lookup misses, in the order of the
+    `design.md` table: device interfaces, then the device type's templates, then the sheet cell.
+    Panel ends and a flag that is off skip all of it and keep today's `PORT_NOT_FOUND`
+  - Prefetch interface templates per device type touched by the sheet, the way the device importer
+    does — one query per type set, not one per row (Requirement 15's request budget)
+  - Plan the create as a `CreateAction` on `dcim.interfaces` keyed `Registry.key(device, name)`, and
+    have the cable payload reference it by `Ref` so the id arrives from the earlier batch
+  - Dedupe: one interface named by many rows or groups is one action (9.30); two rows disagreeing on
+    a non-blank type is `INTERFACE_TYPE_CONFLICT` naming both lines (9.31)
+  - A planned interface is free by construction, so it feeds the occupancy tri-state of 9.22 as
+    free — worth an explicit test, since a breakout whose lanes are half-created and half-existing is
+    the case most likely to get this wrong
+  - New codes: `INTERFACE_TYPE_REQUIRED`, `INTERFACE_TYPE_CONFLICT`, `INTERFACE_WILL_BE_CREATED`
+    (the acknowledgeable warning of 9.28), `INTERFACE_TYPE_IGNORED` (the INFO of 9.27)
+  - Preview distinguishes found from will-be-created and names the type's source (9.33)
+  - Tests: each row of the `design.md` resolution table; a typo'd name with the flag on and no
+    column still blocked, which is the property the ordering exists to give; four group rows naming
+    one missing interface producing one action; the warning making the plan unappliable until
+    acknowledged
+  - _Requirements: 9.24–9.31, 9.33, 10.9, 16.4_
+
+- [x] 33. Two-batch apply, and the drift check over planned interfaces
+  - `endpoint_order` becomes `(INTERFACES, CABLES)`; the module docstring's "one endpoint, no
+    half-applied window" claim is now false and must be rewritten rather than left to mislead
+  - The pre-apply S4 re-run covers planned interfaces: one that has appeared since validation aborts
+    the run before the first write (9.32), rather than letting NetBox reject a duplicate name
+  - Report counts a created interface as an object of its own; `object_count` and the apply button's
+    quote read "3 interfaces, 4 cables" rather than folding them together
+  - `FakeNetBox`: an interface POSTed directly must land in the same per-device index that
+    device-create templating writes to, or the cable batch cannot resolve what this run just created
+  - Tests: interfaces POSTed before cables and the cable carrying the returned id; a cable batch
+    rejected after the interface batch reports its rows blocked and leaves the interfaces, with the
+    report saying which endpoint completed (12.4); re-uploading that sheet creates only the cables;
+    re-uploading a fully applied sheet creates nothing; an interface appearing between validate and
+    apply aborts with zero writes; the create-only sweep still finds no `PATCH`/`PUT`/`DELETE` from
+    the cabling importer
+  - _Requirements: 9.32, 10.14, 11.3, 11.3a, 11.7, 12.1, 12.4, 12.5_
+
+- [x] 34. Documentation and samples for interface creation
+  - `docs/operator-runbook.md`: the flag is off by default and what turning it on changes; that the
+    device type is tried before the column, so the fix for a whole fleet is usually one template
+    rather than a column on every row; that the acknowledgement list is where a typo gets caught;
+    and that panel ports are still prep
+  - `docs/empty-instance-prep.md`: adding a template to a device type does not backfill the devices
+    already built from it — that is the gap this feature closes, and it is worth stating in the prep
+    guide because it is the fact that surprises people
+  - `samples/`: a `3_cabling_newports_valid` / `_invalid` pair rather than edits to the existing
+    two, for the reason task 26 records about positional column tuples. The invalid one wants
+    `INTERFACE_TYPE_REQUIRED`, `INTERFACE_TYPE_CONFLICT`, and an unrecognised type value
+  - `scripts/seed_netbox.py`: a device type with a template the seeded device predates, so the
+    template-backed path has something to demonstrate against
+  - `.env.example` gains `NETBOX_AUTOCREATE_INTERFACES` with the default and a one-line warning
+  - _Requirements: 9.24–9.33, 17.6_
+
 ## Deferred to iteration 2 (do not build now)
 
 Update and delete of existing objects (other than the primary-IP PATCH of D11); IPAM beyond the
@@ -854,4 +961,11 @@ not create, so the create-only invariant and its test will need revisiting delib
 
 **Completing a partly cabled breakout (D10, Requirement 9.22).** Adding the missing lane to a cable
 that already exists is a PATCH, so it lands with the update operations above rather than with phase 8.
-Until then a half-cabled group blocks and says so. D11's primary-IP PATCH does not reopen this.
+Until then a half-cabled group blocks and says so. Neither D11's primary-IP PATCH nor D12's interface
+creates reopen this: both write new objects, and this one edits an existing cable.
+
+**Creating patch-panel front and rear ports (D12, Requirement 9.29).** A front port is defined by the
+rear port and position it maps to, and a rear port by its position count; the cabling sheet has no
+column for any of them, and inferring a mapping would fabricate a panel's internal wiring — the thing
+path tracing depends on being true. Panels stay device-type preparation. If iteration 2 wants this, it
+needs a panel sheet with the 4.5+ `rear_ports` mapping in it, not two more cabling columns.

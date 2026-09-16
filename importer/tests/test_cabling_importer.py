@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from django.test import override_settings
 
 from importer.columns import columns_for
 from importer.importers.base import ApplyRefused, RowOutcome
@@ -1344,3 +1345,525 @@ class TestGroupOccupancy:
         info = next(i for i in second.verdict.infos if i.code is Code.PORT_ALREADY_CABLED)
         assert "The group was skipped" in info.message
         assert str(cable["id"]) in info.related_url
+
+
+# --- D12: creating a device interface the sheet names and NetBox does not have ----------------
+#
+# Requirements 9.24–9.33. The whole feature is behind NETBOX_AUTOCREATE_INTERFACES, so every test
+# that wants it says so, and the first class below is the guard that says what happens without it.
+
+DEVICE_TYPE = "dcim.device-types"
+
+NEW_PORT = "swp49"
+SPINE = "exa1-dh1-r01-spine01"
+
+
+def device_row(**overrides: str) -> dict[str, str]:
+    """A device-to-device row, since D12 never creates a panel port (Requirement 9.29)."""
+    return row(**{"b_end": SPINE, "b_end_kind": "device", "b_port": "swp1", **overrides})
+
+
+def give_type(netbox: FakeNetBox, device: dict[str, Any], model: str) -> dict[str, Any]:
+    """Put a device type behind a device, the way a real one always has one."""
+    device_type = netbox.add(DEVICE_TYPE, model=model, slug=model.lower())
+    device["device_type"] = {"id": device_type["id"], "model": model}
+    return device_type
+
+
+def add_template(
+    netbox: FakeNetBox,
+    device_type: dict[str, Any],
+    name: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    """An interface template: what a device created *after* it would have inherited."""
+    return netbox.add(
+        "dcim.interface-templates",
+        name=name,
+        device_type={"id": device_type["id"], "model": device_type["model"]},
+        **fields,
+    )
+
+
+@pytest.fixture
+def autocreate():
+    """Turn D12 on for a whole class. `override_settings` cannot decorate a plain pytest class, so
+    the classes below opt in with `pytestmark = pytest.mark.usefixtures("autocreate")`."""
+    with override_settings(NETBOX_AUTOCREATE_INTERFACES=True):
+        yield
+
+
+@pytest.fixture
+def typed(netbox, topology):
+    """A leaf whose type defines a port the leaf itself does not have.
+
+    This is the case D12 exists for and it is not exotic: NetBox copies interface templates onto a
+    device when the device is created and never again, so adding `swp49` to the type leaves every
+    switch built before that without it.
+    """
+    device_type = give_type(netbox, topology.leaf, "SN2201")
+    add_template(netbox, device_type, NEW_PORT, type="100gbase-x-qsfp28")
+    spine = add_device(netbox, SPINE)
+    add_port(netbox, INTERFACES, spine, "swp1", type={"value": "400gbase-x-qsfpdd"})
+    return device_type
+
+
+def consenting_apply(importer, netbox, plan):
+    """Apply a plan whose interface-create warnings the operator has acknowledged (Req 9.28)."""
+    plan.verdict.acknowledge()
+    return importer.apply(plan, Lookups(client=netbox))
+
+
+class TestAutocreateOff:
+    """The regression guard. Every sheet in use today runs with the flag off, and nothing it does
+    may change because this feature landed."""
+
+    def test_an_unknown_port_is_still_not_found(self, importer, netbox, typed):
+        """Requirement 9.24: 9.5 stands unaltered, even where a template would have matched."""
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        error = next(i for i in plan.verdict.errors if i.code is Code.PORT_NOT_FOUND)
+        assert error.column == "a_port"
+        assert NEW_PORT in error.message
+        assert plan.verdict.is_applyable() is False
+
+    def test_the_message_says_the_flag_exists(self, importer, netbox, typed):
+        """A blocked row should say what would unblock it, not merely that it is blocked."""
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        error = next(i for i in plan.verdict.errors if i.code is Code.PORT_NOT_FOUND)
+        assert "NETBOX_AUTOCREATE_INTERFACES" in error.message
+
+    def test_nothing_is_written(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        with pytest.raises(ApplyRefused):
+            apply_plan(importer, netbox, plan)
+        assert netbox.posts == []
+
+    def test_the_type_columns_are_accepted_and_unused(self, importer, netbox, topology):
+        """Requirement 9.24: the columns validate in either state; only the creating does not."""
+        plan = validate(importer, netbox, [row(a_interface_type="100gbase-x-qsfp28")])
+        assert plan.verdict.is_applyable() is True
+        assert (
+            cable_payload(plan)["a_terminations"][0]["object_id"]
+            == (topology.interfaces["swp1"]["id"])
+        )
+
+    def test_a_bad_type_value_is_still_rejected(self, importer, netbox, topology):
+        """Requirement 9.27: caught on the sheet, not on the later run that needs the value."""
+        plan = validate(importer, netbox, [row(a_interface_type="wet-string")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.VALUE_NOT_IN_CHOICES)
+        assert error.column == "a_interface_type"
+
+    def test_the_apply_is_still_a_single_batch(self, importer, netbox, topology):
+        """The property D12 costs is only spent where an interface is actually created."""
+        plan = validate(importer, netbox, [row()])
+        apply_plan(importer, netbox, plan)
+        assert [post.endpoint for post in netbox.posts] == [CABLES]
+
+    def test_no_interface_template_request_is_issued(self, importer, netbox, typed):
+        """Requirement 15.2: the request budget of an existing sheet is unchanged."""
+        fetched = record_fetches(netbox)
+        validate(importer, netbox, [row()])
+        assert "dcim.interface-templates" not in fetched
+
+
+class TestCreateFromTheDeviceType:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    """Requirement 9.25 — the common case, and the one that invents nothing."""
+
+    def test_a_port_the_type_defines_is_created_and_cabled(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        assert plan.verdict.errors == []
+
+        actions = plan.rows[0].actions
+        assert [action.endpoint for action in actions] == [INTERFACES, CABLES]
+        assert actions[0].payload["name"] == NEW_PORT
+        assert actions[0].payload["type"] == "100gbase-x-qsfp28"
+
+    def test_the_type_comes_from_the_template_not_from_the_sheet(self, importer, netbox, typed):
+        """The template wins where both could answer, so a sheet cannot re-type a known port."""
+        plan = validate(
+            importer, netbox, [device_row(a_port=NEW_PORT, a_interface_type="1000base-t")]
+        )
+        assert plan.rows[0].actions[0].payload["type"] == "100gbase-x-qsfp28"
+
+    def test_every_field_the_template_carries_is_copied(self, importer, netbox, topology):
+        """Requirement 9.25: the interface the device type would have produced, not a sketch."""
+        device_type = give_type(netbox, topology.leaf, "SN2201")
+        add_template(
+            netbox,
+            device_type,
+            "eth0",
+            type="1000base-t",
+            mgmt_only=True,
+            label="OOB",
+            description="management",
+            speed=1000,
+        )
+        add_port(netbox, INTERFACES, add_device(netbox, SPINE), "swp1")
+
+        plan = validate(importer, netbox, [device_row(a_port="eth0")])
+        payload = plan.rows[0].actions[0].payload
+        assert payload["mgmt_only"] is True
+        assert payload["speed"] == 1000
+        assert payload["label"] == "OOB"
+        assert payload["description"] == "management"
+
+    def test_the_preview_says_the_port_will_be_created_and_where_its_type_came_from(
+        self, importer, netbox, typed
+    ):
+        """Requirement 9.33: found and about-to-exist must not read the same."""
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        resolved = plan.rows[0].resolved
+        assert "will be created" in resolved["a_port"]
+        assert "the device type" in resolved["a_port"]
+        assert resolved["b_port"].endswith("(interface, existing)")
+
+    def test_a_panel_port_is_never_created(self, importer, netbox, typed):
+        """Requirement 9.29: a front port needs a rear port and a position, and no column says."""
+        plan = validate(importer, netbox, [row(b_port="MPO99")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.PORT_NOT_FOUND)
+        assert error.column == "b_port"
+        assert "front port" in error.message
+
+    def test_an_unknown_device_is_still_not_created(self, importer, netbox, typed):
+        """Requirement 9.29: D12 creates interfaces. It does not create the thing they sit on."""
+        plan = validate(importer, netbox, [device_row(a_end="exa1-dh1-r01-leaf99")])
+        assert any(i.code is Code.END_NOT_FOUND for i in plan.verdict.errors)
+
+
+class TestCreateFromTheSheet:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    """Requirement 9.26 — the fallback, and the refusal that guards it."""
+
+    def test_a_port_no_template_defines_is_created_from_the_column(self, importer, netbox, typed):
+        plan = validate(
+            importer,
+            netbox,
+            [device_row(a_port="swp50", a_interface_type="400gbase-x-qsfpdd")],
+        )
+        assert plan.verdict.errors == []
+        payload = plan.rows[0].actions[0].payload
+        assert payload["name"] == "swp50"
+        assert payload["type"] == "400gbase-x-qsfpdd"
+
+    def test_without_the_column_the_row_is_blocked_naming_both_remedies(
+        self, importer, netbox, typed
+    ):
+        plan = validate(importer, netbox, [device_row(a_port="swp50")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.INTERFACE_TYPE_REQUIRED)
+        assert error.column == "a_interface_type"
+        assert "interface template" in error.message
+        assert "a_interface_type" in error.message
+        assert plan.verdict.is_applyable() is False
+
+    def test_the_type_is_never_defaulted(self, importer, netbox, typed):
+        """A guess about physical hardware is worse than the blocked row it would replace."""
+        plan = validate(importer, netbox, [device_row(a_port="swp50")])
+        assert plan.rows[0].actions == []
+        assert (
+            "never defaulted"
+            in next(
+                i for i in plan.verdict.errors if i.code is Code.INTERFACE_TYPE_REQUIRED
+            ).message
+        )
+
+    def test_a_typo_is_still_blocked_which_is_what_the_ordering_buys(self, importer, netbox, typed):
+        """The safety property of D12: `swp1o` matches no template either, so it falls through to
+        a branch that demands an explicit type rather than quietly becoming a port."""
+        plan = validate(importer, netbox, [device_row(a_port="swp1o")])
+        assert any(i.code is Code.INTERFACE_TYPE_REQUIRED for i in plan.verdict.errors)
+        assert plan.verdict.is_applyable() is False
+
+    def test_a_type_the_api_does_not_report_is_rejected(self, importer, netbox, typed):
+        rows = [device_row(a_port="swp50", a_interface_type="wet-string")]
+        plan = validate(importer, netbox, rows)
+        error = next(i for i in plan.verdict.errors if i.code is Code.VALUE_NOT_IN_CHOICES)
+        assert error.column == "a_interface_type"
+
+
+class TestAnExistingPortIsLeftAlone:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    """Requirement 9.27, and 9.8 underneath it."""
+
+    def test_the_column_is_reported_as_unused_and_does_not_block(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_interface_type="1000base-t")])
+        info = next(i for i in plan.verdict.infos if i.code is Code.INTERFACE_TYPE_IGNORED)
+        assert "100gbase-x-qsfp28" in info.message
+        assert "never changes the type" in info.message
+        assert plan.verdict.is_applyable() is True
+
+    def test_a_matching_value_says_nothing_at_all(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_interface_type="100gbase-x-qsfp28")])
+        assert not [i for i in plan.verdict.infos if i.code is Code.INTERFACE_TYPE_IGNORED]
+
+    def test_applying_leaves_the_existing_interface_exactly_as_it_was(
+        self, importer, netbox, typed
+    ):
+        before = dict(topology_interface(netbox, "swp1"))
+        plan = validate(importer, netbox, [device_row(a_interface_type="1000base-t")])
+        consenting_apply(importer, netbox, plan)
+        after = topology_interface(netbox, "swp1")
+        assert after["type"] == before["type"]
+        assert netbox.posted(INTERFACES) == []
+
+
+def topology_interface(netbox: FakeNetBox, name: str) -> dict[str, Any]:
+    return next(
+        record
+        for record in netbox.stored(INTERFACES)
+        if record.get("name") == name and record.get("device", {}).get("name") == LEAF
+    )
+
+
+class TestOneInterfaceHoweverManyRowsNameIt:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    """Requirements 9.30 and 9.31."""
+
+    def test_four_group_rows_naming_one_missing_port_plan_it_once(self, importer, netbox, typed):
+        rows = [dict(r, a_port=NEW_PORT) for r in breakout_rows()]
+        plan = validate(importer, netbox, rows)
+        assert plan.verdict.errors == []
+
+        interface_actions = [
+            action
+            for planned in plan.rows
+            for action in planned.actions
+            if action.endpoint == INTERFACES
+        ]
+        assert len(interface_actions) == 1
+
+    def test_it_is_warned_about_once_not_four_times(self, importer, netbox, typed):
+        rows = [dict(r, a_port=NEW_PORT) for r in breakout_rows()]
+        plan = validate(importer, netbox, rows)
+        warnings = [i for i in plan.verdict.warnings if i.code is Code.INTERFACE_WILL_BE_CREATED]
+        assert len(warnings) == 1
+
+    def test_two_rows_disagreeing_about_its_type_block_naming_both_lines(
+        self, importer, netbox, typed
+    ):
+        """Requirement 9.31: one interface has one type, and the tool must not choose."""
+        plan = validate(
+            importer,
+            netbox,
+            [
+                device_row(a_port="swp50", a_interface_type="400gbase-x-qsfpdd", cable_group="g"),
+                device_row(
+                    a_port="swp50",
+                    b_port="swp1",
+                    a_interface_type="1000base-t",
+                    cable_group="g",
+                ),
+            ],
+        )
+        error = next(i for i in plan.verdict.errors if i.code is Code.INTERFACE_TYPE_CONFLICT)
+        assert error.line == 3
+        assert error.related_line == 2
+        assert "400gbase-x-qsfpdd" in error.expected
+
+    def test_two_rows_agreeing_about_its_type_are_fine(self, importer, netbox, typed):
+        rows = [
+            dict(r, a_port="swp50", a_interface_type="400gbase-x-qsfpdd") for r in breakout_rows()
+        ]
+        plan = validate(importer, netbox, rows)
+        assert not [i for i in plan.verdict.errors if i.code is Code.INTERFACE_TYPE_CONFLICT]
+
+
+class TestTheWarningMustBeAcknowledged:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    """Requirement 9.28 — the only thing standing between a typo and an object in NetBox."""
+
+    def test_a_plan_that_creates_an_interface_warns(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        warning = next(i for i in plan.verdict.warnings if i.code is Code.INTERFACE_WILL_BE_CREATED)
+        assert NEW_PORT in warning.message
+        assert "100gbase-x-qsfp28" in warning.message
+        assert "the device type" in warning.message
+
+    def test_it_is_not_applyable_until_acknowledged(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        assert plan.verdict.errors == []
+        assert plan.verdict.is_applyable() is False
+        with pytest.raises(ApplyRefused):
+            apply_plan(importer, netbox, plan)
+        assert netbox.posts == []
+
+    def test_acknowledging_makes_it_applyable(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        plan.verdict.acknowledge()
+        assert plan.verdict.is_applyable() is True
+
+
+class TestTwoBatchApply:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    """Requirement 9.32 — the ordering, and the window it opens."""
+
+    def test_interfaces_are_posted_before_cables(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        report = consenting_apply(importer, netbox, plan)
+        assert report.aborted is False
+        assert [post.endpoint for post in netbox.posts] == [INTERFACES, CABLES]
+
+    def test_the_cable_carries_the_id_netbox_returned(self, importer, netbox, typed):
+        """Not a Ref, and not a placeholder: the real id, from the batch that just ran."""
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        consenting_apply(importer, netbox, plan)
+
+        created = next(i for i in netbox.stored(INTERFACES) if i.get("name") == NEW_PORT)
+        posted = netbox.posted(CABLES)[0].payloads[0]
+        assert posted["a_terminations"] == [
+            {"object_type": "dcim.interface", "object_id": created["id"]}
+        ]
+
+    def test_the_created_interface_belongs_to_the_right_device(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        consenting_apply(importer, netbox, plan)
+        created = next(i for i in netbox.stored(INTERFACES) if i.get("name") == NEW_PORT)
+        assert created["device"]["name"] == LEAF
+
+    def test_the_report_counts_the_interface_and_the_cable_separately(
+        self, importer, netbox, typed
+    ):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        report = consenting_apply(importer, netbox, plan)
+        assert report.created_count == 2
+        kinds = {result.object_kind for result in report.created}
+        assert kinds == {"interface", "cable"}
+
+    def test_the_plan_quotes_two_objects_for_one_row(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        assert plan.verdict.object_count == 2
+
+    def test_re_uploading_creates_nothing(self, importer, netbox, typed):
+        """Requirement 11.7: the interface is found the second time, and the cable is skipped."""
+        first = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        consenting_apply(importer, netbox, first)
+
+        second = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        assert second.verdict.errors == []
+        assert not [i for i in second.verdict.warnings if i.code is Code.INTERFACE_WILL_BE_CREATED]
+        assert second.rows[0].outcome == RowOutcome.SKIP_EXISTS
+
+        report = apply_plan(importer, netbox, second)
+        assert report.created_count == 0
+        assert len(netbox.stored(CABLES)) == 1
+
+    def test_a_rejected_cable_batch_leaves_the_interface_behind(self, importer, netbox, typed):
+        """The window D12 opens, asserted as deliberate rather than discovered later.
+
+        The residue is benign — a spare interface the device type would have given the device
+        anyway — but it is not nothing, and the report has to say which endpoint completed.
+        """
+        netbox.reject(CABLES, lambda payloads: (400, {"type": ["unsupported"]}))
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        report = consenting_apply(importer, netbox, plan)
+
+        assert report.aborted is True
+        assert report.endpoints_completed == [INTERFACES]
+        assert len(netbox.stored(INTERFACES)) == 6
+        assert netbox.stored(CABLES) == []
+
+    def test_re_uploading_after_that_creates_only_the_cable(self, importer, netbox, typed):
+        """What makes the window survivable: the second run finds the interface (Req 9.32)."""
+        netbox.reject(CABLES, lambda payloads: (400, {"type": ["unsupported"]}))
+        first = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        consenting_apply(importer, netbox, first)
+
+        netbox.rejections.clear()
+        second = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        assert not [i for i in second.verdict.warnings if i.code is Code.INTERFACE_WILL_BE_CREATED]
+        report = apply_plan(importer, netbox, second)
+        assert report.created_count == 1
+        assert [post.endpoint for post in netbox.posted(CABLES)][-1] == CABLES
+        assert len(netbox.stored(CABLES)) == 1
+
+    def test_the_cabling_importer_still_issues_no_patch_or_delete(self, importer, netbox, typed):
+        """Requirement 11.3: creating a child object is a create, and the grep still finds one."""
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        consenting_apply(importer, netbox, plan)
+        assert netbox.patches == []
+
+
+class TestDriftOverPlannedInterfaces:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    """Requirement 9.32: abort rather than post a duplicate name."""
+
+    def test_an_interface_that_appears_between_validate_and_apply_aborts(
+        self, importer, netbox, typed
+    ):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        plan.verdict.acknowledge()
+
+        add_new_port(netbox)
+
+        report = importer.apply(plan, Lookups(client=netbox))
+        assert report.aborted is True
+        assert NEW_PORT in report.abort_reason
+        assert netbox.posts == []
+
+    def test_the_abort_reason_reads_as_a_change_rather_than_a_riddle(self, importer, netbox, typed):
+        plan = validate(importer, netbox, [device_row(a_port=NEW_PORT)])
+        plan.verdict.acknowledge()
+        add_new_port(netbox)
+
+        report = importer.apply(plan, Lookups(client=netbox))
+        assert "absent" in report.abort_reason
+        assert "Validate the file again." in report.abort_reason
+
+
+def topology_leaf(netbox: FakeNetBox) -> dict[str, Any]:
+    return next(record for record in netbox.stored(DEVICES) if record.get("name") == LEAF)
+
+
+def add_new_port(netbox: FakeNetBox) -> dict[str, Any]:
+    """Somebody else adds the port in the UI while the operator is reading the preview."""
+    return add_port(
+        netbox,
+        INTERFACES,
+        topology_leaf(netbox),
+        NEW_PORT,
+        type={"value": "100gbase-x-qsfp28"},
+    )
+
+
+class TestAPlannedInterfaceIsFree:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    """Requirement 9.22's tri-state, with lanes that are part existing and part new."""
+
+    def test_a_breakout_mixing_new_and_existing_ports_creates(self, importer, netbox, typed):
+        rows = [
+            device_row(a_port="swp1", b_port="swp1", cable_group="g", cable_profile=BREAKOUT),
+            device_row(
+                a_port="swp1",
+                b_end=SPINE,
+                b_port="swp99",
+                b_interface_type="400gbase-x-qsfpdd",
+                cable_group="g",
+            ),
+        ]
+        plan = validate(importer, netbox, rows)
+        assert plan.verdict.errors == []
+        assert all(planned.outcome == RowOutcome.CREATE for planned in plan.rows)
+
+    def test_an_occupied_existing_lane_still_blocks_the_group(self, importer, netbox, typed):
+        """A new interface is free; it does not make a half-cabled group look whole."""
+        topology_interface(netbox, "swp1")["cable"] = {"id": 9401, "label": "LNK-0009"}
+        rows = [
+            device_row(a_port="swp1", b_port="swp1", cable_group="g", cable_profile=BREAKOUT),
+            device_row(
+                a_port="swp1",
+                b_end=SPINE,
+                b_port="swp99",
+                b_interface_type="400gbase-x-qsfpdd",
+                cable_group="g",
+            ),
+        ]
+        plan = validate(importer, netbox, rows)
+        assert any(i.code is Code.CABLE_GROUP_PARTLY_CABLED for i in plan.verdict.errors)

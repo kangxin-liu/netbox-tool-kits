@@ -4,8 +4,7 @@
 
 A cable is created by POSTing `a_terminations` and `b_terminations` to `dcim.cables` as arrays of
 `{object_type, object_id}` (Requirement 9.6). NetBox's cable-terminations endpoint is read-only, so
-nothing here writes to it. There is one endpoint in `endpoint_order`, which makes the whole sheet a
-single transactional batch and leaves no half-applied window at all (decision D7).
+nothing here writes to it.
 
 Which port model an end resolves against is decided by `*_end_kind`, and for a panel by
 `*_port_side`: a device end is an interface, a panel end is a front port unless the side says rear
@@ -13,9 +12,9 @@ Which port model an end resolves against is decided by `*_end_kind`, and for a p
 and only the port model differs.
 
 Transceivers are deferred to iteration 2 (decision D3). No column here reads or writes optic
-information, and no interface's `type` is ever touched (Requirement 9.8) — the only object this
-importer creates is a cable. A `transceiver` column left in an uploaded file is simply an
-unrecognised column, which the parser reports as informational and drops (Requirement 5.6).
+information, and the `type` of an interface this importer did not create is never touched
+(Requirement 9.8). A `transceiver` column left in an uploaded file is simply an unrecognised column,
+which the parser reports as informational and drops (Requirement 5.6).
 
 A cable's identity is its set of terminations, which is why an occupied port is a skip rather than
 a create (Requirements 9.9, 11.1): the port already carries a cable, and iteration 1 never modifies
@@ -39,17 +38,35 @@ Grouping changes three rules and it is worth naming which:
   cable skips, which is what makes re-uploading a sheet safe; a group that is *partly* cabled
   blocks, because completing it would mean adding a termination to an existing cable and this
   iteration modifies nothing it did not create.
+
+**Creating a missing interface (D12).** A device-end port name that resolves to nothing used to be
+the end of the row. Behind `NETBOX_AUTOCREATE_INTERFACES` it is now something the sheet can fix,
+from the device type's interface template where one of that name exists and from `*_interface_type`
+otherwise (Requirements 9.25, 9.26). The template is tried first and that order is the safety
+property, not a preference: it invents nothing, and a mistyped `swp1o` matches no template either,
+so it falls through to a branch that demands an explicit type rather than becoming a port quietly.
+
+That costs this sheet the property it used to have. `endpoint_order` was one entry, so the whole
+file was a single transactional batch with no half-applied window at all; it is now interfaces then
+cables, and a cable batch that fails leaves the interfaces behind. The residue is benign — spare
+interfaces the device type would have given the device anyway — and re-uploading clears it, because
+they are then found rather than planned (Requirement 9.32). Panel ports are never created: a front
+port is defined by the rear port and position it maps to, and no column here says either (9.29).
 """
 
 import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+from django.conf import settings
+
 from importer.cable_profiles import structure as profile_structure
+from importer.device_addresses import choice_value, related_id
 from importer.importers.base import (
     BaseImporter,
     CreateAction,
     PlannedRow,
+    Ref,
     Registry,
     RowOutcome,
 )
@@ -64,6 +81,8 @@ from importer.validation import (
 
 DEVICES = "dcim.devices"
 CABLES = "dcim.cables"
+INTERFACES = "dcim.interfaces"
+INTERFACE_TEMPLATES = "dcim.interface-templates"
 
 DEVICE = "device"
 PANEL = "panel"
@@ -106,6 +125,37 @@ CABLE_COLUMNS = (
     "color",
 )
 
+# Template fields copied onto an interface created from one (Requirement 9.25). Choice fields come
+# back from NetBox as `{value, label}` dicts and go out as the bare value; the rest are copied as
+# they are. Task 31a is what pins this list down against a live 4.6.8 — until it runs, a field
+# NetBox names differently is copied as nothing rather than wrongly, because only keys the template
+# actually carries are read.
+TEMPLATE_CHOICE_FIELDS = ("type", "duplex", "poe_mode", "poe_type", "rf_role")
+TEMPLATE_PLAIN_FIELDS = ("label", "description", "speed", "mgmt_only")
+
+FROM_TEMPLATE = "the device type"
+FROM_SHEET = "the sheet"
+
+
+@dataclass(frozen=True)
+class PlannedInterface:
+    """An interface this run will create, and where its type came from (Requirements 9.25, 9.26)."""
+
+    device_id: int
+    device_name: str
+    name: str
+    type_value: str
+    source: str
+    payload: dict[str, Any]
+
+    @property
+    def key(self) -> tuple[Any, ...]:
+        return Registry.key(self.device_name, self.name)
+
+    @property
+    def label(self) -> str:
+        return f"{self.device_name} {self.name}"
+
 
 @dataclass
 class End:
@@ -127,6 +177,8 @@ class End:
 
     device: dict[str, Any] | None = None
     termination: dict[str, Any] | None = None
+    planned: PlannedInterface | None = None
+    """Set instead of `termination` when this port does not exist yet and D12 will create it."""
 
     @property
     def label(self) -> str:
@@ -139,6 +191,10 @@ class End:
     @property
     def port_column(self) -> str:
         return f"{self.side}_port"
+
+    @property
+    def type_column(self) -> str:
+        return f"{self.side}_interface_type"
 
     @property
     def port_label(self) -> str:
@@ -160,7 +216,19 @@ class End:
 
     @property
     def object_id(self) -> int | None:
+        """The id of an existing termination. `None` while it is only planned."""
         return int(self.termination["id"]) if self.termination else None
+
+    @property
+    def termination_value(self) -> Any:
+        """What goes in the cable payload: an id, or a `Ref` to the interface being created.
+
+        `resolved_payload` swaps the `Ref` for the real id once the interface batch has returned,
+        which is why the interface endpoint has to come first in `endpoint_order` (Req 9.32).
+        """
+        if self.planned is not None:
+            return Ref(INTERFACES, self.planned.key)
+        return self.object_id
 
 
 def read_end(row: Row, side: str) -> End:
@@ -218,12 +286,20 @@ class Occupancy:
         return bool(self.taken) and self.multi and not self.fully_held
 
 
-def _termination_key(end: End) -> tuple[str, int]:
-    return (end.object_type, int(end.object_id or 0))
+def _termination_key(end: End) -> tuple[str, Any]:
+    """What makes two resolved ends the same termination.
+
+    A planned interface has no id yet, so it is keyed on device and port name instead. The `new:`
+    prefix keeps it from ever colliding with an id, and makes a cable's registry key readable when
+    one of its terminations is being created in the same run.
+    """
+    if end.termination is not None:
+        return (end.object_type, int(end.termination["id"]))
+    return (end.object_type, f"new:{fold(end.name)}/{fold(end.port)}")
 
 
 def _termination(end: End) -> dict[str, Any]:
-    return {"object_type": end.object_type, "object_id": end.object_id}
+    return {"object_type": end.object_type, "object_id": end.termination_value}
 
 
 def _distinct(ends: Any) -> list[End]:
@@ -249,17 +325,31 @@ def _join(lines: tuple[int, ...]) -> str:
 
 class CablingImporter(BaseImporter):
     name = "cabling"
-    endpoint_order = (CABLES,)
+    # Interfaces before cables, because a cable may terminate on one this run is creating
+    # (Requirement 9.32). With the flag off nothing is ever planned for the first endpoint and the
+    # apply is the single batch it always was.
+    endpoint_order = (INTERFACES, CABLES)
 
     choice_sources: ClassVar[dict[str, tuple[str, str]]] = {
         "cable_type": (CABLES, "type"),
         "cable_status": (CABLES, "status"),
         "length_unit": (CABLES, "length_unit"),
         "cable_profile": (CABLES, "profile"),
+        # Validated in either flag state, so a bad value is caught on the sheet that will one day be
+        # applied with autocreate on rather than on the run that needs it (Requirement 9.27).
+        "a_interface_type": (INTERFACES, "type"),
+        "b_interface_type": (INTERFACES, "type"),
     }
     """`*_end_kind`, `*_port_side`, and `cable_group` are absent on purpose: they are this tool's
     own vocabulary for reading the sheet, not NetBox fields, so they validate against `columns.py`
     (Requirements 9.1, 9.15)."""
+
+    def __init__(self) -> None:
+        self._templates: dict[tuple[int, str], dict[str, Any]] = {}
+        self._planned: dict[tuple[int, str], PlannedInterface] = {}
+        """One entry per interface this run will create, so four rows naming the same missing port
+        create it once and warn about it once (Requirement 9.30). Reset by `prefetch`, which runs
+        once per validation — including the pre-apply re-validation of Requirement 10.14."""
 
     # --- S2 ---------------------------------------------------------------------------------
 
@@ -426,6 +516,47 @@ class CablingImporter(BaseImporter):
         for group in self._grouped(rows):
             self._check_group(group, collector)
 
+        if settings.NETBOX_AUTOCREATE_INTERFACES:
+            self._check_interface_types(rows, collector)
+
+    def _check_interface_types(self, rows: list[Row], collector: IssueCollector) -> None:
+        """Requirement 9.31: one interface has one type, whoever names it.
+
+        Judged here rather than at S4 because it is a contradiction in the file itself — the sheet
+        says one port is two different things — and that is true whether or not the port turns out
+        to exist. Only meaningful while autocreate is on, since the cell is otherwise never read.
+        """
+        seen: dict[tuple[str, str], tuple[int, str]] = {}
+        for row in rows:
+            for end in self._ends(row):
+                if end.kind == PANEL:
+                    continue
+                value = row.get(end.type_column).strip()
+                if not value:
+                    continue
+                key = (fold(end.name), fold(end.port))
+                earlier = seen.get(key)
+                if earlier is None:
+                    seen[key] = (row.line, value)
+                    continue
+                first_line, first_value = earlier
+                if fold(first_value) == fold(value) or first_line == row.line:
+                    continue
+                collector.add(
+                    Severity.ERROR,
+                    Code.INTERFACE_TYPE_CONFLICT,
+                    line=row.line,
+                    column=end.type_column,
+                    value=value,
+                    expected=f"{first_value!r}, or a blank cell",
+                    message=(
+                        f"Line {row.line} says {end.description} is a {value!r} interface while "
+                        f"line {first_line} says {first_value!r}. One interface has one type: "
+                        f"correct one of them, or leave this cell blank."
+                    ),
+                    related_line=first_line,
+                )
+
     def _check_group(self, rows: list[Row], collector: IssueCollector) -> None:
         """The rules that only mean anything once several rows describe one cable."""
         self._check_group_agrees(rows, collector)
@@ -544,6 +675,29 @@ class CablingImporter(BaseImporter):
         if device_ids and kinds:
             lookups.prefetch_terminations(device_ids, tuple(sorted(kinds)))
 
+        self._templates = {}
+        self._planned = {}
+        if not settings.NETBOX_AUTOCREATE_INTERFACES:
+            # Not merely a short circuit: with the flag off this importer issues exactly the
+            # requests it always did, so the request budget of Requirement 15.2 is unchanged for
+            # every sheet in use today.
+            return
+
+        type_ids = sorted(
+            {
+                type_id
+                for record in lookups.all_records(DEVICES)
+                if (type_id := related_id(record.get("device_type"))) is not None
+            }
+        )
+        if type_ids:
+            lookups.prefetch(INTERFACE_TEMPLATES, device_type_id=type_ids)
+        for template in lookups.all_records(INTERFACE_TEMPLATES):
+            type_id = related_id(template.get("device_type"))
+            if type_id is None:
+                continue
+            self._templates.setdefault((type_id, fold(template.get("name"))), template)
+
     def plan_row(
         self,
         row: Row,
@@ -594,10 +748,35 @@ class CablingImporter(BaseImporter):
             self._report_already_cabled(planned, occupancy, lookups, collector)
             return planned
 
+        planned[0].actions.extend(self._interface_actions(sides))
         planned[0].actions.append(self._cable(rows, sides))
         for row_plan in planned:
             row_plan.outcome = RowOutcome.CREATE
         return planned
+
+    @staticmethod
+    def _interface_actions(sides: dict[str, list[End]]) -> list[CreateAction]:
+        """The interfaces this cable needs that do not exist yet (Requirement 9.25).
+
+        Two groups naming one missing interface each carry an action for it and apply writes it
+        once, the same way twenty hierarchy rows in one new datahall create that datahall once:
+        `_dedupe` keys on the registry key, and `object_count` counts distinct keys.
+        """
+        actions: list[CreateAction] = []
+        for end in sides["a"] + sides["b"]:
+            if end.planned is None:
+                continue
+            actions.append(
+                CreateAction(
+                    endpoint=INTERFACES,
+                    payload=dict(end.planned.payload),
+                    key=end.planned.key,
+                    label=end.planned.label,
+                    line=end.line,
+                    object_kind="interface",
+                )
+            )
+        return actions
 
     @staticmethod
     def _describe_connectors(
@@ -681,38 +860,210 @@ class CablingImporter(BaseImporter):
 
         ports = lookups.terminations_for(int(device["id"]), end.termination_kind)
         termination = ports.get(fold(end.port))
-        if termination is None:
-            # Requirement 9.5: say which side and which port name, because a panel row has four
-            # port columns and "not found" alone does not point at one of them.
-            hint = (
-                f" If you meant the other face, set {end.side}_port_side."
-                if end.kind == PANEL
-                else ""
-            )
-            collector.add(
-                Severity.ERROR,
-                Code.PORT_NOT_FOUND,
-                line=row.line,
-                column=end.port_column,
-                value=end.port,
-                expected=f"the name of an existing {end.port_label} on {device_name!r}",
-                message=(
-                    f"The {end.label} port {end.port!r} is not a {end.port_label} on "
-                    f"{device_name!r}.{hint}"
-                ),
-                related_object=f"Device {device_name}",
-                related_url=self._url(lookups, DEVICES, device),
-            )
+        if termination is not None:
+            end.termination = termination
+            self._note_type_ignored(end, row, device_name, collector)
+        elif not self._plan_interface(end, row, device, device_name, lookups, collector):
             planned.outcome = RowOutcome.BLOCKED
             return end
 
-        end.termination = termination
         planned.resolved[end.end_column] = f"{device_name} (existing)"
-        planned.resolved[end.port_column] = (
-            f"{termination.get('name')} ({end.port_label}, existing)"
-        )
+        planned.resolved[end.port_column] = self._describe_port(end)
         self._register(state, registry, end, lookups)
         return end
+
+    def _describe_port(self, end: End) -> str:
+        """Requirement 9.33: a port that was found reads differently from one about to be made."""
+        if end.planned is not None:
+            return (
+                f"{end.port} ({end.port_label}, will be created — "
+                f"type {end.planned.type_value} from {end.planned.source})"
+            )
+        return f"{end.termination.get('name')} ({end.port_label}, existing)"
+
+    def _note_type_ignored(
+        self,
+        end: End,
+        row: Row,
+        device_name: str,
+        collector: IssueCollector,
+    ) -> None:
+        """Requirement 9.27: the port exists, so its type is NetBox's business, not the sheet's.
+
+        Reported rather than silently dropped, because a sheet that states a type is making a claim
+        and the operator should see that the claim was not acted on. Never an error: 9.8 forbids
+        re-typing an interface this importer did not create, so there is nothing to reconcile.
+        """
+        if end.kind == PANEL:
+            return
+        stated = row.get(end.type_column).strip()
+        if not stated:
+            return
+        held = choice_value(end.termination.get("type"))
+        if not held or fold(held) == fold(stated):
+            return
+        collector.add(
+            Severity.INFO,
+            Code.INTERFACE_TYPE_IGNORED,
+            line=row.line,
+            column=end.type_column,
+            value=stated,
+            expected=f"{held!r}, or a blank cell",
+            message=(
+                f"{end.description} already exists in NetBox as a {held!r} interface, so "
+                f"{end.type_column} was not used. This importer never changes the type of an "
+                f"interface it did not create; NetBox's value stands."
+            ),
+        )
+
+    # --- creating a missing interface (D12) -------------------------------------------------
+
+    def _plan_interface(
+        self,
+        end: End,
+        row: Row,
+        device: dict[str, Any],
+        device_name: str,
+        lookups: Lookups,
+        collector: IssueCollector,
+    ) -> bool:
+        """Resolve a port that does not exist into one this run will create, or refuse the row.
+
+        Returns True when the end now has a planned interface on it. The order of the two sources
+        is the safety property of D12 and not a preference — see the module docstring.
+        """
+        if not settings.NETBOX_AUTOCREATE_INTERFACES or end.kind == PANEL:
+            self._report_port_not_found(end, row, device, device_name, lookups, collector)
+            return False
+
+        device_id = int(device["id"])
+        already = self._planned.get((device_id, fold(end.port)))
+        if already is not None:
+            # Requirement 9.30: however many rows or groups name it, it is one interface, created
+            # once and warned about once.
+            end.planned = already
+            return True
+
+        template = self._templates.get((related_id(device.get("device_type")) or 0, fold(end.port)))
+        if template is not None:
+            payload = self._payload_from_template(template)
+            source, type_value = FROM_TEMPLATE, choice_value(template.get("type"))
+            name = str(template.get("name") or end.port)
+        else:
+            stated = row.get(end.type_column).strip()
+            if not stated:
+                self._report_type_required(end, row, device_name, collector)
+                return False
+            payload = {"name": end.port, "type": fold(stated)}
+            source, type_value = FROM_SHEET, fold(stated)
+            name = end.port
+
+        interface = PlannedInterface(
+            device_id=device_id,
+            device_name=device_name,
+            name=name,
+            type_value=type_value,
+            source=source,
+            payload={**payload, "device": device_id, "name": name},
+        )
+        self._planned[(device_id, fold(end.port))] = interface
+        end.planned = interface
+
+        # Requirement 9.28: a mistyped port name and a genuinely new one are identical from here,
+        # so the operator is the only thing standing between a typo and an object in NetBox.
+        collector.add(
+            Severity.WARNING,
+            Code.INTERFACE_WILL_BE_CREATED,
+            line=row.line,
+            column=end.port_column,
+            value=end.port,
+            expected="an interface that already exists, or consent to creating this one",
+            message=(
+                f"{end.description} does not exist and will be created as a {type_value!r} "
+                f"interface, with the type taken from {source}. Check the spelling before "
+                f"applying: a mistyped port name looks exactly like a new one from here."
+            ),
+            related_object=f"Device {device_name}",
+        )
+        return True
+
+    @staticmethod
+    def _payload_from_template(template: dict[str, Any]) -> dict[str, Any]:
+        """The interface the device type would have produced (Requirement 9.25).
+
+        Only keys the template actually carries are copied, so a NetBox that names one of them
+        differently contributes nothing rather than something wrong.
+        """
+        payload: dict[str, Any] = {}
+        for name in TEMPLATE_CHOICE_FIELDS:
+            value = choice_value(template.get(name))
+            if value:
+                payload[name] = value
+        for name in TEMPLATE_PLAIN_FIELDS:
+            value = template.get(name)
+            if value not in (None, ""):
+                payload[name] = value
+        return payload
+
+    def _report_type_required(
+        self,
+        end: End,
+        row: Row,
+        device_name: str,
+        collector: IssueCollector,
+    ) -> None:
+        """Requirement 9.26: both remedies, because either one is a reasonable thing to do."""
+        collector.add(
+            Severity.ERROR,
+            Code.INTERFACE_TYPE_REQUIRED,
+            line=row.line,
+            column=end.type_column,
+            value="(blank)",
+            expected=f"an interface type for {end.port!r}",
+            message=(
+                f"The {end.label} port {end.port!r} is not an interface on {device_name!r}, and "
+                f"that device's type does not define one by that name either — so there is "
+                f"nothing to copy a type from. Either add {end.port!r} to the device type as an "
+                f"interface template, which fixes every device of that type at once, or fill in "
+                f"{end.type_column} on this row. The type is never defaulted."
+            ),
+            related_object=f"Device {device_name}",
+        )
+
+    def _report_port_not_found(
+        self,
+        end: End,
+        row: Row,
+        device: dict[str, Any],
+        device_name: str,
+        lookups: Lookups,
+        collector: IssueCollector,
+    ) -> None:
+        # Requirement 9.5: say which side and which port name, because a panel row has four
+        # port columns and "not found" alone does not point at one of them.
+        if end.kind == PANEL:
+            hint = f" If you meant the other face, set {end.side}_port_side."
+        elif not settings.NETBOX_AUTOCREATE_INTERFACES:
+            hint = (
+                " Add it in NetBox first, or set NETBOX_AUTOCREATE_INTERFACES to let a sheet "
+                "create an interface its device type defines."
+            )
+        else:
+            hint = ""
+        collector.add(
+            Severity.ERROR,
+            Code.PORT_NOT_FOUND,
+            line=row.line,
+            column=end.port_column,
+            value=end.port,
+            expected=f"the name of an existing {end.port_label} on {device_name!r}",
+            message=(
+                f"The {end.label} port {end.port!r} is not a {end.port_label} on "
+                f"{device_name!r}.{hint}"
+            ),
+            related_object=f"Device {device_name}",
+            related_url=self._url(lookups, DEVICES, device),
+        )
 
     def _register(
         self,
@@ -731,6 +1082,18 @@ class CablingImporter(BaseImporter):
         registry.remember(DEVICES, Registry.key(end.name), device_id)
         state[f"{DEVICES}:{fold(end.name)}"] = f"id={device_id}"
 
+        if settings.NETBOX_AUTOCREATE_INTERFACES and end.kind != PANEL:
+            # Requirement 9.32: an interface that appears between validation and apply must abort
+            # the run rather than be posted as a duplicate name. One key per port either way, so
+            # the two validations compare like with like and the difference reads as a change of
+            # value — `absent → id=...` — rather than as a key nobody can interpret.
+            state[f"{INTERFACES}:{fold(end.name)}/{fold(end.port)}"] = (
+                "absent" if end.planned is not None else f"id={end.object_id}"
+            )
+
+        if end.planned is not None:
+            return
+
         endpoint = TERMINATION_ENDPOINTS[end.termination_kind]
         cable = lookups.occupied(end.object_type, end.object_id)
         state[f"{endpoint}:{end.object_id}"] = (
@@ -744,6 +1107,12 @@ class CablingImporter(BaseImporter):
         found = Occupancy(multi=any(len(ends) > 1 for ends in sides.values()))
         for ends in sides.values():
             for end in ends:
+                if end.planned is not None:
+                    # An interface that does not exist yet cannot be carrying a cable. Saying so
+                    # here rather than asking the cache keeps the tri-state of 9.22 honest for a
+                    # breakout whose lanes are part existing and part new.
+                    found.free.append(end)
+                    continue
                 cable = lookups.occupied(end.object_type, end.object_id)
                 if cable is None:
                     found.free.append(end)
@@ -850,12 +1219,10 @@ class CablingImporter(BaseImporter):
         return CreateAction(
             endpoint=CABLES,
             payload=payload,
+            # Keyed on the termination key rather than on the id, because a planned interface has
+            # no id yet and two of them would otherwise both key as None and be deduped into one.
             key=Registry.key(
-                *(
-                    part
-                    for end in sides["a"] + sides["b"]
-                    for part in (end.object_type, end.object_id)
-                )
+                *(part for end in sides["a"] + sides["b"] for part in _termination_key(end))
             ),
             label=_cable_label(sides),
             line=lines[0],

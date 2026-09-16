@@ -86,6 +86,16 @@ SWITCH_INTERFACES: dict[str, tuple[tuple[int, str], ...]] = {
 # Fibre connector types, validated against this instance's choices: only bare "mpo" exists (there
 # is no mpo-16 value), and LC has lc / lc-pc / lc-upc / lc-apc. Bare "lc" is the least-wrong
 # default for "LC-LC-SM"; change to lc-upc or lc-apc if your panels are specified that way.
+# Templates added deliberately *late*, i.e. after the devices have been built from the type. NetBox
+# copies a type's interface templates onto a device at create time and never again, so these produce
+# the exact state D12 exists for: the type defines the port, the switch does not have it, and the
+# cabling sheet can create it from the template. Seeded only by `--late-templates`, on its own run
+# after sheet 2 has been applied — seeding them with everything else would just make them ordinary
+# inherited ports and demonstrate nothing.
+LATE_TEMPLATES: dict[str, tuple[tuple[str, str], ...]] = {
+    "Spectrum-SN4700": (("swp33", "400gbase-x-qsfpdd"), ("swp34", "400gbase-x-qsfpdd")),
+}
+
 TYPE_MPO = "mpo"
 TYPE_LC = "lc"
 
@@ -278,6 +288,28 @@ def seed_switches(nb: NetBox, naming: str, verbose: bool) -> None:
             print(f"      {todo[0][0]} .. {todo[-1][0]}")
 
 
+def seed_late_templates(nb: NetBox, verbose: bool) -> None:
+    """Add the templates of `LATE_TEMPLATES`, which existing devices will NOT inherit."""
+    for model, ports in LATE_TEMPLATES.items():
+        dt_id = nb.device_type_id(model)
+        if dt_id is None:
+            print(f"  SKIP {model}: not found in NetBox (or matched more than once)")
+            continue
+        existing = nb.existing_names("interface-templates", dt_id)
+        todo = [(name, iface_type) for name, iface_type in ports if name not in existing]
+        for name, iface_type in todo:
+            nb.create(
+                "interface-templates",
+                {"device_type": dt_id, "name": name, "type": iface_type},
+                f"{model}/{name}",
+            )
+        nb.skipped += len(ports) - len(todo)
+        names = ", ".join(name for name, _ in ports)
+        print(f"  {model:<34} {len(todo):>3} to create  [{names}]")
+        if verbose:
+            print("      devices already built from this type will not gain these ports")
+
+
 def seed_panels(nb: NetBox, verbose: bool) -> None:
     for panel in build_panels():
         dt_id = nb.device_type_id(panel.model)
@@ -380,6 +412,14 @@ def main() -> int:
     )
     parser.add_argument("--naming", choices=sorted(NAMING_SCHEMES), default="cumulus")
     parser.add_argument("--allow-remote", action="store_true", help="permit a non-loopback target")
+    parser.add_argument(
+        "--late-templates",
+        action="store_true",
+        help=(
+            "add LATE_TEMPLATES only, and nothing else. Run this AFTER sheet 2 has been applied, "
+            "so the devices predate the templates — the state the 3_cabling_newports sample needs."
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -396,15 +436,24 @@ def main() -> int:
     mode = "APPLY" if args.apply else "DRY RUN"
     print(f"{mode} against {host} (NetBox {version}), interface naming: {args.naming}\n")
 
-    print("Switch interface templates:")
-    seed_switches(nb, args.naming, args.verbose)
-    print("\nPatch panel front/rear port templates:")
-    seed_panels(nb, args.verbose)
+    if args.late_templates:
+        print("Late interface templates (existing devices will NOT inherit these):")
+        seed_late_templates(nb, args.verbose)
+    else:
+        print("Switch interface templates:")
+        seed_switches(nb, args.naming, args.verbose)
+        print("\nPatch panel front/rear port templates:")
+        seed_panels(nb, args.verbose)
 
     verb = "created" if args.apply else "would create"
     print(f"\n{verb}: {nb.created}   already present: {nb.skipped}")
     if not args.apply:
         print("\nDry run only — nothing was written. Re-run with --apply to commit.")
+    elif args.late_templates:
+        print(
+            "\nDone. The types now define ports their existing devices do not have — which is "
+            "what 3_cabling_newports demonstrates, and what NETBOX_AUTOCREATE_INTERFACES repairs."
+        )
     else:
         print("\nDone. Devices created from these types will now inherit their ports.")
         print("Reminder: devices that already existed were NOT retro-fitted.")

@@ -24,6 +24,10 @@ SYNTHETIC_ENV = {
     "NETBOX_VERIFY_SSL": "true",
     "NETBOX_DEFAULT_DEVICE_ROLE": "unassigned",
     "NETBOX_AUTOCREATE_DEVICE_TYPES": "false",
+    # Both autocreate flags default off in the suite, so the default behaviour under test is the
+    # behaviour a deployment gets out of the box. A test that wants either opts in explicitly with
+    # `override_settings`.
+    "NETBOX_AUTOCREATE_INTERFACES": "false",
 }
 os.environ.update(SYNTHETIC_ENV)
 

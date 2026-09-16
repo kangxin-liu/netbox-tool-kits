@@ -276,6 +276,28 @@ def _cabling_readiness(client: NetBoxClient) -> Readiness:
         )
     )
 
+    # Requirement 17.2: the flag changes what an unknown port name *does*, so an operator reading
+    # this panel before uploading should not have to guess which behaviour they are about to get.
+    autocreate = settings.NETBOX_AUTOCREATE_INTERFACES
+    facts.append(
+        Fact(
+            label="Create missing interfaces",
+            value="on" if autocreate else "off",
+            level="warn" if autocreate else "ok",
+            detail=(
+                "A device port this sheet names and NetBox does not have will be created — from "
+                "the device type's template where there is one, otherwise from a_interface_type / "
+                "b_interface_type. Each one is a warning to acknowledge before applying."
+                if autocreate
+                else (
+                    "A port name that does not resolve blocks the file. Set "
+                    "NETBOX_AUTOCREATE_INTERFACES to let a sheet create the interfaces its device "
+                    "types define."
+                )
+            ),
+        )
+    )
+
     if devices and not interfaces and not panel_ports:
         blockers.append(
             "The devices in NetBox have no ports at all, so nothing can be cabled. Check that the "

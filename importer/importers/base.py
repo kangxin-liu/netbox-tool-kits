@@ -21,7 +21,9 @@ Apply issues **one bulk POST per endpoint** because a NetBox list POST is transa
 D7, measured). Two consequences worth being explicit about:
 
 * The half-applied window is between endpoints, not between rows. For the hierarchy importer that is
-  three boundaries however long the sheet is; devices and cabling are single-endpoint.
+  three boundaries however long the sheet is, and for cabling one — interfaces before cables, where
+  the sheet creates any (D12). Cabling had none at all until then, which is worth remembering as
+  something that was given up rather than something that was never there.
 * When NetBox rejects a batch with an error that is *not* aligned to a submitted item, the offending
   row cannot be identified from the response, so the batch is replayed one row at a time
   (Requirement 12.2). The rolled-back batch means the replay starts from a clean slate, but the
@@ -132,19 +134,29 @@ class CreateAction:
         return self.lines or (self.line,)
 
     def resolved_payload(self, registry: Registry) -> dict[str, Any]:
-        resolved: dict[str, Any] = {}
-        for name, value in self.payload.items():
-            if isinstance(value, Ref):
-                object_id = registry.id_for(value.endpoint, value.key)
-                if object_id is None:
-                    raise PrerequisiteMissing(
-                        f"{self.label} needs {value.endpoint} {value.key} to exist first, "
-                        f"but it was not created."
-                    )
-                resolved[name] = object_id
-            else:
-                resolved[name] = value
-        return resolved
+        """Swap every `Ref` in the payload for the id its object was created with.
+
+        Refs are resolved at any depth, not only at the top level, because a cable's terminations
+        are a *list of dicts* and one of them may name an interface this run is about to create
+        (Requirement 9.32, D12). Resolving only top-level values would have posted the `Ref` object
+        itself and let NetBox reject something the tool could see was wrong.
+        """
+        return {name: self._resolve(value, registry) for name, value in self.payload.items()}
+
+    def _resolve(self, value: Any, registry: Registry) -> Any:
+        if isinstance(value, Ref):
+            object_id = registry.id_for(value.endpoint, value.key)
+            if object_id is None:
+                raise PrerequisiteMissing(
+                    f"{self.label} needs {value.endpoint} {value.key} to exist first, "
+                    f"but it was not created."
+                )
+            return object_id
+        if isinstance(value, dict):
+            return {name: self._resolve(item, registry) for name, item in value.items()}
+        if isinstance(value, list):
+            return [self._resolve(item, registry) for item in value]
+        return value
 
 
 class PrerequisiteMissing(Exception):

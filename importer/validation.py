@@ -131,6 +131,22 @@ class Code(StrEnum):
     because adding a termination to an existing cable is an update this iteration does not do.
     """
 
+    INTERFACE_TYPE_REQUIRED = "INTERFACE_TYPE_REQUIRED"
+    """Autocreate is on, the port is missing, and neither source can say what type it is (9.26).
+
+    Distinct from PORT_NOT_FOUND: the row could be applied, but only if somebody states the type,
+    and defaulting it would write a guess into NetBox as a fact about physical hardware.
+    """
+
+    INTERFACE_TYPE_CONFLICT = "INTERFACE_TYPE_CONFLICT"
+    """Two rows would create one interface with two different types (Requirement 9.31)."""
+
+    INTERFACE_WILL_BE_CREATED = "INTERFACE_WILL_BE_CREATED"
+    """A warning to acknowledge, because a typo and a new port look identical here (9.28)."""
+
+    INTERFACE_TYPE_IGNORED = "INTERFACE_TYPE_IGNORED"
+    """The port already exists, so its type is NetBox's and the cell was not used (9.27)."""
+
     SLUG_COLLISION = "SLUG_COLLISION"
     UNIQUE_FIELD_TAKEN = "UNIQUE_FIELD_TAKEN"
     RU_RANGE_EXCEEDS_RACK = "RU_RANGE_EXCEEDS_RACK"

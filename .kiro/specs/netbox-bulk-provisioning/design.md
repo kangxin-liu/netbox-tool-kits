@@ -30,7 +30,13 @@ probed read-only on 2026-08-20 and its behavioural ones by creating and deleting
 2026-08-24. Every assumption held, so nothing in Requirement 9 needed amending. The one thing still
 taken on trust is the internal position map of a `-shuffle` profile, which NetBox does not serve. **D11 — loopback and management
 addresses on the device sheet — is proposed and not yet built.** Its IPAM field names still need a
-read-only probe against 4.6.8 before implementation. Field names in this document were checked against the target instance's own
+read-only probe against 4.6.8 before implementation. **D12 — creating a device interface the cabling
+sheet names and NetBox does not have — is built and under test, but not probed**: it is the one
+change that costs an existing property rather than only adding surface, because the cabling sheet
+stops being a single bulk POST. The unprobed part is narrow and named — which template fields
+`dcim.Interface` accepts verbatim, the list in `cabling.py`'s `TEMPLATE_CHOICE_FIELDS` /
+`TEMPLATE_PLAIN_FIELDS` — and `scripts/probe_interface_creation.py` exists to settle it (task 31a).
+Field names in this document were checked against the target instance's own
 `OPTIONS` responses rather than from memory — see "Verified against the target instance".
 
 ## Architecture
@@ -389,6 +395,7 @@ on disk — it should be rotated if it has ever been shared, and `.gitignore` no
 | D9 | Optional `datacenter_slug` / `datahall_slug` columns, and a rack name built from those slugs rather than from the two names | Deriving the slug from the name forced the name to double as the short code, so a site had to be called `SYD1` rather than "Sydney One" just to keep rack names short. Optional with a derived fallback keeps every existing sheet valid | `columns.py`, `naming.py`, `importers/hierarchy.py`, and the rack-name pattern all three sheets join on |
 | D10 **(proposed)** | Optional `cable_profile` *and* `cable_group` columns, so several rows can describe one multi-connector cable | A breakout is one cable with one A termination and several B terminations. The profile column alone cannot express it: the rows sharing the A port are rejected as duplicate terminations before the profile is read | `columns.py`, `importers/cabling.py` (S3 + planning), one grouping hook on `importers/base.py`, per-line report attribution |
 | D11 **(proposed)** | Optional `loopback_ip4` / `loopback_ip6` / `management_ip4` / `management_ip6`; names from the device type; IPv4 preferred as primary unless the row has none, then management over loopback within the family; first PATCH, scoped to those two fields | Dual-stack cannot fit in two family-agnostic cells. Vendor names belong on the type once. NetBox cannot set `primary_ip4` at device create because the IP does not exist yet | `columns.py`, `importers/devices.py` (S2–S4 + apply), `ipam.ip-addresses` endpoint, Requirement 11.3's exception, devices readiness, empty-instance prep |
+| D12 **(built, probe outstanding)** | A cabling row may create a missing *device* interface — from the device type's template first, from optional `a_interface_type` / `b_interface_type` otherwise — behind `NETBOX_AUTOCREATE_INTERFACES`, off by default | NetBox never copies a newly added template onto existing devices, so the common failure is a port the type defines and the device lacks; creating it from the template invents nothing and makes a typo fall through to a row that demands an explicit type. Off by default because the tool cannot tell a new port from a mistyped one | `columns.py`, `importers/cabling.py` (port resolution + a second `endpoint_order` entry), the pre-apply drift check, one settings flag, Requirement 8.23 |
 
 ## Component design
 
@@ -429,6 +436,7 @@ than a match. Everything else is a judgement call the author of the column has t
 | a device's `rack`, `bottom_ru`, `rack_face`, `model` | `tenant`, `serial`, `asset_tag` |
 | a device's `loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`, and primary IP | |
 | a cable's `cable_type` and `cable_profile` | a cable's `label`, `color`, `length`, `length_unit` |
+| | `a_interface_type`, `b_interface_type` — declarative only, see Sheet 3 |
 
 The two slug columns are `CONSEQUENTIAL` rather than `IDENTITY`, which is worth a sentence because
 they *are* the natural key the lookup uses. `IDENTITY` means "cannot differ" — a different value
@@ -672,6 +680,7 @@ Example row: `SYD1-DH1-R01, front, 12, 2, syd1-dh1-r01-leaf01, DCS-7050SX3-48YC8
 | `a_end_kind` / `b_end_kind` | no | device / panel, default device | selects the termination model |
 | `a_port` / `b_port` | yes | port name on that end | interface, or front/rear port for a panel |
 | `a_port_side` / `b_port_side` | no | front / rear, default front | panels only; ignored for devices |
+| `a_interface_type` / `b_interface_type` | no | from API (`400gbase-x-qsfpdd`, `100gbase-x-qsfp28`, …) | D12; read only when creating an interface the device type does not define |
 | `cable_type` | yes | from API (`cat6`, `cat6a`, `mmf-om4`, `smf-os2`, `dac-passive`, …) | |
 | `cable_profile` | no | from API — 26 values (`single-1c2p`, `trunk-2c4p`, `breakout-1c4p-4c1p`, …) | D10; blank omits `profile` from the payload |
 | `cable_group` | no | any tag, e.g. `brk-01` | D10; rows sharing it are one cable |
@@ -679,7 +688,7 @@ Example row: `SYD1-DH1-R01, front, 12, 2, syd1-dh1-r01-leaf01, DCS-7050SX3-48YC8
 | `cable_status` | no | default `connected` | |
 | `label`, `color`, `length`, `length_unit` | no | `length_unit` from API | |
 
-Example row: `syd1-dh1-r01-leaf01, device, Ethernet49/1, , syd1-dh1-pp01, panel, Port 1, front, mmf-om4, , , connected, LNK-0001, 3, m,`
+Example row, in column order: `exa1-dh1-r01-leaf01, device, swp1, , , exa1-dh1-r01-pp01, panel, MPO1, rear, , smf-os2, , , connected, LNK-0001, 3, m,` — both `*_interface_type` cells blank, so the template's example row stays the common case.
 
 Termination mapping: `device` → `dcim.interface`; `panel` + `front` → `dcim.frontport`;
 `panel` + `rear` → `dcim.rearport`.
@@ -749,7 +758,60 @@ one cage, which is the entire reason profiles were adopted.
 
 Note that neither route records the optics themselves. `400G-SR8` and `200G-SR4` have no column, per
 D3; the interface types visible on those children come from the device type, and Requirement 9.8
-forbids this importer from writing them.
+forbids this importer from writing them — a prohibition D12 leaves intact, because it creates
+interfaces rather than re-typing ones that already exist.
+
+#### Creating a missing interface (D12)
+
+A port name that resolves to nothing is `PORT_NOT_FOUND` today, and the operator's remedy is the
+NetBox UI plus a re-upload. D12 makes it something the sheet can fix, behind
+`NETBOX_AUTOCREATE_INTERFACES`, and only for a `device` end (Req 9.29).
+
+Resolution gains two steps after the existing lookup fails, tried in this order:
+
+| The device's interfaces | The device type's templates | Sheet cell | Outcome |
+| --- | --- | --- | --- |
+| has it | — | — | terminate on it; the cell, if filled, is INFO only (Req 9.27) |
+| missing | defines it | — | create from the template, then terminate (Req 9.25) |
+| missing | does not define it | filled | create with the sheet's name and type, then terminate (Req 9.26) |
+| missing | does not define it | blank | `INTERFACE_TYPE_REQUIRED`, file blocked |
+| missing | — | — | flag off, or a panel end: `PORT_NOT_FOUND`, unchanged (Req 9.24, 9.29) |
+
+**The template row is the one that matters, and the ordering is the safety property.** The case
+that arrives in practice is a device created before its type defined the port: NetBox copies
+templates at device-create time and never again, so adding `swp49` to a type leaves every existing
+switch without it. Creating from the template invents nothing — name, `type`, `mgmt_only`, and speed
+all come from it — and it is also what makes a typo fail safe, because `swp1o` matches no template
+either and falls through to a row that demands an explicit type. Reversing the two sources, or
+letting the column win where a template exists, would turn a sheet typo into a plausible-looking
+interface with a type somebody guessed.
+
+There is deliberately no default type. `1000base-t` written into NetBox as a fact about a 400G cage
+is worse than the blocked row it replaced: nothing downstream distinguishes an invented value from a
+measured one, and the next person to plan capacity reads it as inventory.
+
+The reason the flag exists at all is that the tool cannot tell a new port from a mistyped one, and a
+cabling sheet names two per row. That is D4's argument about device types, on a smaller object with
+more chances to fire. The flag keeps a shared instance safe by default; the acknowledgement of
+Requirement 9.28 is what puts the list of names in front of the person who typed them, on the run
+where the flag is on.
+
+`Ref` and `Registry` already do the work of carrying an id from an earlier batch into a later
+payload — that is how a device-sheet address references the device it was created against — so the
+cable payload names the interface by registry key and picks up the real id after the interface batch
+returns. `BaseImporter` needed one change to allow it, and it is worth naming because it was a
+latent bug rather than a new feature: `CreateAction.resolved_payload` only substituted `Ref`s at the
+*top level* of a payload. Every payload written before D12 held its refs there, so it had never
+mattered; a cable's terminations are a list of dicts, and the `Ref` sits inside one. Resolution is
+now recursive over lists and dicts. Left alone it would have posted the `Ref` object itself and let
+NetBox reject something the tool could see was wrong.
+
+One classification is declarative, in the same way `cable_profile`'s is. `a_interface_type` and
+`b_interface_type` are `DESCRIPTIVE` in the D8 table because `Conflict` is a required field and
+there is no fourth value, but no comparison path reaches them: the column is read only when the
+interface does *not* exist, and where it does exist Requirement 9.27's INFO is an explicit check
+rather than the generic `compare_to_existing` machinery. Recorded here rather than left for a future
+iteration to discover.
 
 ## NetBox interaction
 
@@ -758,8 +820,9 @@ forbids this importer from writing them.
 Hierarchy creates strictly parents-first: region → site → location → rack. Devices need racks, so
 the device sheet only reads them. A device row that supplies addresses then creates those addresses
 against the device's inherited interfaces and PATCHes only the primary-IP fields (D11). Cabling needs
-devices and their ports, so it only reads those. Within a sheet, rows are applied in file order
-(Req 8.12) so the report lines up with the sheet.
+devices, and reads them; under D12 it may create the interfaces it terminates on, so its order is
+interfaces → cables. Within a sheet, rows are applied in file order (Req 8.12) so the report lines up
+with the sheet.
 
 ### Device addresses (D11)
 
@@ -834,18 +897,43 @@ sequenceDiagram
     I->>I: group rows by cable_group<br/>(blank ⇒ a group of one)
     I->>L: resolve every a_end / b_end device (bulk prefetched)
     I->>L: resolve port names → (object_type, object_id)
+    opt a device port that resolved to nothing, flag on (D12)
+        I->>L: interface template of that name on the device type?
+        alt template found
+            I-->>I: plan an interface create from it (Req 9.25)
+        else sheet supplies *_interface_type
+            I-->>I: plan an interface create from the cell (Req 9.26)
+        else
+            I-->>I: BLOCKED — INTERFACE_TYPE_REQUIRED
+        end
+        I-->>I: WARNING to acknowledge, per interface (Req 9.28)
+    end
     I->>I: dedupe terminations per side, in row order
-    I->>L: occupied(object_type, object_id)? for each
+    I->>L: occupied(object_type, object_id)? for each<br/>(a planned interface is free by construction)
     alt every termination held by one and the same cable
         I-->>I: SKIP_EXISTS for every line in the group
     else terminations split across cables, or only some free
         I-->>I: BLOCKED — create-only cannot extend a cable (Req 9.22)
     else all free
+        opt any interface planned
+            I->>NB: POST /api/dcim/interfaces/<br/>[{device, name, type, …}]
+            NB-->>I: 201 + ids → Registry
+        end
         I->>NB: POST /api/dcim/cables/<br/>{a_terminations:[…], b_terminations:[…],<br/> type, status, profile?}
         NB-->>I: 201 + cable id
         I-->>I: record that id against every line in the group
     end
 ```
+
+**D12 costs this sheet its best property, and it is worth being blunt about which.** Cabling was the
+only importer with one endpoint in `endpoint_order`, so the whole file was a single bulk POST and
+D7's half-complete window did not exist for it at all. With `dcim.interfaces` ahead of `dcim.cables`
+there are two batches, and a failure of the second leaves the first applied: interfaces created,
+cables not. The residue is benign — uncabled interfaces on a device, which is what the device type
+would have given it anyway — and re-uploading the sheet clears it, because those interfaces are then
+found rather than planned and only the cables remain (Req 9.32, 11.7). But "benign residue" is not
+"no residue", and `importers/cabling.py`'s module docstring currently claims the stronger property in
+its opening paragraph. That docstring has to change with the code.
 
 ### Grouped rows: where this lands in the pipeline
 
@@ -922,6 +1010,15 @@ add a termination to an existing cable is to PATCH it. So the useful behaviour a
 direct conflict, and the invariant wins: a partly cabled group is reported for a human to finish in
 NetBox. Adding terminations to existing cables belongs with the other update operations in iteration 2,
 where the create-only test is being revisited deliberately rather than eroded by one exception.
+
+**D12 adds objects, not exceptions.** Creating a `dcim.Interface` against a device that already
+exists looks at first like editing that device's inventory, and Requirement 8.23 originally read it
+that way and refused. The distinction that matters is which object is written: an interface is its
+own object with its own id, and nothing about the device record changes when one appears beneath it.
+It is the same shape as D11 creating an `ipam.IPAddress` against an existing device, which nobody
+called an update. What would breach the invariant is re-typing or renaming an interface the tool did
+not create, and 9.8 forbids exactly that. So the grep still finds one `PATCH` and no `DELETE`
+(Req 11.3a), and Requirement 8.23 is amended to match rather than left contradicting 9.25.
 
 **D11 is the first exception, and it is a different kind of PATCH.** NetBox will not accept
 `primary_ip4` on the device POST: the IP does not exist yet. The sequence is create device → create
@@ -1070,6 +1167,11 @@ merely greyed out.
 | More terminations on a side than the profile has connectors | S3 | ERROR; file blocked (Req 9.19) | The profile, its limit for that side, and the count |
 | A group grouped without a profile | S3 | WARNING; must be acknowledged (Req 9.20) | That NetBox will store it but cannot trace lanes |
 | A group whose terminations are partly cabled already | S4 | ERROR; file blocked (Req 9.22) | Which lines are free, which cable holds the rest, and that create-only cannot extend it |
+| A device port the type does not define, with no `*_interface_type` | S4 | ERROR; file blocked (Req 9.26) | That the name is unknown to the device type, and both remedies — add the template, or fill the column |
+| Two rows creating one interface with different types | S3 | ERROR; file blocked (Req 9.31) | Both lines and both values |
+| An interface will be created | S4 | WARNING; must be acknowledged (Req 9.28) | Device, interface, the type it gets, and whether that came from the template or the sheet |
+| `*_interface_type` filled on a port that already exists | S4 | INFO; does not block (Req 9.27) | That NetBox's type stands and the cell was not used |
+| A planned interface appeared in NetBox since validation | pre-apply | Abort before the first write (Req 9.32) | Which interface; re-validate required |
 | Reference not found | S4 | ERROR; file blocked | Which lookup failed and the value tried |
 | Already exists, all values match | S4 | INFO; does not block | Which object matched, with a NetBox link |
 | Already exists, a consequential value differs | S4 | ERROR; file blocked (D8) | Field, sheet value, NetBox value |
@@ -1116,6 +1218,16 @@ There are two levels of double, deliberately:
   four-lane breakout would appear to leave three leaf ports free, and the re-upload-skips-everything
   claim of Requirement 9.22 would pass while being false.
 
+  D12 asks for one more behaviour and it is the same class of omission: an interface POSTed to
+  `dcim.interfaces` must come back looking like one NetBox served. The cable batch does not re-read
+  it — the payload carries a `Ref` that resolves out of the registry from the create the batch
+  before returned — so the shape matters on the *next* validation rather than within the apply, and
+  that is where the claims live: re-uploading finds the interface instead of planning it, and the
+  interface that appeared between validate and apply aborts the run. `_normalise_interface` gives a
+  directly created record the `{value, label}` `type` and the `cable` key that
+  `_inherit_interfaces` already produced for a template copy. Without it, "re-uploading creates
+  nothing" would fail for a reason that has nothing to do with the importer.
+
 The whole suite runs in about twenty seconds, which is why it gets run on every change.
 
 - **Unit — `naming.py`:** valid 3-segment names, wrong segment counts, empty segments, alternate
@@ -1147,7 +1259,18 @@ The whole suite runs in about twenty seconds, which is why it gets run on every 
  terminations than the profile's connectors, a group with several terminations and no profile warning
  rather than blocking, a fully cabled group skipping every one of its lines, a half-cabled group
  blocking, the created cable id appearing on every line of the group in the report, and — the guard on
- the parse — every profile value the stubbed API reports yielding connector counts
+ the parse — every profile value the stubbed API reports yielding connector counts; plus the D12 cases
+ — with the flag off, an unknown port name still `PORT_NOT_FOUND` and zero writes, which is the
+ regression guard on every sheet in use today; with it on, a port the device type defines created from
+ the template with the template's own type and the cable landing on it in the same apply, a port the
+ type does not define blocked without `a_interface_type` and created with it, a type the API does not
+ report rejected, one interface named by four rows of a group created once, two rows disagreeing about
+ the type blocked, the create warning present and the plan unappliable until acknowledged, and the
+ re-upload of an applied sheet creating neither interface nor cable
+- **Two-batch ordering (D12):** the interface batch precedes the cable batch and the cable payload
+ carries the id NetBox returned, not a placeholder; a cable batch rejected after the interface batch
+ succeeded reports its rows blocked and leaves the interfaces in place, which is the half-applied
+ state Requirement 9.32 accepts and the test that pins it as deliberate rather than accidental
 - **Create-only invariant:** across the whole suite, assert that no test ever causes a `PATCH`,
  `PUT`, or `DELETE` request to NetBox. This is the machine-checkable form of Requirement 11.3 and it
  is what makes the "we cannot damage what we did not create" claim verifiable rather than aspirational.
@@ -1205,6 +1328,7 @@ requirement rather than a preference:
 | `RACK_NAME_DELIMITER` | `-` | 6.1 |
 | `NETBOX_DEFAULT_DEVICE_ROLE` | unset; a device row with no `device_role` is then rejected | 8.8, D2 |
 | `NETBOX_AUTOCREATE_DEVICE_TYPES` | `false` | 8.7, D4 |
+| `NETBOX_AUTOCREATE_INTERFACES` | `false`; while off, an unknown port name is `PORT_NOT_FOUND` as today | 9.24, D12 |
 | `MAX_UPLOAD_MB` | 5 | 5.2 |
 | `PLAN_EXPIRY_MINUTES` | 30 | 10.15 |
 | `MAX_APPLY_ROWS` | 2000 | 15.3 |

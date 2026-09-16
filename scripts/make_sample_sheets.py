@@ -17,6 +17,10 @@ PREREQUISITES AND ORDER — all four steps, in this order
 3. Apply 2_devices   — creates devices in those racks, inheriting ports from step 1.
 4. Apply 3_cabling   — cables the ports the devices inherited.
 
+The `3_cabling_newports` pair is the exception and needs two more things, both described above that
+section: `NETBOX_AUTOCREATE_INTERFACES=true`, and `seed_netbox.py --late-templates --apply` run
+*after* step 3 so the devices predate the templates.
+
 Several deliberate faults in the *_invalid sheets depend on the corresponding *_valid sheet having
 been applied first: "exists but differs" and "overlaps an existing device" have nothing to collide
 with on an empty instance.
@@ -1278,6 +1282,207 @@ BREAKOUT_INVALID = (
 )
 
 
+# --------------------------------------------------------------------------------------
+# Sheet 3c — cabling onto ports that do not exist yet (D12)
+# --------------------------------------------------------------------------------------
+# A third cabling sheet rather than rows on either of the first two, for the reason the breakout
+# pair records: these need the `*_interface_type` columns, and part of what the other samples are
+# for is proving that a sheet *without* the new columns behaves exactly as it did.
+#
+# THESE SHEETS NEED TWO THINGS THE OTHERS DO NOT
+# 1. `NETBOX_AUTOCREATE_INTERFACES=true` on the server. With it off — the default — every row here
+#    is `PORT_NOT_FOUND` and the file is blocked, which is itself worth demonstrating once.
+# 2. `scripts/seed_netbox.py --late-templates --apply`, run AFTER sheet 2. That adds swp33 and swp34
+#    to Spectrum-SN4700, which lab1-dh1-r01-leaf01 was built from *before* they existed. NetBox
+#    never retro-fits a template onto a device that already exists, so leaf01 has swp1-32 and the
+#    type has swp1-34. That gap is the whole subject of D12 and is not a contrived one: it is what
+#    happens to every fleet whose device types get corrected after the fact.
+#
+# The valid sheet shows both sources of an interface type, in the order the tool tries them:
+#   * swp33 — the device type defines it, so the sheet says nothing and the template supplies
+#     400gbase-x-qsfpdd. This is the case to reach for, because fixing the type fixes every device
+#     of that type at once (Requirement 9.25).
+#   * swp67 on the SN5610 spine — the type stops at swp66, so there is nothing to copy and the row
+#     states the type itself (Requirement 9.26).
+# Every row of it raises a warning to acknowledge, which is the point: with autocreate on, that
+# list is the only thing between a mistyped port name and an interface in NetBox (9.28).
+#
+# The invalid sheet carries faults at three different stages, and a stage that fails stops the run,
+# so it does NOT report all five at once — the S2 bad value hides the S3 conflict, which hides the
+# three S4 faults. That is the same shape `3_cabling_invalid` has and it is worth walking through
+# rather than working around: fix what is reported, re-upload, see the next stage. It is also the
+# honest demonstration of why the verdict names the stages it did not reach (Requirement 10.4).
+
+NEWPORTS_COLUMNS = (
+    "a_end",
+    "a_end_kind",
+    "a_port",
+    "a_interface_type",
+    "b_end",
+    "b_end_kind",
+    "b_port",
+    "b_port_side",
+    "b_interface_type",
+    "cable_type",
+    "cable_status",
+    "label",
+)
+
+NEWPORTS_VALID = (
+    # Template-backed: swp33 exists on the type and not on the switch, so the sheet says nothing
+    # about its type and gets the interface NetBox would have built with the device.
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp33",
+        "",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F20",
+        "front",
+        "",
+        "mmf-om4",
+        "connected",
+        "NEW-0001",
+    ),
+    # The same, on the second late template. Two interfaces, two cables, one acknowledgement each.
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp34",
+        "",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F21",
+        "front",
+        "",
+        "mmf-om4",
+        "connected",
+        "NEW-0002",
+    ),
+    # Column-backed: the SN5610's templates stop at swp66, so nothing can be copied and the row
+    # states the type. A device-to-device row, since a panel port is never created (9.29).
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp2",
+        "",
+        "lab1-dh1-r01-spine01",
+        "device",
+        "swp67",
+        "",
+        "800gbase-x-osfp",
+        "smf-os2",
+        "connected",
+        "NEW-0003",
+    ),
+)
+
+NEWPORTS_INVALID = (
+    # A port neither source can describe. The remedy is named twice over: add the template, or fill
+    # the column. Nothing is defaulted, which is the whole of Requirement 9.26.
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp2",
+        "",
+        "lab1-dh1-r01-spine01",
+        "device",
+        "swp68",
+        "",
+        "",
+        "smf-os2",
+        "connected",
+        "NEW-0004",
+        "b end: type defines no swp68 and the column is blank — INTERFACE_TYPE_REQUIRED",
+    ),
+    # A value NetBox's interface `type` choices do not contain. Caught at S2 against the API, the
+    # same way a bad cable_type is, and it would be caught with the flag off too (9.27).
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp3",
+        "",
+        "lab1-dh1-r01-spine01",
+        "device",
+        "swp69",
+        "",
+        "800gbase-x-wet-string",
+        "smf-os2",
+        "connected",
+        "NEW-0005",
+        "no such interface type: VALUE_NOT_IN_CHOICES lists what is accepted",
+    ),
+    # Two rows creating one interface and disagreeing about what it is. The tool will not choose
+    # between two candidates for a fact about physical hardware (9.31).
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp4",
+        "",
+        "lab1-dh1-r01-spine01",
+        "device",
+        "swp70",
+        "",
+        "800gbase-x-osfp",
+        "smf-os2",
+        "connected",
+        "NEW-0006",
+        "claims spine01 swp70 is 800gbase-x-osfp",
+    ),
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp5",
+        "",
+        "lab1-dh1-r01-spine01",
+        "device",
+        "swp70",
+        "",
+        "25gbase-x-sfp28",
+        "smf-os2",
+        "connected",
+        "NEW-0007",
+        "the same interface, a different type: INTERFACE_TYPE_CONFLICT naming both lines. Also "
+        "DUPLICATE_TERMINATION_IN_FILE, because two ungrouped rows on one port are two cables",
+    ),
+    # A mistyped port name is indistinguishable from a new one — which is exactly why the template
+    # is tried first. `swp1o` matches no template, so it lands on the blocked branch rather than
+    # quietly becoming an interface.
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp1o",
+        "",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F22",
+        "front",
+        "",
+        "mmf-om4",
+        "connected",
+        "NEW-0008",
+        "a typo for swp10, blocked as INTERFACE_TYPE_REQUIRED rather than created",
+    ),
+    # Panel ports are still never created, flag or no flag (9.29).
+    (
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp6",
+        "",
+        "lab1-dh1-r01-pp02",
+        "panel",
+        "F99",
+        "front",
+        "",
+        "mmf-om4",
+        "connected",
+        "NEW-0009",
+        "no such front port, and D12 does not create panel ports: PORT_NOT_FOUND",
+    ),
+)
+
+
 SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...] = (
     (
         "1_hierarchy_valid",
@@ -1330,6 +1535,22 @@ SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...
         BREAKOUT_INVALID,
         "every group here is faulty: a fifth lane on a four-connector profile, two rows of one "
         "cable disagreeing, and one port claimed by two groups",
+    ),
+    (
+        "3_cabling_newports_valid",
+        NEWPORTS_COLUMNS,
+        NEWPORTS_VALID,
+        "needs NETBOX_AUTOCREATE_INTERFACES=true and `seed_netbox.py --late-templates --apply` "
+        "run after sheet 2; then every row validates with one warning to acknowledge, and applies "
+        "as interfaces first and cables second (D12)",
+    ),
+    (
+        "3_cabling_newports_invalid",
+        NEWPORTS_COLUMNS,
+        NEWPORTS_INVALID,
+        "five ways creating an interface goes wrong, surfacing one stage at a time as the earlier "
+        "ones are fixed: a type NetBox does not know (S2), two rows disagreeing about one "
+        "interface (S3), then no type to be had, a typo, and a panel port (S4)",
     ),
 )
 
@@ -1416,6 +1637,9 @@ def main() -> int:
     print("  2. apply 1_hierarchy   creates the sites, datahalls and racks")
     print("  3. apply 2_devices     creates devices, inheriting ports from step 1")
     print("  4. apply 3_cabling     cables those ports")
+    print("\nThe 3_cabling_newports pair only, and only if you want to see D12:")
+    print("  5. scripts/seed_netbox.py --late-templates --apply   (after step 3, not before)")
+    print("  6. set NETBOX_AUTOCREATE_INTERFACES=true, then apply 3_cabling_newports")
     return 0
 
 

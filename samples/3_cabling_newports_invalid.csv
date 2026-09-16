@@ -1,0 +1,7 @@
+a_end,a_end_kind,a_port,a_interface_type,b_end,b_end_kind,b_port,b_port_side,b_interface_type,cable_type,cable_status,label
+lab1-dh1-r01-leaf01,device,swp2,,lab1-dh1-r01-spine01,device,swp68,,,smf-os2,connected,NEW-0004
+lab1-dh1-r01-leaf01,device,swp3,,lab1-dh1-r01-spine01,device,swp69,,800gbase-x-wet-string,smf-os2,connected,NEW-0005
+lab1-dh1-r01-leaf01,device,swp4,,lab1-dh1-r01-spine01,device,swp70,,800gbase-x-osfp,smf-os2,connected,NEW-0006
+lab1-dh1-r01-leaf01,device,swp5,,lab1-dh1-r01-spine01,device,swp70,,25gbase-x-sfp28,smf-os2,connected,NEW-0007
+lab1-dh1-r01-leaf01,device,swp1o,,lab1-dh1-r01-pp02,panel,F22,front,,mmf-om4,connected,NEW-0008
+lab1-dh1-r01-leaf01,device,swp6,,lab1-dh1-r01-pp02,panel,F99,front,,mmf-om4,connected,NEW-0009

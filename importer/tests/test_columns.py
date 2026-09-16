@@ -44,12 +44,16 @@ EXPECTED_OPTIONAL = {
         "management_ip6",
     ),
     # `cable_profile` and `cable_group` are the D10 pair, both optional: a sheet that uses neither
-    # is every cabling sheet written before them (Requirements 9.13, 9.15).
+    # is every cabling sheet written before them (Requirements 9.13, 9.15). The two
+    # `*_interface_type` columns are D12's, and are read only when a port has to be created and the
+    # device type does not define it (Requirement 9.26).
     "cabling": (
         "a_end_kind",
         "b_end_kind",
         "a_port_side",
         "b_port_side",
+        "a_interface_type",
+        "b_interface_type",
         "cable_profile",
         "cable_group",
         "cable_status",
@@ -84,7 +88,19 @@ EXPECTED_CONSEQUENTIAL = {
 EXPECTED_DESCRIPTIVE = {
     "hierarchy": {"rack_status", "rack_form_factor", "tenant", "description"},
     "devices": {"serial", "manufacturer", "device_role", "status", "asset_tag", "tenant"},
-    "cabling": {"cable_status", "label", "length", "length_unit", "color"},
+    # The two `*_interface_type` columns are DESCRIPTIVE only because `Conflict` is required on
+    # every spec and has no value for "not comparable": the column is read when the interface does
+    # *not* exist, and where it does, Requirement 9.27's INFO is an explicit check rather than the
+    # generic compare-to-existing path. Declarative, exactly as `cable_profile`'s class is (D12).
+    "cabling": {
+        "a_interface_type",
+        "b_interface_type",
+        "cable_status",
+        "label",
+        "length",
+        "length_unit",
+        "color",
+    },
 }
 
 SHEETS = sorted(columns.SHEETS)

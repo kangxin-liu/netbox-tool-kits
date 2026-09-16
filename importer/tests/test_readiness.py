@@ -40,6 +40,14 @@ def stub_count(path, count, **_):
     )
 
 
+def stub_ports(devices=12, interfaces=400, front=32, rear=8):
+    """The four counts the cabling panel reads, in the order it reads them."""
+    stub_count("dcim/devices", devices)
+    stub_count("dcim/interfaces", interfaces)
+    stub_count("dcim/front-ports", front)
+    stub_count("dcim/rear-ports", rear)
+
+
 def no_writes_were_issued():
     return [call for call in responses.calls if call.request.method in WRITE_METHODS] == []
 
@@ -185,6 +193,26 @@ class TestCablingReadiness:
         assert summary.ready is True
         panel = next(fact for fact in summary.facts if "Patch-panel" in fact.label)
         assert panel.value == "32 / 8"
+
+    @responses.activate
+    def test_the_autocreate_flag_is_shown_as_off_by_default(self, netbox):
+        """Requirement 17.2: the flag decides what an unknown port name does, so say which."""
+        stub_ports()
+        summary = readiness.readiness_for("cabling", netbox)
+        flag = next(fact for fact in summary.facts if fact.label == "Create missing interfaces")
+        assert flag.value == "off"
+        assert "blocks the file" in flag.detail
+
+    @responses.activate
+    @override_settings(NETBOX_AUTOCREATE_INTERFACES=True)
+    def test_the_autocreate_flag_warns_when_it_is_on(self, netbox):
+        """It is not an error state, but it is one an operator should notice before uploading."""
+        stub_ports()
+        summary = readiness.readiness_for("cabling", netbox)
+        flag = next(fact for fact in summary.facts if fact.label == "Create missing interfaces")
+        assert flag.value == "on"
+        assert flag.level == "warn"
+        assert summary.ready is True
 
     @responses.activate
     def test_a_transport_failure_becomes_a_blocker_not_a_crash(self, netbox):

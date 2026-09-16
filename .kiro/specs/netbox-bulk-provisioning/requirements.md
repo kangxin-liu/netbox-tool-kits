@@ -361,9 +361,17 @@ primary IP.
 22. IF two cells in one sheet declare the same address — two rows, or two columns of one row —
  THEN the system SHALL reject the later cell and name the earlier location.
 23. IF an existing device is missing the interface its type now defines — NetBox does not copy
- templates onto devices that already exist — THEN the system SHALL reject the row naming the device
- and the missing interface, rather than create the interface. Creating interfaces on a device the
- tool did not just create would be an update of that device's inventory, which 11.3 still forbids.
+ templates onto devices that already exist — THEN the system SHALL create that interface from the
+ template, by the same rule and from the same source as 9.25, and assign the address to it. **Amended
+ by D12.** This criterion previously required the row to be rejected, on the reasoning that adding an
+ interface to a device the tool did not just create is an update of that device's inventory and so
+ forbidden by 11.3. D12 rejects that reasoning: an interface is its own object, and creating one is a
+ create, not a modification of the device (11.3). IF the device type defines no such template, THEN
+ the row SHALL still be rejected, because the device sheet carries no interface-name or type column
+ and there is nothing to create the interface *from* — that is 9.26's blank-cell branch with no cell
+ to fill. **Open at review:** whether this create should sit behind `NETBOX_AUTOCREATE_INTERFACES`
+ (9.24) as the cabling sheet's does. The argument for one flag is consistency; the argument against is
+ that the device sheet cannot invent a name at all, so it has no typo path to guard against.
 24. The system SHALL compare addresses as structured IP values, not as strings, so
  `2001:db8:0:0::1/128` and `2001:db8::1/128` are the same address (Requirement 11.5b).
 25. `loopback_ip4`, `loopback_ip6`, `management_ip4`, and `management_ip6` are **consequential**
@@ -385,7 +393,7 @@ terminations, so that connectivity is recorded without tracing each link by hand
 
 Sheet columns — required: `a_end`, `a_port`, `b_end`, `b_port`, `cable_type`. Optional:
 `a_end_kind`, `b_end_kind`, `a_port_side`, `b_port_side`, `cable_profile`, `cable_group`,
-`cable_status`, `label`, `length`, `length_unit`, `color`.
+`a_interface_type`, `b_interface_type`, `cable_status`, `label`, `length`, `length_unit`, `color`.
 
 `a_end_kind` and `b_end_kind` are optional because 9.1 gives them a default. An earlier draft listed
 them as required, which contradicted that default: a required column's blank cell is rejected before
@@ -402,6 +410,13 @@ rejections under 9.11. `cable_profile` records the internal channel structure Ne
 per-lane path tracing; `cable_group` is what lets several rows describe the several connectors of a
 single cable. Both are optional, and a sheet that uses neither behaves exactly as it does today.
 
+`a_interface_type` and `b_interface_type` are decision **D12** — creating a device interface the sheet
+names and NetBox does not have. Criteria 9.1–9.23 assume every port already exists, which is true of a
+device the tool created from a prepared device type and false in the two cases operators actually hit:
+a device created before its type defined the port, and a port the type does not define at all. Both
+appear as `PORT_NOT_FOUND` today, and both are fixed in NetBox by hand before the sheet can be used.
+The two columns supply the one fact a create needs and a cabling sheet does not otherwise carry.
+
 1. The system SHALL accept `a_end_kind` and `b_end_kind` as `device` or `panel`, defaulting to
  `device` when blank, and SHALL use the value to decide how the port name is resolved.
 2. WHERE an end is a `device`, the system SHALL resolve its port against that device's
@@ -411,7 +426,9 @@ single cable. Both are optional, and a sheet that uses neither behaves exactly a
 4. IF an end does not resolve to exactly one device, THEN the system SHALL reject the row naming
  the ambiguous or missing end.
 5. IF a port name does not resolve to exactly one termination on the resolved device, THEN the
- system SHALL reject the row, and SHALL state which side and port name failed.
+ system SHALL reject the row, and SHALL state which side and port name failed. This is the rule
+ wherever 9.25 and 9.26 do not apply — a name matching more than one termination is always a
+ rejection, and so is any unresolved name while D12's flag is off or the end is a panel (9.24, 9.28).
 6. WHEN both terminations resolve, THEN the system SHALL create the cable by POSTing
  `a_terminations` and `b_terminations` as arrays of `{object_type, object_id}` to the cables
  endpoint, and SHALL NOT write to the read-only cable-terminations endpoint. The arrays hold one
@@ -421,7 +438,9 @@ single cable. Both are optional, and a sheet that uses neither behaves exactly a
 8. The system SHALL NOT read, require, or write any transceiver or optic information in this
  iteration, and SHALL NOT modify the `type` of any interface it did not create. A `transceiver`
  column, if present in an uploaded file, SHALL be treated as an unrecognised column per
- Requirement 5.6 — reported as informational and otherwise ignored.
+ Requirement 5.6 — reported as informational and otherwise ignored. The qualifier "it did not
+ create" becomes load-bearing under D12: an interface this run creates is typed once, at creation,
+ from the source 9.25 or 9.26 names, and is never re-typed afterwards.
 9. IF either termination is already occupied by an existing cable, THEN the system SHALL skip
  the row as already cabled and identify the existing cable, and SHALL NOT modify or delete it. This
  is the rule for a row that is its own cable; a group is judged as a whole by 9.22.
@@ -485,6 +504,65 @@ Criteria 9.13–9.23 are decision **D10** — cable profiles and the multi-row c
  termination to a cable that already exists (11.3) and a half-cabled breakout needs a human decision.
 23. WHEN a group's cable is created, THEN the system SHALL record it against every line of the group
  in the run report, so each line the operator wrote has a result of its own.
+
+Criteria 9.24–9.33 are decision **D12** — creating a missing device interface rather than refusing the
+row that names it.
+
+24. The system SHALL read a flag from the environment, `NETBOX_AUTOCREATE_INTERFACES`, defaulting to
+ off. WHILE it is off, 9.5 stands unaltered in every particular — an unresolved port name is
+ `PORT_NOT_FOUND` and the file is blocked — and the two `*_interface_type` columns are accepted,
+ validated, and otherwise unused. Every criterion from 9.25 to 9.33 applies only while the flag is on,
+ except 9.27, which validates those two columns in either state so that a bad value is caught on the
+ sheet that will one day be applied with the flag on. This mirrors device-type autocreate (8.7, D4)
+ and for the same reason: a shared NetBox should not gain objects from a typo in a sheet nobody
+ expected to create anything.
+25. WHILE the flag is on, WHERE an end is a `device`, its port name matches no interface on that
+ device, and the device's *device type* defines an interface template of that name, THEN the system
+ SHALL plan the creation of that interface from the template — `name` and `type`, together with every
+ other field the template carries that `dcim.Interface` accepts — and SHALL then terminate the cable
+ on it. Nothing here is invented: the created interface is the one NetBox would have produced had the
+ template existed when the device was created. This is the common case, because NetBox does not copy
+ a newly added template onto devices that already exist.
+26. WHILE the flag is on, WHERE the device type defines no template of that name, THEN the system
+ SHALL create the interface only if the row supplies the matching `*_interface_type` cell, using the
+ port name verbatim and the supplied type; IF that cell is blank, THEN the system SHALL reject the row
+ with a code distinct from `PORT_NOT_FOUND`, stating that the name is unknown to the device type and
+ naming both remedies — add the template to the type, or fill the column. The tool SHALL NOT default
+ the type, because every default here is a guess recorded as fact about physical hardware.
+27. The system SHALL validate a non-blank `a_interface_type` / `b_interface_type` against the
+ interface `type` choices reported by NetBox, rejecting an unrecognised value and listing the accepted
+ ones. WHERE the cell is filled on a row whose port already exists, the system SHALL NOT compare it to
+ that interface's type and SHALL NOT modify it (9.8); IF the two disagree, THEN the system SHALL raise
+ an INFO saying NetBox's value stands.
+28. Every interface the system plans to create SHALL raise a WARNING requiring acknowledgement before
+ apply (Requirement 10.9), naming the device, the interface, the type it will be given, and whether
+ that type came from the device-type template or from the sheet. A mistyped port name and a genuinely
+ new port are indistinguishable to the tool, so the acknowledgement is the only place `swp1o` gets
+ noticed before it exists in NetBox.
+29. The system SHALL NOT create a termination for an end whose `*_end_kind` is `panel`. A front port
+ needs a rear port and a position mapping that no cabling column expresses, and a rear port needs a
+ position count, so an unresolved panel port remains `PORT_NOT_FOUND` under this decision as under
+ 9.5 — see assumption 5. The system SHALL NOT create devices, of either kind, under any circumstances
+ (9.4).
+30. The system SHALL create each interface at most once per run however many rows or cable groups name
+ it, and SHALL terminate every one of those rows on that one created interface. Whether two rows
+ naming the same missing interface are the duplicate of 9.11 or the shared connector of 9.17 SHALL be
+ decided exactly as it would be if the interface already existed: creation does not change which.
+31. IF two rows would create the same interface on the same device with *different* non-blank
+ `*_interface_type` values, THEN the system SHALL reject the later row naming both lines and both
+ values, for the reason 9.18 gives about a cable's own attributes — an interface has one type and the
+ tool must not choose between two candidates on the operator's behalf.
+32. The system SHALL create interfaces before cables, as a bulk POST to `dcim.interfaces` preceding
+ the POST to `dcim.cables`, and the cable payload SHALL reference each created interface by the id
+ NetBox returned. This makes the cabling sheet two endpoints rather than one, so D7's half-complete
+ window — which this sheet uniquely did not have — now exists between them: interfaces written, cables
+ not. Re-uploading the sheet closes it, because the interfaces are then found rather than created and
+ only the cables remain to write (Requirement 11.7). The pre-apply re-check of Requirement 10.14 SHALL
+ cover the planned interfaces: IF one has appeared in NetBox since validation, THEN the run SHALL
+ abort before writing anything rather than submit a create NetBox will reject as a duplicate name.
+33. The plan preview SHALL distinguish a port that was found from one that will be created, naming the
+ type and its source for the latter, and the run report SHALL record each created interface as an
+ object of its own, so what the report counts matches what was written (Requirements 10.18, 12.1).
 
 ## Requirement 10: Validation gate — nothing is written until validation is clean
 
@@ -556,6 +634,12 @@ can finish a partial import without creating duplicates.
  8.19, which sends only `primary_ip4` / `primary_ip6` and only to set them to an address this run
  assigned (or found already assigned) on that device. A primary IP already set to a *different*
  address is not patched — it is the consequential conflict of 11.5.
+3a. Creating a child object against a device that already exists — an `ipam.IPAddress` under 8.17, a
+ `dcim.Interface` under 8.23 or 9.25 — is a create and not an update, so 11.3 permits it. What 11.3
+ forbids is changing a field of an object this run did not write, and none of those paths does: no
+ existing interface is re-typed or renamed (9.8), and no existing cable gains a termination (9.22).
+ The distinction is what keeps the invariant checkable — `PATCH`, `PUT`, and `DELETE` appear in
+ exactly one place in the codebase, the primary-IP call of 8.19.
 4. WHEN an object already exists in NetBox and every value the sheet supplies for it matches, THEN
  the system SHALL classify the row as INFO / skip-already-exists, which does not block apply.
 5. IF an object already exists but a **consequential** value the sheet supplies differs from what
@@ -677,8 +761,8 @@ explanation, so that I can fix the spreadsheet without hunting for what the tool
  an issue is identical across csv and xlsx.
 4. Each issue SHALL carry a stable machine-readable code — for example `RACK_NAME_MALFORMED`,
  `RU_RANGE_OVERLAP`, `DEVICE_TYPE_NOT_FOUND`, `PORT_ALREADY_CABLED`, `DEVICE_IP_REQUIRED`,
- `DEVICE_IP_FAMILY_MISMATCH`, `MGMT_INTERFACE_NOT_FOUND` — so that issues can be grouped, counted,
- and asserted in tests.
+ `DEVICE_IP_FAMILY_MISMATCH`, `MGMT_INTERFACE_NOT_FOUND`, `INTERFACE_TYPE_REQUIRED` — so that issues
+ can be grouped, counted, and asserted in tests.
 5. Issue messages SHALL be written for an engineer fixing a sheet, quoting the received value and
  the expectation, and SHALL NOT contain stack traces, request headers, or credentials.
 6. WHEN an issue concerns two rows, such as a duplicate, THEN it SHALL name both line numbers.
@@ -712,12 +796,15 @@ rather than to appear broken.
 2. Each importer page SHALL show a read-only readiness summary for that importer's prerequisites
  before any upload — for devices, whether the configured default role resolves, how many device
  types exist, and how many of those types define a `mgmt_only` interface and a `loopback`-typed
- interface; for cabling, whether any devices with front or rear ports exist.
+ interface; for cabling, whether any devices with front or rear ports exist, and whether
+ `NETBOX_AUTOCREATE_INTERFACES` is on, since that flag changes what an unknown port name does
+ (9.24).
 3. IF `NETBOX_DEFAULT_DEVICE_ROLE` does not resolve to an existing role, THEN the system SHALL warn
  prominently on the devices page at page load, not merely at validation time.
 4. The readiness summary SHALL be strictly read-only and SHALL create nothing.
 5. The system SHALL NOT create device roles, tenants, or patch panels in this iteration; device types
- only under the opt-in flag of Requirement 8.7.
+ only under the opt-in flag of Requirement 8.7, and device interfaces only under the opt-in flag of
+ Requirement 9.24.
 6. The documentation SHALL include a runbook for preparing an empty instance: creating the device
  roles in use, importing device types, marking exactly one `mgmt_only` interface and exactly one
  `loopback`-typed interface on each network device type (community templates often type a loopback
@@ -736,15 +823,17 @@ rather than to appear broken.
  arrived in the same 4.5 release, so the supported range guarantees them and the `cable_profile`
  column of Requirement 9.13 needs no version condition of its own — 9.14 covers only their
  disappearance in some later version.
-2. The supplied API token has write permission for DCIM objects, write permission for
- `ipam.IPAddress` (Requirement 8.17), and read permission for choices. It does not need permission
- to create prefixes, VRFs, or VLANs.
+2. The supplied API token has write permission for DCIM objects — including `dcim.Interface`, which
+ Requirements 8.23 and 9.25 create — write permission for `ipam.IPAddress` (Requirement 8.17), and
+ read permission for choices. It does not need permission to create prefixes, VRFs, or VLANs.
 3. A single operator uses the tool at a time; no concurrent-apply coordination is required.
 4. Device roles and tenants referenced by sheets already exist in NetBox; iteration 1 does not
  create them. On an unprepared instance this is surfaced by Requirement 17 rather than assumed away.
 5. Patch panels already exist as devices with their front and rear ports defined, typically from
  a device type template using the 4.5+ `rear_ports` mapping format. The cabling importer does not
- create panels.
+ create panels, and D12 does not change that: it creates device interfaces only (9.29). A front port
+ is meaningless without the rear port and position it maps to, and that mapping is a property of the
+ panel's internals rather than of any link, so it stays device-type preparation.
 6. Rack names are globally unique in practice because they embed the datacenter and datahall slugs.
 7. NetBox field names are taken from the target instance rather than from memory. Two 4.x renames
  caught during spec verification against 4.6.8 are worth naming, because a sheet column pointed at
@@ -879,7 +968,53 @@ rather than to appear broken.
  be written to NetBox's `oob_ip` (the sheet rule as stated puts it on `primary_ip*` and leaves
  `oob_ip` alone). Dual-stack is decided: four columns, family first.
 
-D1–D9 are settled; D3 and D6 are deferred to iteration 2 by choice, not left undecided. **D10 and D11
-are the open decisions.** Inside D10: whether grouped rows must repeat the cable's attributes or
-inherit them from the first row (9.18 proposes inherit), and whether lane order can be left as row
-order (9.21) or needs explicit connector columns. Inside D11: `oob_ip` versus primary-only.
+- **D12 — Creating a missing device interface from the cabling sheet. PROPOSED, awaiting review.**
+ A cabling row naming a port NetBox does not have is `PORT_NOT_FOUND` today, and the operator's only
+ remedy is to create the interface by hand and re-upload. D12 lets the tool create it: from the device
+ type's interface template where one of that name exists, and otherwise from two new optional columns,
+ `a_interface_type` and `b_interface_type`. Off by default, behind `NETBOX_AUTOCREATE_INTERFACES`.
+ **Why the template is the first source and the columns only the fallback.** The case that actually
+ arrives is not an undocumented port; it is a device created before its type defined the port, because
+ NetBox does not copy a newly added template onto existing devices. The template already holds the
+ name, the type, `mgmt_only`, and the speed, so creating from it invents nothing and produces exactly
+ the interface the device would have had. It also fails safe on the error this feature is most likely
+ to cause: a mistyped `swp1o` matches no template either, so it does not quietly become a port. Making
+ the columns the *only* source would have thrown that away and asked every row to restate a fact the
+ device type already holds — the argument D11 makes about interface names, applied to their types.
+ **Why the columns exist at all.** A type that genuinely does not define the port is a real case —
+ a modular chassis, a line card added after the type was written, a device type nobody owns — and
+ without the columns those sheets stay blocked with no route forward but the NetBox UI. What the tool
+ must not do is *default* the type: `1000base-t` written into NetBox as a fact about a 400G cage is
+ worse than the blocked row it replaced, because nothing later distinguishes it from a measured value.
+ So the fallback demands an explicit value and rejects the row without one.
+ **Why off by default, and why a warning even when on.** This is D4's argument (autocreate device
+ types) applied to a smaller object with a larger blast radius, since a cabling sheet names two ports
+ per row. The tool cannot tell a typo from a new port; only the operator can. The flag keeps a shared
+ instance safe from a sheet nobody meant to be creative, and the per-interface acknowledgement (9.28)
+ puts the list of names about to be created in front of the person who typed them. The cost is that
+ the feature does nothing until somebody sets an environment variable, which is the same cost D4 pays.
+ **Why interfaces and not panel ports.** A front port is defined by the rear port and position it maps
+ to; the sheet has no column for either, and inferring a mapping would fabricate a panel's internal
+ wiring. Rear ports need a position count. Both stay preparation (assumption 5).
+ **What it costs elsewhere, and this is the real price.** The cabling sheet becomes two endpoints
+ instead of one, so it loses the property that made it the safest of the three: a single bulk POST,
+ hence no half-applied window at all (D7). Between the interface batch and the cable batch there is
+ now a window where interfaces exist and cables do not. That state is benign — spare interfaces on a
+ device, which a re-upload then cables — but it is no longer *nothing*, and `importers/cabling.py`
+ currently documents the old property in its module docstring.
+ **Cost if reversed:** two `ColumnSpec`s, the cabling importer's port resolution and a second entry in
+ its `endpoint_order`, the pre-apply drift check over planned interfaces, one settings flag, and the
+ amendment to Requirement 8.23. `BaseImporter` needs nothing new — `Ref` and `Registry` already carry
+ an id from an earlier batch into a later payload, which is how the device sheet's addresses reference
+ the device they were created against.
+ Two questions inside D12 are the reviewer's. Whether the template-backed create of 9.25 should sit
+ behind the flag at all, given it can invent nothing and covers the common case — the alternative is
+ flag-free 9.25 with only the column-driven 9.26 gated. And whether Requirement 8.23's device-sheet
+ create should share the flag or stay unconditional.
+
+D1–D9 are settled; D3 and D6 are deferred to iteration 2 by choice, not left undecided. **D10, D11,
+and D12 are the open decisions.** Inside D10: whether grouped rows must repeat the cable's attributes
+or inherit them from the first row (9.18 proposes inherit), and whether lane order can be left as row
+order (9.21) or needs explicit connector columns. Inside D11: `oob_ip` versus primary-only. Inside
+D12: whether the flag covers the template-backed create as well as the column-driven one, and whether
+Requirement 8.23 shares it.

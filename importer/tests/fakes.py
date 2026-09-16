@@ -50,6 +50,24 @@ CHOICES: dict[str, dict[str, frozenset[str]]] = {
         ),
         "face": frozenset({"front", "rear"}),
     },
+    "dcim.interfaces": {
+        # What `*_interface_type` validates against (Requirement 9.27). A slice, as the real
+        # OPTIONS response is ~180 values; `wet-string` is absent from it, which is the point.
+        "type": frozenset(
+            {
+                "virtual",
+                "1000base-t",
+                "10gbase-t",
+                "10gbase-x-sfpp",
+                "25gbase-x-sfp28",
+                "40gbase-x-qsfpp",
+                "100gbase-x-qsfp28",
+                "200gbase-x-qsfp56",
+                "400gbase-x-qsfpdd",
+                "800gbase-x-osfp",
+            }
+        ),
+    },
     "dcim.cables": {
         "type": frozenset(
             {
@@ -189,6 +207,8 @@ class FakeNetBox:
                 self._occupy_terminations(record)
             if endpoint == DEVICES:
                 self._inherit_interfaces(record)
+            if endpoint == INTERFACES:
+                self._normalise_interface(record)
             if endpoint == IP_ADDRESSES:
                 self._bind_ip(record)
             created.append(record)
@@ -231,6 +251,20 @@ class FakeNetBox:
                     "mgmt_only": bool(template.get("mgmt_only")),
                 }
             )
+
+    def _normalise_interface(self, record: dict[str, Any]) -> None:
+        """An interface POSTed directly has to look like one NetBox served (D12).
+
+        `_expand` has already turned the submitted `device` id into a brief. What is left is the
+        shape of `type` — submitted as a bare value, returned by NetBox as `{value, label}` — and
+        the `cable` key every termination carries. Without this, an interface created by the
+        cabling sheet's first batch would not be readable by the cable batch that follows it in the
+        same apply, and the two-endpoint ordering of Requirement 9.32 could not be tested at all.
+        """
+        iface_type = record.get("type")
+        if isinstance(iface_type, str):
+            record["type"] = {"value": iface_type, "label": iface_type}
+        record.setdefault("cable", None)
 
     def _bind_ip(self, record: dict[str, Any]) -> None:
         object_id = record.get("assigned_object_id")

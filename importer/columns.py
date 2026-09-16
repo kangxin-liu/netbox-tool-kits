@@ -21,6 +21,28 @@ from importer.cable_profiles import PROFILES as CABLE_PROFILES
 # without treating it as data (Requirements 4.7, 5.11).
 GUIDANCE_MARKER = "# guidance:"
 
+# Picklist material for `*_interface_type` (D12). A representative slice of NetBox's interface-type
+# choices rather than all ~180 of them: the full list would make the xlsx dropdown unusable, and
+# validation asks the API regardless (Requirement 7.7), so a type missing from here is still
+# accepted. Ordered by speed, because that is how somebody scanning the list looks for one.
+INTERFACE_TYPES: tuple[str, ...] = (
+    "1000base-t",
+    "10gbase-t",
+    "10gbase-x-sfpp",
+    "25gbase-x-sfp28",
+    "40gbase-x-qsfpp",
+    "50gbase-x-sfp56",
+    "100gbase-x-qsfp28",
+    "200gbase-x-qsfp56",
+    "400gbase-x-qsfpdd",
+    "800gbase-x-osfp",
+)
+
+INTERFACE_TYPE_HELP = (
+    "Only used when the port does not exist and the device type does not define it either. "
+    "Leave blank unless a row is rejected asking for it"
+)
+
 
 class Conflict(Enum):
     """What it means when this column disagrees with an object that already exists (D8)."""
@@ -393,6 +415,19 @@ CABLING_COLUMNS: tuple[ColumnSpec, ...] = (
         example="",
     ),
     ColumnSpec(
+        key="a_interface_type",
+        label="a_interface_type",
+        # DESCRIPTIVE is declarative here, the way `cable_profile`'s CONSEQUENTIAL is: `Conflict` is
+        # required on every spec (Req 11.5c) and there is no value for "not comparable". The column
+        # is read only when the interface does *not* exist, and where it does, Requirement 9.27's
+        # INFO is an explicit check rather than the generic compare-to-existing path (D12).
+        required=False,
+        conflict=Conflict.DESCRIPTIVE,
+        help_text=INTERFACE_TYPE_HELP,
+        choices=INTERFACE_TYPES,
+        example="",
+    ),
+    ColumnSpec(
         key="b_end",
         label="b_end",
         required=True,
@@ -425,6 +460,15 @@ CABLING_COLUMNS: tuple[ColumnSpec, ...] = (
         help_text="Panels only, and ignored for devices. Defaults to front",
         choices=("front", "rear"),
         example="rear",
+    ),
+    ColumnSpec(
+        key="b_interface_type",
+        label="b_interface_type",
+        required=False,
+        conflict=Conflict.DESCRIPTIVE,
+        help_text=INTERFACE_TYPE_HELP,
+        choices=INTERFACE_TYPES,
+        example="",
     ),
     ColumnSpec(
         key="cable_type",

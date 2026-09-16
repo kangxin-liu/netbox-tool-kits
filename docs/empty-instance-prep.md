@@ -181,6 +181,30 @@ things. Prepare the type so there is only one:
 The importer will not fix this for you — it never modifies an object it did not create — so it is prep,
 and it is worth doing before the first breakout sheet rather than after.
 
+### Adding a template later does not backfill the devices already built from it
+
+This is the one fact about device types that surprises everyone, and it is worth knowing now rather
+than three sheets in: **NetBox copies a type's interface templates onto a device when the device is
+created, and never again.** Add `swp49` to a type today and every switch built from it yesterday
+still has no `swp49`. The type is right, the device list looks right, and the cabling sheet fails on
+a port you can plainly see in the type's template list.
+
+It follows that the order in section 3 is not a stylistic preference. Get the templates right
+*before* running sheet 2, because the devices sheet 2 creates are the ones that inherit them.
+
+If you find yourself on the wrong side of this, there are three ways out:
+
+* Delete and re-create the affected devices, if the instance is still young enough that nothing is
+  hanging off them. Cleanest, and usually only realistic on a lab.
+* Add the missing interfaces in NetBox by hand, or by script.
+* Turn on `NETBOX_AUTOCREATE_INTERFACES` and let the cabling sheet create them from the template as
+  it goes. This exists precisely for this gap — see "When a port the sheet names does not exist in
+  NetBox" in the operator runbook, including why it is off by default and what you are agreeing to
+  when you acknowledge the warnings.
+
+None of the three is prep, strictly: they are all repairs. Getting the templates in before sheet 2
+avoids the question.
+
 ## 5. Confirm, then import
 
 Load each importer page and read its readiness panel — it is strictly read-only and creates nothing:

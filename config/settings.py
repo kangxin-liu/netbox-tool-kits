@@ -129,6 +129,9 @@ NETBOX_MAX_VERSION_EXCLUSIVE = (4, 7)
 RACK_NAME_DELIMITER = env.optional(ENVIRON, "RACK_NAME_DELIMITER") or "-"
 NETBOX_DEFAULT_DEVICE_ROLE = env.optional(ENVIRON, "NETBOX_DEFAULT_DEVICE_ROLE")
 NETBOX_AUTOCREATE_DEVICE_TYPES = env.flag(ENVIRON, "NETBOX_AUTOCREATE_DEVICE_TYPES", default=False)
+# Off by default for D4's reason applied to a smaller object: the cabling sheet names two ports per
+# row and the tool cannot tell a new port from a mistyped one (Requirement 9.24).
+NETBOX_AUTOCREATE_INTERFACES = env.flag(ENVIRON, "NETBOX_AUTOCREATE_INTERFACES", default=False)
 MAX_UPLOAD_MB = env.integer(ENVIRON, "MAX_UPLOAD_MB", default=5)
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_MB * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = DATA_UPLOAD_MAX_MEMORY_SIZE

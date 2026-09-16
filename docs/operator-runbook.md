@@ -133,6 +133,54 @@ skipped as already present — which is what makes re-uploading a sheet safe.
 Leaving `cable_profile` blank on a grouped cable is allowed and produces a warning to acknowledge:
 NetBox will store the cable but cannot say which lane reaches which end.
 
+## When a port the sheet names does not exist in NetBox
+
+By default this is simply an error: the row is blocked, the file with it, and you add the port in
+NetBox before re-uploading. **That is the behaviour unless somebody has set
+`NETBOX_AUTOCREATE_INTERFACES` on the server.** Check the readiness panel above the upload box — it
+says `Create missing interfaces: off` or `on` — because the two behaviours look very different and
+nothing else on the page tells you which one you are about to get.
+
+With the flag on, a **device** port the sheet names and NetBox does not have is created, and the
+cable is then terminated on it. Where the type comes from matters, because the tool tries two
+sources in a fixed order:
+
+1. **The device type's interface template**, if one of that name exists. Nothing is invented: you
+   get the interface NetBox would have made had the template existed when the device was created.
+2. **The `a_interface_type` / `b_interface_type` column on the row**, if the device type says
+   nothing. Leave these blank unless a row is rejected asking for one.
+
+If neither can answer, the row is blocked and says so. The type is never defaulted — a guess about
+physical hardware, recorded in NetBox as a fact, is worse than the blocked row it would replace.
+
+**Fix the device type, not the sheet.** Almost every time you hit this, the cause is that somebody
+added an interface template to a device type *after* the devices were built from it. NetBox copies
+templates onto a device when the device is created and never again, so the template is there and the
+switches do not have the port. Adding the template fixes the whole fleet at once and needs no
+columns on any row; filling in `*_interface_type` on forty rows fixes forty rows.
+
+**Read the acknowledgement list.** Every interface the plan would create is a warning you have to
+acknowledge before the apply button works, naming the device, the port, the type it will be given,
+and which of the two sources that type came from. This is the only place a typo gets caught: `swp1o`
+and a genuinely new port are indistinguishable to the tool, and with the flag on the first one
+becomes an interface in NetBox rather than an error. Read the list; it is short by design.
+
+**What the column does when the port already exists:** nothing. The interface keeps the type NetBox
+holds, and you get an informational note saying the cell was not used. This importer never changes
+the type of an interface it did not create.
+
+**Panel ports are never created**, with the flag on or off. A front port is defined by the rear port
+and position it maps to, and a rear port by a position count — none of which any cabling column
+expresses. An unresolved `MPO7` is still an error, and the panel still has to be built in NetBox
+first.
+
+**One thing this changes about applying.** Without the flag, a cabling sheet was a single
+all-or-nothing write. With it, a sheet that creates interfaces writes them first and the cables
+second, so a cable batch that NetBox rejects leaves those interfaces behind. They are harmless —
+they are the ports the device type would have given the device anyway — and re-uploading the same
+sheet after you have fixed the cable problem creates only the cables, because the interfaces are
+found the second time. The run report says which endpoint completed.
+
 ## Rack names, and the slug columns
 
 Rack names follow `<datacenter_slug>-<datahall_slug>-<rack>`, for example `SYD1-DH1-R01`. That name
