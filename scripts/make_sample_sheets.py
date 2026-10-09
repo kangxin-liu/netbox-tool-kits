@@ -21,6 +21,10 @@ The `3_cabling_newports` pair is the exception and needs two more things, both d
 section: `NETBOX_AUTOCREATE_INTERFACES=true`, and `seed_netbox.py --late-templates --apply` run
 *after* step 3 so the devices predate the templates.
 
+The `3_cabling_breakout` and `3_cabling_shuffle` pairs also need
+`NETBOX_AUTOCREATE_INTERFACES=true`: their physical parents already exist, but their D13 virtual
+children are intentionally created from the sheet.
+
 Several deliberate faults in the *_invalid sheets depend on the corresponding *_valid sheet having
 been applied first: "exists but differs" and "overlaps an existing device" have nothing to collide
 with on an empty instance.
@@ -372,7 +376,7 @@ def device(
         management_ip4,
         management_ip6,
     )
-    return row + (note,) if note else row
+    return (*row, note) if note else row
 
 
 DEVICES_VALID = (
@@ -1090,28 +1094,28 @@ CABLING_INVALID = (
 
 
 # --------------------------------------------------------------------------------------
-# Sheet 3b — cabling, with a breakout cable (D10)
+# Sheet 3b — cabling, with virtual breakout children (D10 + D13)
 # --------------------------------------------------------------------------------------
-# A separate sheet rather than more rows on the one above, because a breakout needs the
-# `cable_group` column and the sample above exists partly to prove that a sheet *without* the D10
-# columns still behaves exactly as it did.
+# A separate sheet because these rows use both D10 grouping/profile and D13 parent/child mapping.
 #
-# The physical story: one 400G QSFP-DD cage on the leaf breaks out to four 100G ports. That is one
-# cable, so it is one `cable_group` and one `breakout-1c4p-4c1p` profile, written across four rows.
-# Row order is lane order: row 2 becomes connector 1, row 5 connector 4 (Requirement 9.21).
+# The physical story: physical cage swp3 breaks out to four panel ports. The cable terminates on
+# swp3, while swp3s0..swp3s3 are virtual children created under it. `cable_group` remains an opaque
+# harness tag; the `{device}:{interface}` value belongs in `a_parent` (D13).
 #
-# Note what the later rows leave blank. A cable has one type, one profile and one label, so they are
-# stated once on the group's first row and inherited (Requirement 9.18) — including `cable_type`,
-# which is a required *column* but only required of the cable.
+# Requires NETBOX_AUTOCREATE_INTERFACES=true because the children do not exist yet.
 
 BREAKOUT_COLUMNS = (
     "a_end",
     "a_end_kind",
     "a_port",
+    "a_parent",
+    "a_interface_type",
     "b_end",
     "b_end_kind",
     "b_port",
     "b_port_side",
+    "b_parent",
+    "b_interface_type",
     "cable_type",
     "cable_profile",
     "cable_group",
@@ -1122,7 +1126,7 @@ BREAKOUT_COLUMNS = (
 )
 
 
-def lane(a_port: str, b_port: str, group: str, *note: str) -> tuple[str, ...]:
+def lane(child: str, parent: str, b_port: str, group: str, *note: str) -> tuple[str, ...]:
     """A row of a breakout group after its first: only the far end differs.
 
     Every cable-level cell is blank, which is the point being demonstrated — the type, profile and
@@ -1131,11 +1135,15 @@ def lane(a_port: str, b_port: str, group: str, *note: str) -> tuple[str, ...]:
     return (
         "lab1-dh1-r01-leaf01",
         "device",
-        a_port,
+        child,
+        f"lab1-dh1-r01-leaf01:{parent}",
+        "",
         "lab1-dh1-r01-pp02",
         "panel",
         b_port,
         "front",
+        "",
+        "",
         "",
         "",
         group,
@@ -1151,22 +1159,26 @@ BREAKOUT_VALID = (
     (
         "lab1-dh1-r01-leaf01",
         "device",
-        "swp3",
+        "swp3s0",
+        "lab1-dh1-r01-leaf01:swp3",
+        "",
         "lab1-dh1-r01-pp02",
         "panel",
         "F5",
         "front",
+        "",
+        "",
         "mmf-om4",
         "breakout-1c4p-4c1p",
-        "leaf01-swp3",
+        "brk-01",
         "connected",
         "BRK-0001",
         "5",
         "m",
     ),
-    lane("swp3", "F6", "leaf01-swp3"),
-    lane("swp3", "F7", "leaf01-swp3"),
-    lane("swp3", "F8", "leaf01-swp3"),
+    lane("swp3s1", "swp3", "F6", "brk-01"),
+    lane("swp3s2", "swp3", "F7", "brk-01"),
+    lane("swp3s3", "swp3", "F8", "brk-01"),
 )
 
 BREAKOUT_INVALID = (
@@ -1174,52 +1186,50 @@ BREAKOUT_INVALID = (
     (
         "lab1-dh1-r01-leaf01",
         "device",
-        "swp4",
+        "swp4s0",
+        "lab1-dh1-r01-leaf01:swp4",
+        "",
         "lab1-dh1-r01-pp02",
         "panel",
         "F9",
         "front",
+        "",
+        "",
         "mmf-om4",
         "breakout-1c4p-4c1p",
-        "leaf01-swp4",
+        "brk-overflow",
         "connected",
         "BRK-0002",
         "5",
         "m",
         "first of five lanes on a four-connector profile: the group overflows",
     ),
-    lane("swp4", "F10", "leaf01-swp4", "lane two"),
-    lane("swp4", "F11", "leaf01-swp4", "lane three"),
-    lane("swp4", "F12", "leaf01-swp4", "lane four, the last one that fits"),
-    (
-        "lab1-dh1-r01-leaf01",
-        "device",
+    lane("swp4s1", "swp4", "F10", "brk-overflow", "lane two"),
+    lane("swp4s2", "swp4", "F11", "brk-overflow", "lane three"),
+    lane("swp4s3", "swp4", "F12", "brk-overflow", "lane four, the last one that fits"),
+    lane(
+        "swp4s4",
         "swp4",
-        "lab1-dh1-r01-pp02",
-        "panel",
         "F13",
-        "front",
-        "",
-        "",
-        "leaf01-swp4",
-        "",
-        "",
-        "",
-        "",
+        "brk-overflow",
         "the fifth lane, which PROFILE_CONNECTOR_OVERFLOW is reported against",
     ),
     # Two rows of one cable disagreeing about what the cable is (Requirement 9.18).
     (
         "lab1-dh1-r01-leaf01",
         "device",
-        "swp5",
+        "swp5s0",
+        "lab1-dh1-r01-leaf01:swp5",
+        "",
         "lab1-dh1-r01-pp02",
         "panel",
         "F14",
         "front",
+        "",
+        "",
         "mmf-om4",
         "breakout-1c2p-2c1p",
-        "leaf01-swp5",
+        "brk-conflict",
         "connected",
         "BRK-0003",
         "5",
@@ -1229,14 +1239,18 @@ BREAKOUT_INVALID = (
     (
         "lab1-dh1-r01-leaf01",
         "device",
-        "swp5",
+        "swp5s1",
+        "lab1-dh1-r01-leaf01:swp5",
+        "",
         "lab1-dh1-r01-pp02",
         "panel",
         "F15",
         "front",
+        "",
+        "",
         "smf-os2",
         "",
-        "leaf01-swp5",
+        "brk-conflict",
         "",
         "",
         "",
@@ -1248,14 +1262,18 @@ BREAKOUT_INVALID = (
     (
         "lab1-dh1-r01-leaf01",
         "device",
-        "swp6",
+        "swp6s0",
+        "lab1-dh1-r01-leaf01:swp6",
+        "",
         "lab1-dh1-r01-pp02",
         "panel",
         "F16",
         "front",
+        "",
+        "",
         "mmf-om4",
         "breakout-1c2p-2c1p",
-        "leaf01-swp6-a",
+        "brk-duplicate-a",
         "connected",
         "BRK-0004",
         "5",
@@ -1265,14 +1283,18 @@ BREAKOUT_INVALID = (
     (
         "lab1-dh1-r01-leaf01",
         "device",
-        "swp6",
+        "swp6s1",
+        "lab1-dh1-r01-leaf01:swp6",
+        "",
         "lab1-dh1-r01-pp02",
         "panel",
         "F17",
         "front",
+        "",
+        "",
         "mmf-om4",
         "breakout-1c2p-2c1p",
-        "leaf01-swp6-b",
+        "brk-duplicate-b",
         "connected",
         "BRK-0005",
         "5",
@@ -1283,7 +1305,136 @@ BREAKOUT_INVALID = (
 
 
 # --------------------------------------------------------------------------------------
-# Sheet 3c — cabling onto ports that do not exist yet (D12)
+# Sheet 3c — symmetric shuffle: virtual children on both ends (D13)
+# --------------------------------------------------------------------------------------
+# One harness spans two physical parents on the spine side and one parent on each of two leaves.
+# Every row is the human-readable child-to-child lane map; NetBox receives one cable whose
+# terminations are the four distinct physical parents.
+
+
+def shuffle_lane(
+    a_parent: str,
+    a_child: str,
+    b_end: str,
+    b_parent: str,
+    b_child: str,
+    *,
+    first: bool = False,
+    note: str = "",
+) -> tuple[str, ...]:
+    row_values = (
+        "lab1-dh1-r01-spine01",
+        "device",
+        a_child,
+        f"lab1-dh1-r01-spine01:{a_parent}",
+        "",
+        b_end,
+        "device",
+        b_child,
+        "",
+        f"{b_end}:{b_parent}",
+        "",
+        "mmf-om4" if first else "",
+        "breakout-2c4p-8c1p-shuffle" if first else "",
+        "shuffle-01",
+        "connected" if first else "",
+        "SHUF-0001" if first else "",
+        "10" if first else "",
+        "m" if first else "",
+    )
+    return row_values + ((note,) if note else ())
+
+
+SHUFFLE_VALID = (
+    shuffle_lane(
+        "swp1",
+        "swp1s0",
+        "lab1-dh1-r01-leaf01",
+        "swp9",
+        "swp9s0",
+        first=True,
+    ),
+    shuffle_lane(
+        "swp1",
+        "swp1s1",
+        "lab1-dh1-r02-leaf01",
+        "swp9",
+        "swp9s0",
+    ),
+    shuffle_lane(
+        "swp2",
+        "swp2s0",
+        "lab1-dh1-r01-leaf01",
+        "swp9",
+        "swp9s1",
+    ),
+    shuffle_lane(
+        "swp2",
+        "swp2s1",
+        "lab1-dh1-r02-leaf01",
+        "swp9",
+        "swp9s1",
+    ),
+)
+
+SHUFFLE_INVALID = (
+    shuffle_lane(
+        "swp1",
+        "swp1s0",
+        "lab1-dh1-r01-leaf01",
+        "swp9",
+        "swp9s0",
+        first=True,
+        note="this row is valid",
+    ),
+    # Explicit tuple so the malformed value is in the actual sample, not only its note.
+    (
+        "lab1-dh1-r01-spine01",
+        "device",
+        "swp1s1",
+        "not-a-parent",
+        "",
+        "lab1-dh1-r02-leaf01",
+        "device",
+        "swp9s0",
+        "",
+        "lab1-dh1-r02-leaf01:swp9",
+        "",
+        "",
+        "",
+        "shuffle-01",
+        "",
+        "",
+        "",
+        "",
+        "a_parent is malformed: expected {device}:{interface}",
+    ),
+    (
+        "lab1-dh1-r01-spine01",
+        "device",
+        "swp2s0",
+        "lab1-dh1-r01-leaf01:swp2",
+        "",
+        "lab1-dh1-r01-leaf01",
+        "device",
+        "swp9s1",
+        "",
+        "lab1-dh1-r01-leaf01:swp9",
+        "",
+        "",
+        "",
+        "shuffle-01",
+        "",
+        "",
+        "",
+        "",
+        "a_parent device disagrees with a_end: BREAKOUT_PARENT_MISMATCH after S2 is fixed",
+    ),
+)
+
+
+# --------------------------------------------------------------------------------------
+# Sheet 3d — cabling onto ports that do not exist yet (D12)
 # --------------------------------------------------------------------------------------
 # A third cabling sheet rather than rows on either of the first two, for the reason the breakout
 # pair records: these need the `*_interface_type` columns, and part of what the other samples are
@@ -1526,8 +1677,8 @@ SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...
         "3_cabling_breakout_valid",
         BREAKOUT_COLUMNS,
         BREAKOUT_VALID,
-        "needs sheets 1 and 2 applied; four rows describing one breakout cable, which validates "
-        "clean and applies as a single cable with four B-side terminations (D10)",
+        "needs sheets 1 and 2 plus NETBOX_AUTOCREATE_INTERFACES=true; four virtual children under "
+        "one physical parent, applied as children first and one parent-terminated cable (D13)",
     ),
     (
         "3_cabling_breakout_invalid",
@@ -1535,6 +1686,21 @@ SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...
         BREAKOUT_INVALID,
         "every group here is faulty: a fifth lane on a four-connector profile, two rows of one "
         "cable disagreeing, and one port claimed by two groups",
+    ),
+    (
+        "3_cabling_shuffle_valid",
+        BREAKOUT_COLUMNS,
+        SHUFFLE_VALID,
+        "needs sheets 1 and 2 plus NETBOX_AUTOCREATE_INTERFACES=true; four child-to-child "
+        "lane rows "
+        "across several parents become one parent-terminated shuffle cable (D13)",
+    ),
+    (
+        "3_cabling_shuffle_invalid",
+        BREAKOUT_COLUMNS,
+        SHUFFLE_INVALID,
+        "line 2 is valid; line 3 has malformed parent syntax (S2), and line 4 names a parent on "
+        "the wrong device (S3 after the S2 fault is fixed)",
     ),
     (
         "3_cabling_newports_valid",
@@ -1637,9 +1803,12 @@ def main() -> int:
     print("  2. apply 1_hierarchy   creates the sites, datahalls and racks")
     print("  3. apply 2_devices     creates devices, inheriting ports from step 1")
     print("  4. apply 3_cabling     cables those ports")
-    print("\nThe 3_cabling_newports pair only, and only if you want to see D12:")
+    print("\nTo see D12 interface creation:")
     print("  5. scripts/seed_netbox.py --late-templates --apply   (after step 3, not before)")
     print("  6. set NETBOX_AUTOCREATE_INTERFACES=true, then apply 3_cabling_newports")
+    print("\nTo see D13 parent/child breakout and shuffle maps:")
+    print("  5. set NETBOX_AUTOCREATE_INTERFACES=true")
+    print("  6. apply 3_cabling_breakout or 3_cabling_shuffle")
     return 0
 
 

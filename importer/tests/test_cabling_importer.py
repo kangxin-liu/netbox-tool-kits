@@ -1867,3 +1867,150 @@ class TestAPlannedInterfaceIsFree:
         ]
         plan = validate(importer, netbox, rows)
         assert any(i.code is Code.CABLE_GROUP_PARTLY_CABLED for i in plan.verdict.errors)
+
+
+# --- D13: virtual breakout children, physical-parent cables, and shuffle maps ---------------
+
+
+def parented_row(**overrides: str) -> dict[str, str]:
+    """A symmetric child-to-child lane whose cable terminates on the two physical parents."""
+    return row(
+        **{
+            "a_port": "swp1s0",
+            "a_parent": f"{LEAF}:swp1",
+            "b_end": SPINE,
+            "b_end_kind": "device",
+            "b_port": "swp1s0",
+            "b_parent": f"{SPINE}:swp1",
+            "cable_profile": "single-1c2p",
+            "cable_group": "shuffle-01",
+            **overrides,
+        }
+    )
+
+
+@pytest.fixture
+def shuffle_topology(netbox, topology):
+    spine = add_device(netbox, SPINE)
+    spine_parent = add_port(
+        netbox,
+        INTERFACES,
+        spine,
+        "swp1",
+        type={"value": "800gbase-x-osfp"},
+    )
+    return topology.interfaces["swp1"], spine_parent
+
+
+class TestBreakoutParents:
+    def test_a_parent_must_be_exactly_device_colon_interface(self, importer, netbox, topology):
+        plan = validate(importer, netbox, [row(a_parent="leaf-without-interface")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.BREAKOUT_PARENT_MALFORMED)
+        assert error.column == "a_parent"
+        assert "{device}:{interface}" in error.expected
+
+    def test_a_parent_device_must_match_the_end(self, importer, netbox, topology):
+        plan = validate(importer, netbox, [row(a_parent=f"{SPINE}:swp1")])
+        error = next(i for i in plan.verdict.errors if i.code is Code.BREAKOUT_PARENT_MISMATCH)
+        assert error.column == "a_parent"
+        assert LEAF in error.expected
+
+    def test_a_panel_end_cannot_declare_an_interface_parent(self, importer, netbox, topology):
+        plan = validate(importer, netbox, [row(b_parent=f"{PANEL}:MPO1")])
+        assert any(i.code is Code.BREAKOUT_PARENT_MISMATCH for i in plan.verdict.errors)
+
+    def test_with_autocreate_off_a_missing_child_blocks(self, importer, netbox, shuffle_topology):
+        plan = validate(importer, netbox, [parented_row()])
+        error = next(i for i in plan.verdict.errors if i.code is Code.PORT_NOT_FOUND)
+        assert error.column == "a_port"
+        assert "NETBOX_AUTOCREATE_INTERFACES" in error.message
+
+
+class TestBreakoutChildPlanning:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    def test_symmetric_lane_rows_create_virtual_children_but_cable_the_parents(
+        self, importer, netbox, shuffle_topology
+    ):
+        leaf_parent, spine_parent = shuffle_topology
+        rows = [
+            parented_row(),
+            parented_row(a_port="swp1s1", b_port="swp1s1"),
+        ]
+        plan = validate(importer, netbox, rows)
+        assert plan.verdict.errors == []
+
+        actions = [action for planned in plan.rows for action in planned.actions]
+        children = [action for action in actions if action.endpoint == INTERFACES]
+        assert len(children) == 4
+        assert {action.phase for action in children} == {"children"}
+        assert {action.payload["type"] for action in children} == {"virtual"}
+
+        cable = next(action for action in actions if action.endpoint == CABLES)
+        assert cable.payload["a_terminations"] == [
+            {"object_type": "dcim.interface", "object_id": leaf_parent["id"]}
+        ]
+        assert cable.payload["b_terminations"] == [
+            {"object_type": "dcim.interface", "object_id": spine_parent["id"]}
+        ]
+        assert "swp1s0" in plan.rows[0].resolved["lane_map"]
+        assert "child of swp1" in plan.rows[0].resolved["lane_map"]
+
+    def test_missing_parent_is_created_before_its_virtual_child(self, importer, netbox, topology):
+        values = row(
+            a_port="swp99s0",
+            a_parent=f"{LEAF}:swp99",
+            a_interface_type="400gbase-x-qsfpdd",
+        )
+        plan = validate(importer, netbox, [values])
+        assert plan.verdict.errors == []
+        plan.verdict.acknowledge()
+        report = apply_plan(importer, netbox, plan)
+        assert report.aborted is False
+        assert [post.endpoint for post in netbox.posts] == [INTERFACES, INTERFACES, CABLES]
+
+        created = {
+            record["name"]: record
+            for record in netbox.stored(INTERFACES)
+            if record.get("name") in {"swp99", "swp99s0"}
+        }
+        assert created["swp99"]["type"]["value"] == "400gbase-x-qsfpdd"
+        assert created["swp99s0"]["type"]["value"] == "virtual"
+        assert created["swp99s0"]["parent"]["id"] == created["swp99"]["id"]
+        assert netbox.stored(CABLES)[0]["a_terminations"][0]["object_id"] == created["swp99"]["id"]
+
+    def test_an_existing_child_with_the_wrong_parent_blocks(self, importer, netbox, topology):
+        wrong_parent = topology.interfaces["swp2"]
+        add_port(
+            netbox,
+            INTERFACES,
+            topology.leaf,
+            "swp1s0",
+            type={"value": "virtual"},
+            parent={"id": wrong_parent["id"], "name": wrong_parent["name"]},
+        )
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent=f"{LEAF}:swp1",
+                )
+            ],
+        )
+        assert any(i.code is Code.CHILD_INTERFACE_CONFLICT for i in plan.verdict.errors)
+
+    def test_one_child_cannot_be_assigned_to_two_parents(self, importer, netbox, topology):
+        rows = [
+            row(a_port="swp1s0", a_parent=f"{LEAF}:swp1", cable_group="g"),
+            row(
+                a_port="swp1s0",
+                a_parent=f"{LEAF}:swp2",
+                b_port="MPO2",
+                cable_group="g",
+            ),
+        ]
+        plan = validate(importer, netbox, rows)
+        conflict = next(i for i in plan.verdict.errors if i.code is Code.CHILD_PARENT_CONFLICT)
+        assert (conflict.line, conflict.related_line) == (3, 2)

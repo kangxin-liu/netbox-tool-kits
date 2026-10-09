@@ -46,12 +46,19 @@ otherwise (Requirements 9.25, 9.26). The template is tried first and that order 
 property, not a preference: it invents nothing, and a mistyped `swp1o` matches no template either,
 so it falls through to a branch that demands an explicit type rather than becoming a port quietly.
 
+**Breakout children (D13).** `a_parent` / `b_parent` decouple a row's lane from the physical cable
+termination. A value such as `spine01:swp1` makes `swp1` the cabled termination while the row's
+`swp1s0` port is an uncabled `virtual` child with `parent=swp1`. Both ends are symmetric, so one
+free-text `cable_group` can describe a shuffle with several physical parents per side. Distinct
+terminations, profile limits, duplicate checks, and occupancy all use parents; the preview retains
+the child-to-child lane map (Requirements 9.34–9.43).
+
 That costs this sheet the property it used to have. `endpoint_order` was one entry, so the whole
-file was a single transactional batch with no half-applied window at all; it is now interfaces then
-cables, and a cable batch that fails leaves the interfaces behind. The residue is benign — spare
-interfaces the device type would have given the device anyway — and re-uploading clears it, because
-they are then found rather than planned (Requirement 9.32). Panel ports are never created: a front
-port is defined by the rear port and position it maps to, and no column here says either (9.29).
+file was a single transactional batch with no half-applied window at all. D12 made it interfaces
+then cables; D13 may make it physical parents, virtual children, then cables. A later batch failure
+leaves earlier interfaces behind, and re-uploading clears the residue because they are then found
+rather than planned (Requirement 9.32). Panel ports are never created: a front port is defined by
+the rear port and position it maps to, and no column here says either (9.29).
 """
 
 import re
@@ -92,6 +99,11 @@ REAR = "rear"
 DEFAULT_END_KIND = DEVICE
 DEFAULT_PORT_SIDE = FRONT
 DEFAULT_STATUS = "connected"
+VIRTUAL = "virtual"
+
+INTERFACE_PHASE = "interfaces"
+CHILD_PHASE = "children"
+CABLE_PHASE = "cables"
 
 # (end kind, port side) → (NetBox object_type, the lookup cache's termination kind). A device end
 # maps to interfaces whichever side the sheet names, because `*_port_side` describes a panel's two
@@ -147,6 +159,7 @@ class PlannedInterface:
     type_value: str
     source: str
     payload: dict[str, Any]
+    phase: str = INTERFACE_PHASE
 
     @property
     def key(self) -> tuple[Any, ...]:
@@ -168,6 +181,9 @@ class End:
     port_side: str
     object_type: str
     termination_kind: str
+    parent_value: str = ""
+    parent_device: str = ""
+    parent_port: str = ""
     line: int = 0
     """The spreadsheet line this end was read from.
 
@@ -179,6 +195,12 @@ class End:
     termination: dict[str, Any] | None = None
     planned: PlannedInterface | None = None
     """Set instead of `termination` when this port does not exist yet and D12 will create it."""
+
+    child: dict[str, Any] | None = None
+    """Existing virtual child named by `port` when D13 declares a parent."""
+
+    planned_child: PlannedInterface | None = None
+    """Virtual child this run will create under the cable-terminating parent."""
 
     @property
     def label(self) -> str:
@@ -197,6 +219,19 @@ class End:
         return f"{self.side}_interface_type"
 
     @property
+    def parent_column(self) -> str:
+        return f"{self.side}_parent"
+
+    @property
+    def has_parent(self) -> bool:
+        return bool(self.parent_port)
+
+    @property
+    def cable_port(self) -> str:
+        """The interface the physical cable terminates on (Requirement 9.36)."""
+        return self.parent_port or self.port
+
+    @property
     def port_label(self) -> str:
         return PORT_LABELS[self.termination_kind]
 
@@ -208,11 +243,17 @@ class End:
         values: the port model the kind and side select, the device name, and the port name
         (Requirements 9.10, 9.11).
         """
-        return (self.object_type, fold(self.name), fold(self.port))
+        return (self.object_type, fold(self.name), fold(self.cable_port))
 
     @property
     def description(self) -> str:
-        return f"{self.port_label} {self.port!r} on {self.name!r}"
+        return f"{self.port_label} {self.cable_port!r} on {self.name!r}"
+
+    @property
+    def lane_description(self) -> str:
+        if not self.has_parent:
+            return self.description
+        return f"virtual child {self.port!r} under interface {self.parent_port!r} on {self.name!r}"
 
     @property
     def object_id(self) -> int | None:
@@ -241,6 +282,11 @@ def read_end(row: Row, side: str) -> End:
     kind = fold(row.get(f"{side}_end_kind")) or DEFAULT_END_KIND
     port_side = fold(row.get(f"{side}_port_side")) or DEFAULT_PORT_SIDE
     object_type, termination_kind = PORT_MODELS[(kind, port_side)]
+    parent_value = row.get(f"{side}_parent").strip()
+    parent_device = ""
+    parent_port = ""
+    if parent_value.count(":") == 1:
+        parent_device, parent_port = (part.strip() for part in parent_value.split(":", 1))
     return End(
         side=side,
         name=row.get(f"{side}_end").strip(),
@@ -249,6 +295,9 @@ def read_end(row: Row, side: str) -> End:
         port_side=port_side,
         object_type=object_type,
         termination_kind=termination_kind,
+        parent_value=parent_value,
+        parent_device=parent_device,
+        parent_port=parent_port,
         line=row.line,
     )
 
@@ -295,7 +344,7 @@ def _termination_key(end: End) -> tuple[str, Any]:
     """
     if end.termination is not None:
         return (end.object_type, int(end.termination["id"]))
-    return (end.object_type, f"new:{fold(end.name)}/{fold(end.port)}")
+    return (end.object_type, f"new:{fold(end.name)}/{fold(end.cable_port)}")
 
 
 def _termination(end: End) -> dict[str, Any]:
@@ -312,7 +361,7 @@ def _distinct(ends: Any) -> list[End]:
 
 def _cable_label(sides: dict[str, list[End]]) -> str:
     def names(ends: list[End]) -> str:
-        return " + ".join(f"{end.name}:{end.port}" for end in ends)
+        return " + ".join(f"{end.name}:{end.cable_port}" for end in ends)
 
     return f"{names(sides['a'])} ↔ {names(sides['b'])}"
 
@@ -329,6 +378,14 @@ class CablingImporter(BaseImporter):
     # (Requirement 9.32). With the flag off nothing is ever planned for the first endpoint and the
     # apply is the single batch it always was.
     endpoint_order = (INTERFACES, CABLES)
+    # D13 can create a physical parent and a virtual child on the same endpoint. The child payload
+    # needs the id returned for the parent, so they are two transactional interface batches before
+    # the cable batch. Rows without children still use the D12 two-batch path.
+    apply_phases = (
+        (INTERFACES, "post", INTERFACE_PHASE),
+        (INTERFACES, "post", CHILD_PHASE),
+        (CABLES, "post", CABLE_PHASE),
+    )
 
     choice_sources: ClassVar[dict[str, tuple[str, str]]] = {
         "cable_type": (CABLES, "type"),
@@ -356,6 +413,26 @@ class CablingImporter(BaseImporter):
     def extra_cell_checks(self, row: Row, lookups: Lookups) -> list[RowError]:
         errors: list[RowError] = []
         specs = self.specs()
+
+        for side in SIDES:
+            column = f"{side}_parent"
+            value = row.get(column).strip()
+            if not value:
+                continue
+            parts = [part.strip() for part in value.split(":")]
+            if len(parts) != 2 or not all(parts):
+                errors.append(
+                    RowError(
+                        Code.BREAKOUT_PARENT_MALFORMED,
+                        column=column,
+                        value=value,
+                        expected="{device}:{interface}, for example spine01:swp1",
+                        message=(
+                            f"{column} {value!r} is not a breakout parent. Use exactly "
+                            f"{{device}}:{{interface}} with both names present."
+                        ),
+                    )
+                )
 
         # Requirement 9.14: cable profiles arrived in NetBox 4.5 and the supported range starts at
         # 4.6, so an instance reporting no profile choices means the field has gone rather than not
@@ -465,11 +542,64 @@ class CablingImporter(BaseImporter):
 
     def check_consistency(self, rows: list[Row], collector: IssueCollector) -> None:
         seen: dict[tuple[str, str, str], tuple[int, str, Any]] = {}
+        child_parents: dict[tuple[str, str], tuple[int, str]] = {}
 
         for row in rows:
             ends = self._ends(row)
             a_end, b_end = ends
             group = self.group_key(row)
+
+            for end in ends:
+                if not end.has_parent:
+                    continue
+                if end.kind != DEVICE:
+                    collector.add(
+                        Severity.ERROR,
+                        Code.BREAKOUT_PARENT_MISMATCH,
+                        line=row.line,
+                        column=end.parent_column,
+                        value=end.parent_value,
+                        expected="a parent only on a device end",
+                        message=(
+                            f"{end.parent_column} declares interface {end.parent_port!r}, but "
+                            f"{end.end_column} is a panel. Breakout parents are device interfaces."
+                        ),
+                    )
+                    continue
+                if fold(end.parent_device) != fold(end.name):
+                    collector.add(
+                        Severity.ERROR,
+                        Code.BREAKOUT_PARENT_MISMATCH,
+                        line=row.line,
+                        column=end.parent_column,
+                        value=end.parent_value,
+                        expected=f"{end.name}:{end.parent_port}",
+                        message=(
+                            f"{end.parent_column} names device {end.parent_device!r}, but "
+                            f"{end.end_column} names {end.name!r}. A child and its parent must be "
+                            f"on the same device."
+                        ),
+                    )
+
+                child_key = (fold(end.name), fold(end.port))
+                earlier_parent = child_parents.get(child_key)
+                if earlier_parent is None:
+                    child_parents[child_key] = (row.line, end.parent_port)
+                elif fold(earlier_parent[1]) != fold(end.parent_port):
+                    collector.add(
+                        Severity.ERROR,
+                        Code.CHILD_PARENT_CONFLICT,
+                        line=row.line,
+                        column=end.parent_column,
+                        value=end.parent_value,
+                        expected=f"{end.name}:{earlier_parent[1]}",
+                        message=(
+                            f"Line {row.line} places child {end.name}:{end.port} under "
+                            f"{end.parent_port!r}, while line {earlier_parent[0]} places it under "
+                            f"{earlier_parent[1]!r}. One child interface has one parent."
+                        ),
+                        related_line=earlier_parent[0],
+                    )
 
             # Requirement 9.10: a cable between a port and itself is not a cable. Still true inside
             # a group — a lane that starts and ends on the same port is not a lane (9.17).
@@ -534,7 +664,8 @@ class CablingImporter(BaseImporter):
                 value = row.get(end.type_column).strip()
                 if not value:
                     continue
-                key = (fold(end.name), fold(end.port))
+                # D13's type cell describes the physical parent, not the fixed-type virtual child.
+                key = (fold(end.name), fold(end.cable_port))
                 earlier = seen.get(key)
                 if earlier is None:
                     seen[key] = (row.line, value)
@@ -744,18 +875,25 @@ class CablingImporter(BaseImporter):
         if occupancy.blocks:
             self._report_partly_cabled(rows, planned, occupancy, collector)
             return planned
+        interface_actions = self._interface_actions(resolved)
         if occupancy.taken:
             self._report_already_cabled(planned, occupancy, lookups, collector)
+            if interface_actions:
+                # The physical cable already exists, but D13 may still need to materialise the
+                # virtual lane inventory. The cable is skipped; only the missing interfaces apply.
+                planned[0].actions.extend(interface_actions)
+                for row_plan in planned:
+                    row_plan.outcome = RowOutcome.CREATE
             return planned
 
-        planned[0].actions.extend(self._interface_actions(sides))
+        planned[0].actions.extend(interface_actions)
         planned[0].actions.append(self._cable(rows, sides))
         for row_plan in planned:
             row_plan.outcome = RowOutcome.CREATE
         return planned
 
     @staticmethod
-    def _interface_actions(sides: dict[str, list[End]]) -> list[CreateAction]:
+    def _interface_actions(resolved: list[tuple[End, End]]) -> list[CreateAction]:
         """The interfaces this cable needs that do not exist yet (Requirement 9.25).
 
         Two groups naming one missing interface each carry an action for it and apply writes it
@@ -763,19 +901,27 @@ class CablingImporter(BaseImporter):
         `_dedupe` keys on the registry key, and `object_count` counts distinct keys.
         """
         actions: list[CreateAction] = []
-        for end in sides["a"] + sides["b"]:
-            if end.planned is None:
-                continue
-            actions.append(
-                CreateAction(
-                    endpoint=INTERFACES,
-                    payload=dict(end.planned.payload),
-                    key=end.planned.key,
-                    label=end.planned.label,
-                    line=end.line,
-                    object_kind="interface",
-                )
-            )
+        seen: set[tuple[str, tuple[Any, ...]]] = set()
+        for ends in resolved:
+            for end in ends:
+                for interface in (end.planned, end.planned_child):
+                    if interface is None:
+                        continue
+                    identity = (interface.phase, interface.key)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    actions.append(
+                        CreateAction(
+                            endpoint=INTERFACES,
+                            payload=dict(interface.payload),
+                            key=interface.key,
+                            label=interface.label,
+                            line=end.line,
+                            object_kind="interface",
+                            phase=interface.phase,
+                        )
+                    )
         return actions
 
     @staticmethod
@@ -806,6 +952,15 @@ class CablingImporter(BaseImporter):
             ]
             if parts:
                 row_plan.resolved["connector"] = ", ".join(parts)
+            if any(end.has_parent for end in ends):
+                row_plan.resolved["lane_map"] = " ↔ ".join(
+                    (
+                        f"{end.name}:{end.port} (child of {end.cable_port})"
+                        if end.has_parent
+                        else f"{end.name}:{end.port}"
+                    )
+                    for end in ends
+                )
 
     # --- one end at a time ------------------------------------------------------------------
 
@@ -859,6 +1014,16 @@ class CablingImporter(BaseImporter):
         device_name = str(device.get("name") or end.name)
 
         ports = lookups.terminations_for(int(device["id"]), end.termination_kind)
+        if end.has_parent:
+            if not self._resolve_parented(end, row, device, device_name, ports, lookups, collector):
+                planned.outcome = RowOutcome.BLOCKED
+                return end
+            planned.resolved[end.end_column] = f"{device_name} (existing)"
+            planned.resolved[end.parent_column] = self._describe_parent(end)
+            planned.resolved[end.port_column] = self._describe_child(end)
+            self._register(state, registry, end, lookups)
+            return end
+
         termination = ports.get(fold(end.port))
         if termination is not None:
             end.termination = termination
@@ -880,6 +1045,139 @@ class CablingImporter(BaseImporter):
                 f"type {end.planned.type_value} from {end.planned.source})"
             )
         return f"{end.termination.get('name')} ({end.port_label}, existing)"
+
+    def _describe_parent(self, end: End) -> str:
+        if end.planned is not None:
+            return (
+                f"{end.name}:{end.parent_port} (physical interface, will be created — "
+                f"type {end.planned.type_value} from {end.planned.source})"
+            )
+        return f"{end.name}:{end.termination.get('name')} (physical interface, existing)"
+
+    @staticmethod
+    def _describe_child(end: End) -> str:
+        if end.planned_child is not None:
+            return f"{end.port} (virtual child of {end.parent_port}, will be created)"
+        return f"{end.child.get('name')} (virtual child of {end.parent_port}, existing)"
+
+    def _resolve_parented(
+        self,
+        end: End,
+        row: Row,
+        device: dict[str, Any],
+        device_name: str,
+        ports: dict[str, dict[str, Any]],
+        lookups: Lookups,
+        collector: IssueCollector,
+    ) -> bool:
+        """Resolve/create a physical parent and its uncabled virtual child (D13)."""
+        parent = ports.get(fold(end.parent_port))
+        if parent is not None:
+            end.termination = parent
+            self._note_type_ignored(end, row, device_name, collector)
+        elif not self._plan_interface(
+            end,
+            row,
+            device,
+            device_name,
+            lookups,
+            collector,
+            target_name=end.parent_port,
+            target_column=end.parent_column,
+        ):
+            return False
+
+        child = ports.get(fold(end.port))
+        if child is not None:
+            expected_parent = end.object_id
+            actual_parent = related_id(child.get("parent"))
+            child_type = choice_value(child.get("type"))
+            conflicts: list[str] = []
+            if expected_parent is not None and actual_parent != expected_parent:
+                conflicts.append(
+                    f"parent id {actual_parent or 'none'} instead of {expected_parent}"
+                )
+            if fold(child_type) != VIRTUAL:
+                conflicts.append(f"type {child_type or '(blank)'} instead of virtual")
+            if conflicts:
+                collector.add(
+                    Severity.ERROR,
+                    Code.CHILD_INTERFACE_CONFLICT,
+                    line=row.line,
+                    column=end.port_column,
+                    value=end.port,
+                    expected=f"a virtual child of {device_name}:{end.parent_port}",
+                    message=(
+                        f"{end.lane_description} already exists with "
+                        f"{' and '.join(conflicts)}. This importer never reparents or re-types an "
+                        f"existing interface; correct it in NetBox first."
+                    ),
+                    related_object=f"Device {device_name}",
+                    related_url=self._url(lookups, DEVICES, device),
+                )
+                return False
+            end.child = child
+            return True
+
+        if not settings.NETBOX_AUTOCREATE_INTERFACES:
+            collector.add(
+                Severity.ERROR,
+                Code.PORT_NOT_FOUND,
+                line=row.line,
+                column=end.port_column,
+                value=end.port,
+                expected=f"a virtual child of {device_name}:{end.parent_port}",
+                message=(
+                    f"{end.lane_description} does not exist. Set "
+                    f"NETBOX_AUTOCREATE_INTERFACES=true to create breakout children, or add it "
+                    f"in NetBox first."
+                ),
+                related_object=f"Device {device_name}",
+                related_url=self._url(lookups, DEVICES, device),
+            )
+            return False
+
+        device_id = int(device["id"])
+        already = self._planned.get((device_id, fold(end.port)))
+        if already is not None:
+            end.planned_child = already
+            return True
+
+        parent_value: int | Ref
+        if end.planned is not None:
+            parent_value = Ref(INTERFACES, end.planned.key)
+        else:
+            parent_value = int(end.termination["id"])
+        child_plan = PlannedInterface(
+            device_id=device_id,
+            device_name=device_name,
+            name=end.port,
+            type_value=VIRTUAL,
+            source=f"parent mapping {end.parent_value}",
+            payload={
+                "device": device_id,
+                "name": end.port,
+                "type": VIRTUAL,
+                "parent": parent_value,
+            },
+            phase=CHILD_PHASE,
+        )
+        self._planned[(device_id, fold(end.port))] = child_plan
+        end.planned_child = child_plan
+        collector.add(
+            Severity.WARNING,
+            Code.INTERFACE_WILL_BE_CREATED,
+            line=row.line,
+            column=end.port_column,
+            value=end.port,
+            expected="an existing virtual child, or consent to creating this one",
+            message=(
+                f"{end.lane_description} does not exist and will be created as a {VIRTUAL!r} "
+                f"interface. Check the child and parent spelling before applying."
+            ),
+            related_object=f"Device {device_name}",
+        )
+        return True
 
     def _note_type_ignored(
         self,
@@ -926,37 +1224,59 @@ class CablingImporter(BaseImporter):
         device_name: str,
         lookups: Lookups,
         collector: IssueCollector,
+        *,
+        target_name: str | None = None,
+        target_column: str | None = None,
     ) -> bool:
         """Resolve a port that does not exist into one this run will create, or refuse the row.
 
         Returns True when the end now has a planned interface on it. The order of the two sources
         is the safety property of D12 and not a preference — see the module docstring.
         """
+        name_in_sheet = target_name or end.port
+        issue_column = target_column or end.port_column
         if not settings.NETBOX_AUTOCREATE_INTERFACES or end.kind == PANEL:
-            self._report_port_not_found(end, row, device, device_name, lookups, collector)
+            self._report_port_not_found(
+                end,
+                row,
+                device,
+                device_name,
+                lookups,
+                collector,
+                target_name=name_in_sheet,
+                target_column=issue_column,
+            )
             return False
 
         device_id = int(device["id"])
-        already = self._planned.get((device_id, fold(end.port)))
+        already = self._planned.get((device_id, fold(name_in_sheet)))
         if already is not None:
             # Requirement 9.30: however many rows or groups name it, it is one interface, created
             # once and warned about once.
             end.planned = already
             return True
 
-        template = self._templates.get((related_id(device.get("device_type")) or 0, fold(end.port)))
+        template = self._templates.get(
+            (related_id(device.get("device_type")) or 0, fold(name_in_sheet))
+        )
         if template is not None:
             payload = self._payload_from_template(template)
             source, type_value = FROM_TEMPLATE, choice_value(template.get("type"))
-            name = str(template.get("name") or end.port)
+            name = str(template.get("name") or name_in_sheet)
         else:
             stated = row.get(end.type_column).strip()
             if not stated:
-                self._report_type_required(end, row, device_name, collector)
+                self._report_type_required(
+                    end,
+                    row,
+                    device_name,
+                    collector,
+                    target_name=name_in_sheet,
+                )
                 return False
-            payload = {"name": end.port, "type": fold(stated)}
+            payload = {"name": name_in_sheet, "type": fold(stated)}
             source, type_value = FROM_SHEET, fold(stated)
-            name = end.port
+            name = name_in_sheet
 
         interface = PlannedInterface(
             device_id=device_id,
@@ -966,7 +1286,7 @@ class CablingImporter(BaseImporter):
             source=source,
             payload={**payload, "device": device_id, "name": name},
         )
-        self._planned[(device_id, fold(end.port))] = interface
+        self._planned[(device_id, fold(name_in_sheet))] = interface
         end.planned = interface
 
         # Requirement 9.28: a mistyped port name and a genuinely new one are identical from here,
@@ -975,11 +1295,12 @@ class CablingImporter(BaseImporter):
             Severity.WARNING,
             Code.INTERFACE_WILL_BE_CREATED,
             line=row.line,
-            column=end.port_column,
-            value=end.port,
+            column=issue_column,
+            value=name_in_sheet,
             expected="an interface that already exists, or consent to creating this one",
             message=(
-                f"{end.description} does not exist and will be created as a {type_value!r} "
+                f"Interface {name_in_sheet!r} on {device_name!r} does not exist and will be "
+                f"created as a {type_value!r} "
                 f"interface, with the type taken from {source}. Check the spelling before "
                 f"applying: a mistyped port name looks exactly like a new one from here."
             ),
@@ -1011,19 +1332,22 @@ class CablingImporter(BaseImporter):
         row: Row,
         device_name: str,
         collector: IssueCollector,
+        *,
+        target_name: str | None = None,
     ) -> None:
         """Requirement 9.26: both remedies, because either one is a reasonable thing to do."""
+        name = target_name or end.port
         collector.add(
             Severity.ERROR,
             Code.INTERFACE_TYPE_REQUIRED,
             line=row.line,
             column=end.type_column,
             value="(blank)",
-            expected=f"an interface type for {end.port!r}",
+            expected=f"an interface type for {name!r}",
             message=(
-                f"The {end.label} port {end.port!r} is not an interface on {device_name!r}, and "
+                f"The {end.label} port {name!r} is not an interface on {device_name!r}, and "
                 f"that device's type does not define one by that name either — so there is "
-                f"nothing to copy a type from. Either add {end.port!r} to the device type as an "
+                f"nothing to copy a type from. Either add {name!r} to the device type as an "
                 f"interface template, which fixes every device of that type at once, or fill in "
                 f"{end.type_column} on this row. The type is never defaulted."
             ),
@@ -1038,6 +1362,9 @@ class CablingImporter(BaseImporter):
         device_name: str,
         lookups: Lookups,
         collector: IssueCollector,
+        *,
+        target_name: str | None = None,
+        target_column: str | None = None,
     ) -> None:
         # Requirement 9.5: say which side and which port name, because a panel row has four
         # port columns and "not found" alone does not point at one of them.
@@ -1050,16 +1377,17 @@ class CablingImporter(BaseImporter):
             )
         else:
             hint = ""
+        name = target_name or end.port
+        column = target_column or end.port_column
         collector.add(
             Severity.ERROR,
             Code.PORT_NOT_FOUND,
             line=row.line,
-            column=end.port_column,
-            value=end.port,
+            column=column,
+            value=name,
             expected=f"the name of an existing {end.port_label} on {device_name!r}",
             message=(
-                f"The {end.label} port {end.port!r} is not a {end.port_label} on "
-                f"{device_name!r}.{hint}"
+                f"The {end.label} port {name!r} is not a {end.port_label} on {device_name!r}.{hint}"
             ),
             related_object=f"Device {device_name}",
             related_url=self._url(lookups, DEVICES, device),
@@ -1087,9 +1415,14 @@ class CablingImporter(BaseImporter):
             # the run rather than be posted as a duplicate name. One key per port either way, so
             # the two validations compare like with like and the difference reads as a change of
             # value — `absent → id=...` — rather than as a key nobody can interpret.
-            state[f"{INTERFACES}:{fold(end.name)}/{fold(end.port)}"] = (
+            state[f"{INTERFACES}:{fold(end.name)}/{fold(end.cable_port)}"] = (
                 "absent" if end.planned is not None else f"id={end.object_id}"
             )
+            if end.has_parent:
+                child_id = int(end.child["id"]) if end.child is not None else None
+                state[f"{INTERFACES}:{fold(end.name)}/{fold(end.port)}"] = (
+                    "absent" if end.planned_child is not None else f"id={child_id}"
+                )
 
         if end.planned is not None:
             return
@@ -1135,8 +1468,8 @@ class CablingImporter(BaseImporter):
                 Severity.INFO,
                 Code.PORT_ALREADY_CABLED,
                 line=end.line,
-                column=end.port_column,
-                value=end.port,
+                column=end.parent_column if end.has_parent else end.port_column,
+                value=end.parent_value if end.has_parent else end.port,
                 expected="a termination with no cable on it",
                 message=(
                     f"The {end.label}, {end.description}, already carries {held}. "
@@ -1228,6 +1561,7 @@ class CablingImporter(BaseImporter):
             line=lines[0],
             lines=lines,
             object_kind="cable",
+            phase=CABLE_PHASE,
         )
 
     @staticmethod

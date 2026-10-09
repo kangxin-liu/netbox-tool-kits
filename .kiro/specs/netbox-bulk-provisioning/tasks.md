@@ -11,7 +11,10 @@ every other field in this spec was pinned down. **Phase 9 is the next addition**
 management addresses on the device sheet, decision D11 — gated the same way; task 27a is the
 read-only probe. **Phase 10 follows it** — creating a device interface the cabling sheet names,
 decision D12 — gated the same way, with task 31a as its probe. Phase 10 depends on phase 9 only for
-Requirement 8.23, which D12 amends; the cabling work itself is independent of it.
+Requirement 8.23, which D12 amends; the cabling work itself is independent of it. **Phase 11 extends
+phase 10** — breakout child sub-interfaces and shuffle harnesses, decision D13 — gated the same way,
+with task 35a as its probe. It reuses D12's flag, `endpoint_order`, and id hand-off, so it depends on
+phase 10 and adds no new mechanism to `BaseImporter`.
 
 ## Phase 1 — Scaffold and configuration
 
@@ -77,6 +80,8 @@ Requirement 8.23, which D12 amends; the cabling work itself is independent of it
   - **Extended by task 18a (D9):** the hierarchy sheet gains `datacenter_slug` and `datahall_slug`
   - **To be extended by tasks 24–25 (D10, proposed):** the cabling sheet gains `cable_profile` and
     `cable_group`
+  - **To be extended by task 35b (D13, proposed):** the cabling sheet gains `a_parent` / `b_parent`,
+    `{device}:{interface}`, which turn `*_port` into a `virtual` child of the named cage
   - Tests: required and optional columns match the requirements tables; the D8 split matches the
     design table exactly; every column carries a `Conflict` and help text; no example value looks
     like production data; `transceiver` is absent (D3) and `rack_type` is not a column name
@@ -945,6 +950,85 @@ Run it before this phase is called done, and amend 9.25's field list if reality 
     template-backed path has something to demonstrate against
   - `.env.example` gains `NETBOX_AUTOCREATE_INTERFACES` with the default and a one-line warning
   - _Requirements: 9.24–9.33, 17.6_
+
+## Phase 11 — Breakout child sub-interfaces and shuffle harnesses (D13)
+
+D13 is accepted: the cable terminates on physical parents (9.36), and the explicit device half of
+`{device}:{interface}` stays as a cross-check against `*_end` (9.35).
+
+The regression guard of phase 10 extends here: a sheet with `a_parent` / `b_parent` left blank behaves
+exactly as D10/D12 leave it, and with `NETBOX_AUTOCREATE_INTERFACES` off a child or cage that must be
+created but does not exist is still blocked. Nothing a sheet does today changes because this phase
+landed.
+
+**Status.** 35b–35d are built and tested. 35a is not yet run because it needs write access to a
+disposable NetBox 4.6.8; the unverified assumptions are isolated to the parent/type payload and are
+cheap to correct if that probe disagrees.
+
+- [ ] 35a. Probe `virtual` child interfaces and cage occupancy against 4.6.8
+  - Read-only first: confirm `virtual` is a reported `type` choice on `/api/dcim/interfaces/` and that
+    `parent` is a writable field accepting an interface id
+  - Then, on a throwaway device: bulk-POST a physical cage plus two `virtual` children with `parent`
+    set to the cage, read them back, and confirm the children report the cage as parent. Follow
+    `scripts/probe_cable_profiles.py` / `probe_interface_creation.py`: create, measure, delete,
+    leave nothing behind
+  - Confirm the property 9.36 leans on: a `virtual` child is **rejected** as a cable termination, so
+    the convention "cable the cage, not the lane" is enforced by NetBox and not only by the tool
+  - Confirm a cable on the cage reports the cage occupied in the way D10's occupancy check reads
+    (`lookups.occupied`), while the children stay free — the case a shuffle re-upload depends on
+  - Record the answers in `design.md`; if `virtual` + `parent` or the termination refusal disagrees,
+    D13's field-level claims (9.36) need amending before the rest of the phase proceeds
+  - A new `scripts/probe_child_interfaces.py`, beside the other two
+  - _Requirements: 9.36, 9.40, D7_
+
+- [x] 35b. The two columns — **done**
+  - Two `ColumnSpec`s in `CABLING_COLUMNS`: `a_parent` / `b_parent`, optional, `{device}:{interface}`
+    free-text with a format check in S2 (exactly one colon, both halves non-blank), blank examples so
+    the template's example row stays the common case
+  - No `choice_sources` entry — the value is this tool's own `{device}:{interface}` vocabulary, like
+    `cable_group`, validated against `columns.py` rather than against NetBox
+  - Help text: naming a parent turns `*_port` into a `virtual` child of it, the cable lands on the
+    parent, and `*_interface_type` then types the parent
+  - The generated template and `scripts/make_sample_sheets.py` emit the new columns in the order the
+    header row already uses in `netbox-cabling-template.xlsx`
+  - Tests: the column parses; a malformed cell (`spineA`, `spineA:`, `:swp1`, `a:b:c`) is rejected; a
+    `{device}` half disagreeing with `a_end` is rejected (9.35); a blank cell leaves the row behaving
+    as it does today
+  - _Requirements: 9.34, 9.35, 4.3_
+
+- [x] 35c. Parent / child resolution and planning — **done**
+  - `read_end` / `_resolve` gain a parent branch: when `*_parent` is set, resolve the cage (existing,
+    or planned via D12's template-first/column-fallback, 9.40), then plan the `*_port` as a `virtual`
+    child with `parent` = the cage's id or `Ref`, and set the end's termination to the **cage**, not
+    the child (9.36)
+  - `*_interface_type` types the cage on this branch, not the child (9.37); the child payload is
+    `{name, type: virtual, parent}`
+  - Distinct-termination computation (`_distinct`, `_termination_key`) keys on the cage for a
+    parented end, so a shuffle's several rows dedupe to the distinct cages per side (9.38) and the
+    profile connector check (9.19) measures against them
+  - S3 additions: two rows placing a same-named child under different cages is a new conflict code;
+    two rows typing the same cage differently reuses `INTERFACE_TYPE_CONFLICT` (9.39)
+  - Child creation is one action per child per run (9.39 ≡ 9.30 for children); the cage one action per
+    cage; both gated by the flag (9.40)
+  - New code: `CHILD_PARENT_CONFLICT`; the acknowledgement warning of 9.28 extended to name the cage,
+    the child, and that the child is `virtual` (9.42)
+  - Preview: found-vs-will-be-created for cage and child (9.43), plus the per-row child↔child lane
+    pairing even though the cable terminates on the cages
+  - Tests: the non-shuffle two-row example from `design.md`; the four-row shuffle example resolving to
+    distinct cages per side with the right profile shape; a child-under-two-cages conflict; the cable
+    terminating on the cage and the children uncabled; occupancy judged on cages (9.41)
+  - _Requirements: 9.36–9.43, 10.9, 16.4_
+
+- [x] 35d. Documentation and samples for breakout children — **done**
+  - `docs/operator-runbook.md`: when to use `*_parent`, that the cable lands on the cage and the lane
+    is a `virtual` child, and that a shuffle is one `cable_group` with child rows on both ends
+  - `samples/`: the breakout pair now demonstrates one-sided virtual children, and a new
+    `3_cabling_shuffle` valid/invalid pair demonstrates symmetric parents, malformed syntax, and a
+    `{device}` mismatch. Existing seeded switches already have the physical cages and no children,
+    which is exactly the state this path needs
+  - Regenerate `netbox-cabling-template.xlsx` from the updated column contract so the shipped template
+    matches the spec
+  - _Requirements: 9.34–9.43, 17.6_
 
 ## Deferred to iteration 2 (do not build now)
 

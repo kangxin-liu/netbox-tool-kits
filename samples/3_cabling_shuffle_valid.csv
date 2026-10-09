@@ -1,0 +1,5 @@
+a_end,a_end_kind,a_port,a_parent,a_interface_type,b_end,b_end_kind,b_port,b_port_side,b_parent,b_interface_type,cable_type,cable_profile,cable_group,cable_status,label,length,length_unit
+lab1-dh1-r01-spine01,device,swp1s0,lab1-dh1-r01-spine01:swp1,,lab1-dh1-r01-leaf01,device,swp9s0,,lab1-dh1-r01-leaf01:swp9,,mmf-om4,breakout-2c4p-8c1p-shuffle,shuffle-01,connected,SHUF-0001,10,m
+lab1-dh1-r01-spine01,device,swp1s1,lab1-dh1-r01-spine01:swp1,,lab1-dh1-r02-leaf01,device,swp9s0,,lab1-dh1-r02-leaf01:swp9,,,,shuffle-01,,,,
+lab1-dh1-r01-spine01,device,swp2s0,lab1-dh1-r01-spine01:swp2,,lab1-dh1-r01-leaf01,device,swp9s1,,lab1-dh1-r01-leaf01:swp9,,,,shuffle-01,,,,
+lab1-dh1-r01-spine01,device,swp2s1,lab1-dh1-r01-spine01:swp2,,lab1-dh1-r02-leaf01,device,swp9s1,,lab1-dh1-r02-leaf01:swp9,,,,shuffle-01,,,,

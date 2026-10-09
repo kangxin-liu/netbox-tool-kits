@@ -393,7 +393,8 @@ terminations, so that connectivity is recorded without tracing each link by hand
 
 Sheet columns — required: `a_end`, `a_port`, `b_end`, `b_port`, `cable_type`. Optional:
 `a_end_kind`, `b_end_kind`, `a_port_side`, `b_port_side`, `cable_profile`, `cable_group`,
-`a_interface_type`, `b_interface_type`, `cable_status`, `label`, `length`, `length_unit`, `color`.
+`a_parent`, `b_parent`, `a_interface_type`, `b_interface_type`, `cable_status`, `label`, `length`,
+`length_unit`, `color`.
 
 `a_end_kind` and `b_end_kind` are optional because 9.1 gives them a default. An earlier draft listed
 them as required, which contradicted that default: a required column's blank cell is rejected before
@@ -416,6 +417,22 @@ device the tool created from a prepared device type and false in the two cases o
 a device created before its type defined the port, and a port the type does not define at all. Both
 appear as `PORT_NOT_FOUND` today, and both are fixed in NetBox by hand before the sheet can be used.
 The two columns supply the one fact a create needs and a cabling sheet does not otherwise carry.
+
+`a_parent` and `b_parent` are decision **D13** — breakout *child sub-interfaces* and the shuffle
+harnesses they make writable. D10 settled on cabling the physical cage (`swp1`) and letting the
+profile express the fanout, and deliberately left the OS-level breakout children (`swp1s0`, `swp1s1`)
+as device-type preparation the tool would not touch (design.md, "Which interface is the A end"). D13
+completes that convention rather than reversing it: the cable still terminates on the physical parent,
+but the tool now *creates* the children, as `virtual` interfaces whose `parent` is that cage, so a
+port that is fully consumed no longer reads as free and nobody is tempted to cable a lane twice. The
+new fact a child needs — which physical port it hangs off — is what `a_parent` / `b_parent` carry, in
+the form `{device}:{interface}`. Crucially this is a *separate* fact from `cable_group`: a first draft
+overloaded `cable_group` itself to `{device}:{interface}`, but one tag can name only one parent, and a
+**shuffle** — where `swp1`'s lanes fan out to children on several devices whose own ports are children
+of parents fanning out elsewhere — has several parents on each side of one harness. Decoupling the two
+(grouping stays the free-text tag of 9.15; the parent moves to its own columns) is what lets a shuffle
+be one `cable_group` with child rows on both ends. Both columns are optional, and a sheet that leaves
+them blank behaves exactly as D10/D12 describe.
 
 1. The system SHALL accept `a_end_kind` and `b_end_kind` as `device` or `panel`, defaulting to
  `device` when blank, and SHALL use the value to decide how the port name is resolved.
@@ -563,6 +580,62 @@ row that names it.
 33. The plan preview SHALL distinguish a port that was found from one that will be created, naming the
  type and its source for the latter, and the run report SHALL record each created interface as an
  object of its own, so what the report counts matches what was written (Requirements 10.18, 12.1).
+
+Criteria 9.34–9.43 are decision **D13** — breakout child sub-interfaces and shuffle harnesses.
+
+34. The system SHALL accept optional `a_parent` and `b_parent` columns, each either blank or of the
+ form `{device}:{interface}`. WHEN the cell is blank, that end SHALL behave exactly as Criteria
+ 9.1–9.33 describe — an ordinary device or panel port — so every sheet written before this column
+ existed is unchanged, and the common single-port cable is untouched.
+35. WHERE `a_parent` / `b_parent` is non-blank, the system SHALL validate its shape as exactly one
+ `{device}:{interface}` pair and SHALL reject a cell that is not. The `{device}` part SHALL name the
+ same device as that end's `a_end` / `b_end`; IF it names a different device, THEN the system SHALL
+ reject the row naming both, because a child cannot hang off a parent on another device. The
+ `{interface}` part names the physical **parent** interface, and the end's `*_port` cell SHALL be read
+ as the name of a **child sub-interface** of that parent rather than as an independent port.
+36. WHERE an end declares a parent, the breakout **cable SHALL terminate on the parent physical
+ interface**, never on the child. The child SHALL be created as a `dcim.Interface` of `type = virtual`
+ with `parent` set to the resolved parent interface, and SHALL NOT itself be cabled — a virtual
+ interface is not cable-capable, which is the property that stops a lane being cabled twice. This is
+ D10's "cable the cage, let the profile express the fanout" convention, now finished by creating the
+ children D10 left as preparation.
+37. WHERE an end declares a parent, `a_interface_type` / `b_interface_type` SHALL type the **parent**
+ physical interface (used only when the parent must be created, 9.40), NOT the child — the child's type
+ is always `virtual` (9.36). WHERE the end declares no parent, those columns keep their D12 meaning
+ (the port's own type, 9.26–9.27).
+38. The distinct terminations a group contributes (9.16) SHALL be computed over the **parent** for an
+ end that declares one and over the `*_port` otherwise, de-duplicated in first-appearance order. A
+ shuffle harness therefore resolves to one cable whose A terminations are the distinct A-side parents
+ of its rows and whose B terminations the distinct B-side parents, and the profile connector-count
+ check of 9.19 SHALL be measured against those parents — so `breakout-1c2p-2c1p` on a cage fanning
+ out to two leaves is one A connector and two B connectors, exactly as it is without D13.
+39. The system SHALL create each child sub-interface at most once per run however many rows name it
+ (9.30 applied to children) and under the one parent its `*_parent` names; IF two rows place a child of
+ the same name on the same device under two different parents, THEN the system SHALL reject the later
+ row naming both. IF two rows give the same parent two different non-blank `*_interface_type` values,
+ THEN the system SHALL reject the later row by the rule of 9.31, because one physical port has one
+ type.
+40. WHERE a declared parent does not already exist on the device, the system SHALL create it as a
+ physical interface by the two-source rule of 9.25–9.26 — the device-type template of that name first,
+ the `*_interface_type` cell as the fallback — and SHALL then create the child(ren) under it. Creating
+ a parent or a child SHALL be gated by `NETBOX_AUTOCREATE_INTERFACES` (9.24): WHILE the flag is off, a
+ parent or child that must be created but does not exist SHALL block the row with the same codes
+ 9.24/9.26 use and SHALL name the flag; where the parent and children all already exist, the cable on
+ the parent SHALL be placed regardless of the flag, since nothing is being created.
+41. `a_parent` and `b_parent` SHALL be symmetric: either, both, or neither end MAY declare a parent, so
+ a shuffle in which both ends break out into children across several devices is one `cable_group` with
+ child rows on both sides. The prohibition of 9.10 (both ends of one row on one termination) and the
+ occupancy rules of 9.9 and 9.22 SHALL be judged on the **parent** terminations the cable actually
+ carries, not on the children.
+42. Every parent and child the system plans to create SHALL raise the acknowledgement WARNING of 9.28,
+ naming the device, the parent, the child, that the child is `virtual`, and where the parent's type
+ came from (template or sheet). The pre-apply re-check of Requirement 10.14 SHALL cover planned parents
+ and children alike (9.32).
+43. The plan preview SHALL distinguish a parent and a child that were found from ones that will be
+ created (9.33), and SHALL state, for each row, the child-to-child lane pairing the row documents even
+ though the NetBox cable terminates on the parents — so an operator reading the preview sees both the
+ physical cable that will be written and the lane map it stands for. The run report SHALL record each
+ created parent and child as an object of its own (Requirements 10.18, 12.1).
 
 ## Requirement 10: Validation gate — nothing is written until validation is clean
 
@@ -1012,9 +1085,49 @@ rather than to appear broken.
  flag-free 9.25 with only the column-driven 9.26 gated. And whether Requirement 8.23's device-sheet
  create should share the flag or stay unconditional.
 
+- **D13 — Breakout child sub-interfaces and shuffle harnesses. DECIDED, built; live probe
+ outstanding.** The cabling
+ sheet gains two optional columns, `a_parent` and `b_parent`, each `{device}:{interface}`. Where an end
+ names a parent, its `*_port` is read as a child sub-interface to be created under that parent as a
+ `virtual` interface, the cable terminates on the physical parent, and `*_interface_type` types the
+ parent rather than the port.
+ **Why this is D10 finished, not D10 reversed.** D10 settled on cabling the physical cage and chose
+ *not* to create the breakout children, calling them device-type preparation (design.md). That left a
+ real hole: NetBox reports the cage as free while its lanes are in use, so capacity planning sees a
+ consumed 800G port as available, and the cable-capable children invite a second cable on a lane the
+ profiled cable already carries. D13 keeps the cable where D10 put it — on the parent, so the profile
+ and its connector counts (9.19) are unchanged — and closes the hole by creating the children as
+ `virtual` with `parent` set, which is both the record of the lanes and the thing that makes them
+ un-cable-capable.
+ **Why the parent is a new column and not `cable_group`.** The first sketch made `cable_group` itself
+ `{device}:{interface}`, which reads well for a one-sided breakout because grouping and parent coincide
+ there. A **shuffle** breaks that coincidence: one harness carries lanes from several parents on each
+ side to several parents on the other, so the grouping tag must stay free text (one harness, many
+ parents) while the parent becomes a per-end fact. Decoupling them is the only shape that lets a shuffle
+ be written at all; the cost is two columns instead of a reused one.
+ **Why cable the parent and not the children.** Terminating on the children was considered and rejected
+ on two grounds: it multiplies one physical harness into N NetBox cables that no longer share a profile,
+ and it collides with 9.19 — two children on an A side whose profile declares one connector would
+ overflow. Cabling the parent keeps one cable per harness and one profile, and the children carry the
+ lane-level story in the sheet and in NetBox's logical inventory without being cabled.
+ **Why `virtual` and why auto-create behind the flag.** `virtual` is NetBox's type for a logical
+ sub-interface with a `parent`, and it is not cable-capable, which is exactly the safety wanted. Parent
+ and child creation reuse D12's two-source rule and sit behind `NETBOX_AUTOCREATE_INTERFACES` for D12's
+ reason: a cabling sheet names many ports and the tool cannot tell a typo from a new lane, so a shared
+ instance should not gain `swp1s9` from a fat finger without an acknowledged warning (9.42).
+ **Cost if reversed:** two `ColumnSpec`s, the cabling importer's end-resolution (a parent/child branch),
+ S3 (child-vs-parent duplicate and type-conflict checks), planning (terminate on parent, plan children),
+ the preview's lane-pairing line, and the sample/template generation. `BaseImporter` needs nothing new —
+ the `Ref`/`Registry` id hand-off D12 added already carries a created parent's id into the child payload
+ and the child's into nothing, since children are not cabled.
+ The two remaining alternatives were decided before implementation: cables terminate on physical
+ parents, never children (9.36), and the explicit `{device}:{interface}` form stays even though the
+ device repeats `*_end`, because the redundant half catches a lane pasted under the wrong device
+ (9.35).
+
 D1–D9 are settled; D3 and D6 are deferred to iteration 2 by choice, not left undecided. **D10, D11,
-and D12 are the open decisions.** Inside D10: whether grouped rows must repeat the cable's attributes
-or inherit them from the first row (9.18 proposes inherit), and whether lane order can be left as row
-order (9.21) or needs explicit connector columns. Inside D11: `oob_ip` versus primary-only. Inside
-D12: whether the flag covers the template-backed create as well as the column-driven one, and whether
-Requirement 8.23 shares it.
+D12 are the open decisions.** Inside D10: whether grouped rows must repeat the cable's
+attributes or inherit them from the first row (9.18 proposes inherit), and whether lane order can be
+left as row order (9.21) or needs explicit connector columns. Inside D11: `oob_ip` versus primary-only.
+Inside D12: whether the flag covers the template-backed create as well as the column-driven one, and
+whether Requirement 8.23 shares it. D13 is decided and built; only its live 4.6.8 probe remains.

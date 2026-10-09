@@ -39,8 +39,13 @@ INTERFACE_TYPES: tuple[str, ...] = (
 )
 
 INTERFACE_TYPE_HELP = (
-    "Only used when the port does not exist and the device type does not define it either. "
-    "Leave blank unless a row is rejected asking for it"
+    "Used only to create an unknown physical interface: the port itself normally, or the parent "
+    "when *_parent is filled. Virtual breakout children always use type virtual"
+)
+
+PARENT_HELP = (
+    "Optional breakout parent as {device}:{interface}. When filled, *_port is a virtual child and "
+    "the cable terminates on this physical parent"
 )
 
 
@@ -415,6 +420,14 @@ CABLING_COLUMNS: tuple[ColumnSpec, ...] = (
         example="",
     ),
     ColumnSpec(
+        key="a_parent",
+        label="a_parent",
+        required=False,
+        conflict=Conflict.IDENTITY,
+        help_text=PARENT_HELP,
+        example="",
+    ),
+    ColumnSpec(
         key="a_interface_type",
         label="a_interface_type",
         # DESCRIPTIVE is declarative here, the way `cable_profile`'s CONSEQUENTIAL is: `Conflict` is
@@ -460,6 +473,14 @@ CABLING_COLUMNS: tuple[ColumnSpec, ...] = (
         help_text="Panels only, and ignored for devices. Defaults to front",
         choices=("front", "rear"),
         example="rear",
+    ),
+    ColumnSpec(
+        key="b_parent",
+        label="b_parent",
+        required=False,
+        conflict=Conflict.IDENTITY,
+        help_text=PARENT_HELP,
+        example="",
     ),
     ColumnSpec(
         key="b_interface_type",

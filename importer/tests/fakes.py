@@ -379,6 +379,7 @@ class FakeNetBox:
                 "device",
                 "device_type",
                 "role",
+                "parent",
             }:
                 expanded[name] = self._brief(name, value)
             else:
@@ -397,6 +398,7 @@ class FakeNetBox:
             "device": "dcim.devices",
             "device_type": "dcim.device-types",
             "role": "dcim.device-roles",
+            "parent": "dcim.interfaces",
         }[name]
         for record in self.objects.get(endpoint, []):
             if record.get("id") == value:

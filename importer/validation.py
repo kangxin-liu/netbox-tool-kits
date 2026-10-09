@@ -69,6 +69,9 @@ class Code(StrEnum):
     SLUG_INVALID = "SLUG_INVALID"
     """Outside NetBox's own slug charset (decision D9)."""
 
+    BREAKOUT_PARENT_MALFORMED = "BREAKOUT_PARENT_MALFORMED"
+    """A D13 `*_parent` cell is not exactly `{device}:{interface}` (Requirement 9.35)."""
+
     SLUG_CONTAINS_DELIMITER = "SLUG_CONTAINS_DELIMITER"
     """Inside NetBox's charset but unusable in a rack name, which is split on that character.
 
@@ -86,6 +89,12 @@ class Code(StrEnum):
     SAME_PORT_BOTH_ENDS = "SAME_PORT_BOTH_ENDS"
     CABLE_GROUP_FIELD_CONFLICT = "CABLE_GROUP_FIELD_CONFLICT"
     """Two rows of one cable group describe the same cable differently (Requirement 9.18)."""
+
+    BREAKOUT_PARENT_MISMATCH = "BREAKOUT_PARENT_MISMATCH"
+    """The parent names another device, or a panel end declares an interface parent (9.35)."""
+
+    CHILD_PARENT_CONFLICT = "CHILD_PARENT_CONFLICT"
+    """One child interface is assigned to two different parents in the same sheet (9.39)."""
 
     PROFILE_CONNECTOR_OVERFLOW = "PROFILE_CONNECTOR_OVERFLOW"
     """More terminations on a side than the profile has connectors there (Requirement 9.19)."""
@@ -146,6 +155,9 @@ class Code(StrEnum):
 
     INTERFACE_TYPE_IGNORED = "INTERFACE_TYPE_IGNORED"
     """The port already exists, so its type is NetBox's and the cell was not used (9.27)."""
+
+    CHILD_INTERFACE_CONFLICT = "CHILD_INTERFACE_CONFLICT"
+    """An existing D13 child has the wrong parent or is not virtual (Requirement 9.36)."""
 
     SLUG_COLLISION = "SLUG_COLLISION"
     UNIQUE_FIELD_TAKEN = "UNIQUE_FIELD_TAKEN"

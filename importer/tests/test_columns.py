@@ -45,13 +45,16 @@ EXPECTED_OPTIONAL = {
     ),
     # `cable_profile` and `cable_group` are the D10 pair, both optional: a sheet that uses neither
     # is every cabling sheet written before them (Requirements 9.13, 9.15). The two
-    # `*_interface_type` columns are D12's, and are read only when a port has to be created and the
-    # device type does not define it (Requirement 9.26).
+    # `*_interface_type` columns are D12's, and are read only when a physical interface has to be
+    # created and the device type does not define it (Requirement 9.26). `*_parent` are D13's
+    # optional child-to-physical-parent mapping (Requirement 9.34).
     "cabling": (
         "a_end_kind",
         "b_end_kind",
         "a_port_side",
         "b_port_side",
+        "a_parent",
+        "b_parent",
         "a_interface_type",
         "b_interface_type",
         "cable_profile",

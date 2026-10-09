@@ -82,23 +82,24 @@ unset primary IP. An address already held by a different device is an error, not
 
 ## Breakout cables
 
-A breakout is **one** cable, not several. A 400G port fanning out to four 100G ports is one physical
-harness in one cage, and NetBox records it as one cable with one termination on the A side and four on
-the B side. Two optional columns on the cabling sheet say so:
+A breakout is **one** cable, not several. The cable terminates on physical parent interfaces; the
+sheet may also create virtual child interfaces that record the lane map. Four optional columns say so:
 
 | Column | What it does |
 | --- | --- |
 | `cable_group` | Any tag you like. Every row carrying the same tag is **one cable**. Blank means the row is a cable on its own, which is how every cabling sheet worked before these columns existed |
 | `cable_profile` | How the cable is built inside, which is what lets NetBox trace one lane rather than treating the cable as a single hop. The template's picklist carries the values your NetBox accepts |
+| `a_parent` / `b_parent` | Optional `{device}:{interface}` physical parent. When filled, that side's `*_port` is a virtual child created under the parent, while the cable terminates on the parent |
+| `a_interface_type` / `b_interface_type` | Types a missing physical parent. It never types the child: breakout children are always `virtual` |
 
 One row per far end, all of them carrying the same tag:
 
 ```
-a_end,          a_port, b_end,           b_port, cable_type, cable_profile,      cable_group
-exa1-dh1-spine01, swp1, exa1-dh1-leaf01, swp31,  mmf-om4,    breakout-1c4p-4c1p, spine01-swp1
-exa1-dh1-spine01, swp1, exa1-dh1-leaf02, swp31,  ,           ,                   spine01-swp1
-exa1-dh1-spine01, swp1, exa1-dh1-leaf03, swp31,  ,           ,                   spine01-swp1
-exa1-dh1-spine01, swp1, exa1-dh1-leaf04, swp31,  ,           ,                   spine01-swp1
+a_end,            a_port, a_parent,                  b_end,           b_port, cable_type, cable_profile,      cable_group
+exa1-dh1-spine01, swp1s0, exa1-dh1-spine01:swp1,   exa1-dh1-leaf01, swp31,  mmf-om4,    breakout-1c4p-4c1p, brk-01
+exa1-dh1-spine01, swp1s1, exa1-dh1-spine01:swp1,   exa1-dh1-leaf02, swp31,  ,           ,                   brk-01
+exa1-dh1-spine01, swp1s2, exa1-dh1-spine01:swp1,   exa1-dh1-leaf03, swp31,  ,           ,                   brk-01
+exa1-dh1-spine01, swp1s3, exa1-dh1-spine01:swp1,   exa1-dh1-leaf04, swp31,  ,           ,                   brk-01
 ```
 
 Five things worth knowing before you fill one in.
@@ -119,10 +120,16 @@ switch names its breakout children `swp1s0`, `swp1s1`, …, that `sN` index is t
 ordering rows by it keeps the two views aligned. **The plan preview names the connector each row will
 get: read it before applying**, especially if the sheet has been sorted.
 
-**Cable the physical port, not the breakout children.** If your device type defines both `swp1` and
-`swp1s0`/`swp1s1`, put the cable on `swp1` and let the profile express the fan-out. Cabling the
-children instead means NetBox believes there are two separate cables and will keep reporting `swp1` as
-free while it is fully consumed.
+**The importer cables the physical parent, not the children.** In the example it creates `swp1s0`…
+`swp1s3` as `virtual` children of `swp1`, then puts the cable on `swp1`. The acknowledgement list
+shows every child before apply. This path requires `NETBOX_AUTOCREATE_INTERFACES=true` unless all
+children already exist.
+
+**Shuffle cables use the same columns on both ends.** Keep `cable_group` as one free-text harness tag,
+then put each row's physical parent in `a_parent` and/or `b_parent`. A shuffle may therefore have
+several distinct parents on both sides while remaining one cable. See
+`samples/3_cabling_shuffle_valid.xlsx`; its rows are the child-to-child lane map, while its NetBox
+cable carries the distinct parent terminations.
 
 **A half-built breakout is refused, not skipped.** If some of the group's ports already carry a cable
 and others do not, the file is blocked and names both halves. That is deliberate: the tool only ever
@@ -153,6 +160,11 @@ sources in a fixed order:
 If neither can answer, the row is blocked and says so. The type is never defaulted — a guess about
 physical hardware, recorded in NetBox as a fact, is worse than the blocked row it would replace.
 
+When `*_parent` is filled, this rule applies to the **physical parent** instead. The `*_port` child
+does not need a supplied type: it is always created as `virtual` with the resolved parent set. If an
+existing child is not virtual or belongs to a different parent, the row blocks; the importer never
+reparents or re-types it.
+
 **Fix the device type, not the sheet.** Almost every time you hit this, the cause is that somebody
 added an interface template to a device type *after* the devices were built from it. NetBox copies
 templates onto a device when the device is created and never again, so the template is there and the
@@ -175,11 +187,11 @@ expresses. An unresolved `MPO7` is still an error, and the panel still has to be
 first.
 
 **One thing this changes about applying.** Without the flag, a cabling sheet was a single
-all-or-nothing write. With it, a sheet that creates interfaces writes them first and the cables
-second, so a cable batch that NetBox rejects leaves those interfaces behind. They are harmless —
-they are the ports the device type would have given the device anyway — and re-uploading the same
-sheet after you have fixed the cable problem creates only the cables, because the interfaces are
-found the second time. The run report says which endpoint completed.
+all-or-nothing write. With it, ordinary missing interfaces are written before cables. D13 adds one
+more boundary when both levels are new: physical parents first, then virtual children, then cables.
+A later batch failure leaves earlier interfaces behind. Re-uploading is safe: they are found on the
+second validation and only the remaining objects are written. The run report says which batches
+completed.
 
 ## Rack names, and the slug columns
 

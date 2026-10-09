@@ -36,6 +36,13 @@ change that costs an existing property rather than only adding surface, because 
 stops being a single bulk POST. The unprobed part is narrow and named — which template fields
 `dcim.Interface` accepts verbatim, the list in `cabling.py`'s `TEMPLATE_CHOICE_FIELDS` /
 `TEMPLATE_PLAIN_FIELDS` — and `scripts/probe_interface_creation.py` exists to settle it (task 31a).
+**D13 — breakout child sub-interfaces and shuffle harnesses — is built and under test, with its live
+probe outstanding.** It
+extends D12 rather than adding a new mechanism: `a_parent` / `b_parent` turn `*_port` into a `virtual`
+child created under a named cage, while the cable stays on the cage, and it decouples the parent from
+`cable_group` so a shuffle (several cages per side under one harness) can be written at all. Three
+facts need a live probe first — `virtual` + `parent` in a bulk POST, a `virtual` child refused as a
+cable termination, and a cage's occupancy while children hang off it — carried as task 31b below.
 Field names in this document were checked against the target instance's own
 `OPTIONS` responses rather than from memory — see "Verified against the target instance".
 
@@ -396,6 +403,7 @@ on disk — it should be rotated if it has ever been shared, and `.gitignore` no
 | D10 **(proposed)** | Optional `cable_profile` *and* `cable_group` columns, so several rows can describe one multi-connector cable | A breakout is one cable with one A termination and several B terminations. The profile column alone cannot express it: the rows sharing the A port are rejected as duplicate terminations before the profile is read | `columns.py`, `importers/cabling.py` (S3 + planning), one grouping hook on `importers/base.py`, per-line report attribution |
 | D11 **(proposed)** | Optional `loopback_ip4` / `loopback_ip6` / `management_ip4` / `management_ip6`; names from the device type; IPv4 preferred as primary unless the row has none, then management over loopback within the family; first PATCH, scoped to those two fields | Dual-stack cannot fit in two family-agnostic cells. Vendor names belong on the type once. NetBox cannot set `primary_ip4` at device create because the IP does not exist yet | `columns.py`, `importers/devices.py` (S2–S4 + apply), `ipam.ip-addresses` endpoint, Requirement 11.3's exception, devices readiness, empty-instance prep |
 | D12 **(built, probe outstanding)** | A cabling row may create a missing *device* interface — from the device type's template first, from optional `a_interface_type` / `b_interface_type` otherwise — behind `NETBOX_AUTOCREATE_INTERFACES`, off by default | NetBox never copies a newly added template onto existing devices, so the common failure is a port the type defines and the device lacks; creating it from the template invents nothing and makes a typo fall through to a row that demands an explicit type. Off by default because the tool cannot tell a new port from a mistyped one | `columns.py`, `importers/cabling.py` (port resolution + a second `endpoint_order` entry), the pre-apply drift check, one settings flag, Requirement 8.23 |
+| D13 **(built, probe outstanding)** | Optional `a_parent` / `b_parent` (`{device}:{interface}`): the end's `*_port` becomes a `virtual` child created under that parent, the cable terminates on the physical parent, and `*_interface_type` types the parent. Decoupled from `cable_group`, which stays a free-text tag, so a shuffle harness is one group with child rows on both ends | D10 cabled the cage but left the breakout children uncreated, so NetBox shows a consumed cage as free and nothing stops a lane being cabled twice; `virtual` children with a parent fix both. The parent must be its own column, not `cable_group`, because a shuffle has several parents per side under one harness | `columns.py`, `importers/cabling.py` (parent/child end-resolution, S3 child-vs-parent checks, plan-on-parent), the preview's lane-pairing line, sample/template generation, the live probe |
 
 ## Component design
 
@@ -680,10 +688,11 @@ Example row: `SYD1-DH1-R01, front, 12, 2, syd1-dh1-r01-leaf01, DCS-7050SX3-48YC8
 | `a_end_kind` / `b_end_kind` | no | device / panel, default device | selects the termination model |
 | `a_port` / `b_port` | yes | port name on that end | interface, or front/rear port for a panel |
 | `a_port_side` / `b_port_side` | no | front / rear, default front | panels only; ignored for devices |
-| `a_interface_type` / `b_interface_type` | no | from API (`400gbase-x-qsfpdd`, `100gbase-x-qsfp28`, …) | D12; read only when creating an interface the device type does not define |
+| `a_parent` / `b_parent` | no | `{device}:{interface}`, e.g. `spine01:swp1` | D13; sets the port's parent cage — `*_port` becomes a `virtual` child, cable terminates on the parent |
+| `a_interface_type` / `b_interface_type` | no | from API (`400gbase-x-qsfpdd`, `100gbase-x-qsfp28`, …) | D12 (port type) / D13 (parent type when a parent is named); read only when creating an interface the device type does not define |
 | `cable_type` | yes | from API (`cat6`, `cat6a`, `mmf-om4`, `smf-os2`, `dac-passive`, …) | |
 | `cable_profile` | no | from API — 26 values (`single-1c2p`, `trunk-2c4p`, `breakout-1c4p-4c1p`, …) | D10; blank omits `profile` from the payload |
-| `cable_group` | no | any tag, e.g. `brk-01` | D10; rows sharing it are one cable |
+| `cable_group` | no | any tag, e.g. `brk-01` | D10; rows sharing it are one cable. Stays free text under D13 — the parent moved to `*_parent` |
 | ~~`transceiver`~~ | — | — | dropped from iteration 1 (D3); treated as an unrecognised column if present |
 | `cable_status` | no | default `connected` | |
 | `label`, `color`, `length`, `length_unit` | no | `length_unit` from API | |
@@ -743,13 +752,14 @@ Three things follow, and the third is the one that bites:
 - **The position number is the `sN` index.** Position 1 is `swp1s0` and position 2 is `swp1s1`, so rows
   ordered by that index line the NetBox trace up with what the switch calls the port. This is the
   practical form of row-order-is-lane-order (Req 9.21).
-- **The child interfaces then have to be dealt with, and this tool will not do it.** Left as
-  cable-capable physical interfaces they are an open invitation to cable `swp1s0` as well, which would
-  contradict the profiled cable on `swp1`; and NetBox reports `swp1` as free while its children are
-  cabled, so a port that is fully consumed looks available to whoever plans capacity next. They belong
-  as virtual interfaces with `parent = swp1`, or not at all. Since iteration 1 never modifies an
-  object it did not create, that is device-type preparation and a genuine precondition for using
-  profiles on this hardware — not something the cabling sheet can fix.
+- **The child interfaces then have to be dealt with. *Amended by D13.*** Left as cable-capable
+  physical interfaces they are an open invitation to cable `swp1s0` as well, which would contradict the
+  profiled cable on `swp1`; and NetBox reports `swp1` as free while its children are cabled, so a port
+  that is fully consumed looks available to whoever plans capacity next. They belong as virtual
+  interfaces with `parent = swp1`, or not at all. D10 called this device-type preparation outside the
+  cabling sheet's remit; D13 reverses *that* clause and nothing else — the tool now creates the children
+  as `virtual` with `parent` set, while the cable stays on the physical cage exactly as this section
+  settles. See "Breakout children and shuffle harnesses (D13)" below.
 
 Cabling the children instead — two rows, no group, no profile, two cables — is the option that needs
 none of phase 8 and none of that preparation. It is worth naming as the fallback rather than pretending
@@ -760,6 +770,72 @@ Note that neither route records the optics themselves. `400G-SR8` and `200G-SR4`
 D3; the interface types visible on those children come from the device type, and Requirement 9.8
 forbids this importer from writing them — a prohibition D12 leaves intact, because it creates
 interfaces rather than re-typing ones that already exist.
+
+#### Breakout children and shuffle harnesses (D13)
+
+The section above cables the physical cage and leaves the children to device-type preparation. In
+practice that preparation never happens: the children do not exist on the device, NetBox shows the cage
+as free while its lanes are patched, and the sheet carries no way to say which lane is which. D13 closes
+that without moving the cable. Two columns do it — `a_parent` and `b_parent`, each `{device}:{interface}`
+— and they separate two facts D10 had let coincide.
+
+**One fact: which cage a lane hangs off.** When `a_parent` is `spine01:swp1`, `a_port` is no longer an
+independent interface; it is a child of `swp1`, created as `type = virtual` with `parent` pointing at the
+cage. The cable still terminates on `swp1` (Req 9.36), so the profile and its connector counts (9.19)
+are the same object they were before D13. The child is the record of the lane and — because a `virtual`
+interface is not cable-capable — the thing that stops someone cabling `swp1s0` behind the tool's back.
+`a_interface_type` types the *cage* now, not the lane, since the lane's type is always `virtual`.
+
+The non-shuffle breakout the template ships therefore reads:
+
+```
+a_end,     a_parent,     a_port,  a_interface_type,  b_end,      b_port,  b_interface_type,  cable_type,  cable_profile,       cable_group
+…SPF90001, …SPF90001:swp1, swp1s0, 800gbase-x-osfp,  …LFB00101,  swp1,   400gbase-x-qsfpdd, mmf-om4,     breakout-1c2p-2c1p,  brk-01
+…SPF90001, …SPF90001:swp1, swp1s1, 800gbase-x-osfp,  …LFB00101,  swp2,   400gbase-x-qsfpdd, ,            ,                    brk-01
+```
+
+Two rows, one cable on `swp1` ↔ `{swp1, swp2}` with profile `breakout-1c2p-2c1p` (one A connector, two
+B connectors — unchanged by D13), plus two `virtual` children `swp1s0`/`swp1s1` created under `swp1`.
+`cable_group` is the free-text tag `brk-01`; the parent lives in `a_parent`, which is the whole point.
+
+**The other fact, and the one that forced the split: a shuffle.** A shuffle harness carries lanes from
+several cages on each side to several cages on the other — `swp1`'s lanes reach children on three leaves,
+and each of those leaf ports is itself a child of a cage fanning out elsewhere. One `cable_group` tag
+can name one harness, but it cannot name the several parents on each side; a `{device}:{interface}`
+grouping tag (the first sketch) can name one parent but not the harness. Only when the two are different
+columns can a shuffle be written — one tag across all the rows, a per-end parent on each:
+
+```
+a_end,  a_parent,     a_port,  b_end,  b_parent,     b_port,  cable_profile,               cable_group
+spineA, spineA:swp1,  swp1s0,  leafB,  leafB:swp9,   swp9s0,  breakout-2c4p-8c1p-shuffle,  shuf-01
+spineA, spineA:swp1,  swp1s1,  leafC,  leafC:swp9,   swp9s0,  ,                            shuf-01
+spineA, spineA:swp2,  swp2s0,  leafB,  leafB:swp9,   swp9s1,  ,                            shuf-01
+spineA, spineA:swp2,  swp2s1,  leafC,  leafC:swp9,   swp9s1,  ,                            shuf-01
+```
+
+This resolves to one cable whose A terminations are the distinct A-side parents `{spineA:swp1,
+spineA:swp2}` and whose B terminations the distinct B-side parents `{leafB:swp9, leafC:swp9}` (Req 9.38),
+plus the eight `virtual` children the rows name. `breakout-2c4p-8c1p-shuffle` declares two A connectors
+and eight B connectors, so two A parents fills the A side and two B parents is a legal partial fill of
+the B side (9.19 is `<=`). The row-level `swp1s0 ↔ swp9s0` pairing is the lane map; the NetBox cable is
+parent-to-parent and the lane routing
+inside it is the profile's `-shuffle` definition, which NetBox does not fully serve (see the D10 probe
+notes), so the sheet's per-row pairing is the human-readable record of it and the preview states it
+(Req 9.43).
+
+**Creation is D12's machinery, reused.** A missing cage is created by the template-first, column-fallback
+rule of 9.25–9.26; the children are then created under it, all behind `NETBOX_AUTOCREATE_INTERFACES`
+(Req 9.40). So `endpoint_order` is still interfaces-then-cables, and the id hand-off that lets a cable
+reference an interface created in the same run (the `Ref`/`Registry` path D12 added) carries the created
+cage's id into the child payloads and the children's into nothing, since children are never cabled.
+
+**What still needs a live probe before this is "built".** Unlike D10, D13 is not yet verified against a
+running NetBox. Three facts are assumed and must be checked on 4.6.8 (see the D10 "what was taken on
+trust" note for the pattern): that `dcim.Interface` accepts `type = virtual` with a `parent` id in a
+bulk POST; that a `virtual` child is rejected as a cable termination (the property 9.36 leans on); and
+that cabling the parent while children exist under it reports the parent's occupancy the way D10's
+occupancy check expects. Until that probe runs, D13's field-level claims are assertions, and the tasks
+below carry the probe as their first item.
 
 #### Creating a missing interface (D12)
 

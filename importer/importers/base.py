@@ -20,10 +20,11 @@ stages were not reached (Requirement 10.4).
 Apply issues **one bulk POST per endpoint** because a NetBox list POST is transactional (decision
 D7, measured). Two consequences worth being explicit about:
 
-* The half-applied window is between endpoints, not between rows. For the hierarchy importer that is
-  three boundaries however long the sheet is, and for cabling one — interfaces before cables, where
-  the sheet creates any (D12). Cabling had none at all until then, which is worth remembering as
-  something that was given up rather than something that was never there.
+* The half-applied window is between batches, not between rows. For the hierarchy importer those
+  batches follow endpoints. Cabling gained interfaces-before-cables with D12, and D13 may split the
+  interface endpoint into physical-parent then virtual-child batches before the cable batch.
+  Cabling had no boundary at all before D12, which is worth remembering as something that was given
+  up rather than something that was never there.
 * When NetBox rejects a batch with an error that is *not* aligned to a submitted item, the offending
   row cannot be identified from the response, so the batch is replayed one row at a time
   (Requirement 12.2). The rolled-back batch means the replay starts from a clean slate, but the
@@ -121,6 +122,14 @@ class CreateAction:
     method: str = "post"
     """`post` creates; `patch` is the device primary-IP exception of Requirement 8.19."""
 
+    phase: str = ""
+    """Optional sub-phase for dependencies between objects on the same endpoint.
+
+    D13 creates a physical parent interface before a virtual child whose `parent` field needs the
+    returned id. Both objects use ``dcim.interfaces``, so endpoint order alone cannot express the
+    dependency; the cabling importer assigns them to separate named phases.
+    """
+
     lines: tuple[int, ...] = ()
     """Every spreadsheet line this one object came from, where that is more than one.
 
@@ -193,13 +202,21 @@ class Plan:
     state: dict[str, str] = field(default_factory=dict)
     """S4's view of NetBox, re-checked immediately before the first write (Requirement 10.14)."""
 
-    def actions_for(self, endpoint: str, *, method: str = "post") -> list[CreateAction]:
+    def actions_for(
+        self,
+        endpoint: str,
+        *,
+        method: str = "post",
+        phase: str | None = None,
+    ) -> list[CreateAction]:
         return [
             action
             for row in self.rows
             if row.outcome == RowOutcome.CREATE
             for action in row.actions
-            if action.endpoint == endpoint and action.method == method
+            if action.endpoint == endpoint
+            and action.method == method
+            and (phase is None or action.phase == phase)
         ]
 
     @property
@@ -297,8 +314,12 @@ class BaseImporter(ABC):
 
     name: str = ""
     endpoint_order: tuple[str, ...] = ()
-    apply_phases: tuple[tuple[str, str], ...] | None = None
-    """(endpoint, method) pairs. Defaults to one POST per `endpoint_order` entry.
+    apply_phases: tuple[tuple[str, str] | tuple[str, str, str], ...] | None = None
+    """(endpoint, method[, action phase]) entries.
+
+    Defaults to one POST per `endpoint_order` entry. The optional action phase permits two
+    dependency-ordered batches against one endpoint, which D13 needs for physical parent
+    interfaces followed by their virtual children.
 
     The device importer inserts a PATCH of `dcim.devices` after the IP creates (Requirement 8.19).
     """
@@ -595,8 +616,10 @@ class BaseImporter(ABC):
                 )
 
         phases = self.apply_phases or tuple((endpoint, "post") for endpoint in self.endpoint_order)
-        for endpoint, method in phases:
-            actions = plan.actions_for(endpoint, method=method)
+        for entry in phases:
+            endpoint, method, *selector = entry
+            phase = selector[0] if selector else None
+            actions = plan.actions_for(endpoint, method=method, phase=phase)
             if not actions:
                 self.after_phase(endpoint, method, plan.registry, lookups)
                 continue
@@ -716,10 +739,7 @@ class BaseImporter(ABC):
                 continue
             # A PATCH targets an object that already has an id in the registry; skipping it
             # for that reason would drop the primary-IP write of Requirement 8.19.
-            if (
-                not patching
-                and registry.id_for(action.endpoint, action.key) is not None
-            ):
+            if not patching and registry.id_for(action.endpoint, action.key) is not None:
                 continue
             seen.add(action.key)
             batch.append(action)
