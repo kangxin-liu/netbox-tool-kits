@@ -76,6 +76,31 @@ def csv_list(environ: dict[str, str], name: str, default: tuple[str, ...] = ()) 
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def version_tuple(
+    environ: dict[str, str], name: str, default: tuple[int, ...]
+) -> tuple[int, ...]:
+    """Read a dotted version like ``4.6`` into an int tuple, or fall back to ``default``.
+
+    Lets an operator widen the supported NetBox range for a specific environment (e.g. a staging
+    instance pinned to an older release) without editing code. Non-numeric or empty parts are
+    refused at startup rather than silently coerced, so a typo cannot quietly disable the check.
+    """
+    raw = optional(environ, name)
+    if raw == "":
+        return default
+    parts: list[int] = []
+    for chunk in raw.split("."):
+        chunk = chunk.strip()
+        if not chunk.isdigit():
+            raise ImproperlyConfigured(
+                f"{name} must be a dotted version made of integers, e.g. 4.6 — got {raw!r}"
+            )
+        parts.append(int(chunk))
+    if not parts:
+        raise ImproperlyConfigured(f"{name} must be a dotted version, e.g. 4.6 — got {raw!r}")
+    return tuple(parts)
+
+
 @dataclass(frozen=True)
 class NetBoxTarget:
     """Where this app writes, and whether the loopback development exception is in play."""

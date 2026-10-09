@@ -122,8 +122,13 @@ NETBOX_TOKEN = env.require(ENVIRON, "NETBOX_TOKEN")
 NETBOX_VERIFY_SSL = env.flag(ENVIRON, "NETBOX_VERIFY_SSL", default=True)
 NETBOX_TIMEOUT = env.integer(ENVIRON, "NETBOX_TIMEOUT", default=30)
 # Refuse to import outside this range rather than failing mid-run on a renamed field (Req 2.7).
-NETBOX_MIN_VERSION = (4, 6)
-NETBOX_MAX_VERSION_EXCLUSIVE = (4, 7)
+# Defaults to >=4.6,<4.7, the range the importer is verified against. Both bounds are overridable
+# per environment (e.g. a staging instance pinned to an older release) so the floor can be lowered
+# without editing code; doing so is at the operator's risk and only the verified range is tested.
+NETBOX_MIN_VERSION = env.version_tuple(ENVIRON, "NETBOX_MIN_VERSION", default=(4, 6))
+NETBOX_MAX_VERSION_EXCLUSIVE = env.version_tuple(
+    ENVIRON, "NETBOX_MAX_VERSION_EXCLUSIVE", default=(4, 7)
+)
 
 # --- Import behaviour ---------------------------------------------------------------------
 RACK_NAME_DELIMITER = env.optional(ENVIRON, "RACK_NAME_DELIMITER") or "-"
