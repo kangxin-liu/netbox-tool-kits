@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "foremerge": {
+      "command": "/Users/kangxin.liu/.local/bin/foremerge",
+      "args": [
+        "--cwd",
+        "/Users/kangxin.liu/Library/CloudStorage/OneDrive-Firmus/Documents/netbox-tool-kits",
+        "mcp"
+      ]
+    }
+  }
+}
