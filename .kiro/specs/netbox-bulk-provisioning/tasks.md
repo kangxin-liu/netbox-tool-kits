@@ -2,7 +2,8 @@
 
 Dependency-ordered. Each task is small enough to review on its own and ends in a verifiable state.
 Tests are written with the task they cover, not batched at the end. No task contacts a live NetBox
-instance; HTTP is stubbed.
+instance; HTTP is stubbed, except the explicitly named disposable-instance probes 23a, 27a, 31a,
+35a, and 40a.
 
 Phases 1–7 are iteration 1 and are complete. **Phase 8 is an addition on top of it** — cable profiles
 and breakout, decision D10 — and is gated on that decision being accepted at review. Task 23 is the one
@@ -14,7 +15,11 @@ decision D12 — gated the same way, with task 31a as its probe. Phase 10 depend
 Requirement 8.23, which D12 amends; the cabling work itself is independent of it. **Phase 11 extends
 phase 10** — breakout child sub-interfaces and shuffle harnesses, decision D13 — gated the same way,
 with task 35a as its probe. It reuses D12's flag, `endpoint_order`, and id hand-off, so it depends on
-phase 10 and adds no new mechanism to `BaseImporter`.
+phase 10 and adds no new mechanism to `BaseImporter`. **Phase 12 adds applied-change history and
+compensating revert**, decision D14. It journals every object mutation independently of row results
+and depends on the existing apply/reporting path, not on the outstanding live probes. **Phase 13
+adds profile-derived breakout tags**, decision D15; it depends on D10's parsed profile structure,
+D13's physical-parent resolution, and D14's update journal/revert path.
 
 ## Phase 1 — Scaffold and configuration
 
@@ -32,7 +37,8 @@ phase 10 and adds no new mechanism to `BaseImporter`.
     `NETBOX_*`, `MAX_UPLOAD_MB`, `RACK_NAME_DELIMITER`, `NETBOX_DEFAULT_DEVICE_ROLE`,
     `NETBOX_AUTOCREATE_DEVICE_TYPES` from the environment
   - Fail fast at startup with the variable name when `NETBOX_URL`, `NETBOX_TOKEN`, or
-    `DJANGO_SECRET_KEY` is missing; log a warning when SSL verification is disabled
+    `DJANGO_SECRET_KEY` is missing; log a warning when SSL verification is disabled. Phase 12 adds
+    optional `NETBOX_REVERT_TOKEN`, falling back to `NETBOX_TOKEN`
   - Test: missing variable raises at import; no default secret key exists in source
   - Also brought forward from task 9a, because leaving plaintext-to-remote accepted in the interim
     would be a live hole: `config/env.py` validates the `NETBOX_URL` scheme at startup, permitting
@@ -80,8 +86,9 @@ phase 10 and adds no new mechanism to `BaseImporter`.
   - **Extended by task 18a (D9):** the hierarchy sheet gains `datacenter_slug` and `datahall_slug`
   - **To be extended by tasks 24–25 (D10, proposed):** the cabling sheet gains `cable_profile` and
     `cable_group`
-  - **To be extended by task 35b (D13, proposed):** the cabling sheet gains `a_parent` / `b_parent`,
-    `{device}:{interface}`, which turn `*_port` into a `virtual` child of the named cage
+  - **Extended by task 35b (D13):** the cabling sheet gains `a_parent` / `b_parent` interface names,
+    resolved on the corresponding `*_end`, which turn `*_port` into a `virtual` child of the named
+    cage
   - Tests: required and optional columns match the requirements tables; the D8 split matches the
     design table exactly; every column carries a `Conflict` and help text; no example value looks
     like production data; `transceiver` is absent (D3) and `rack_type` is not a column name
@@ -125,8 +132,10 @@ phase 10 and adds no new mechanism to `BaseImporter`.
   - `classify()` maps a raw exception to DNS / TLS / TIMEOUT / AUTH / CONNECTION / VERSION / SERVER,
     each with an operator sentence naming the next action; `redact()` runs over every message before
     it can reach an exception, a log record, or a template
-  - Writes go through `create()`, and the session refuses any method outside GET / OPTIONS / POST, so
-    the create-only invariant is enforced at the transport rather than trusted per importer
+  - In this baseline, writes go through `create()`, and the session refuses any method outside GET /
+    OPTIONS / POST, so the create-only invariant is enforced at the transport rather than trusted per
+    importer. D11 adds one field-scoped PATCH; phase 12 adds PATCH/DELETE only through the isolated
+    revert adapter
   - Deviation from the plan: raw `pynetbox` is not used at request level. `pynetbox` raises
     `RequestError` with the response body interpolated into `str(e)`, which is exactly what task 21
     must guarantee cannot happen; requests go through this module's own session so redaction has a
@@ -135,7 +144,7 @@ phase 10 and adds no new mechanism to `BaseImporter`.
     S4 can size an endpoint without paging every record
   - Tests: 40 in `test_netbox_client.py` — each failure class maps correctly, the version is captured
     and parsed, the token is absent from exception text and log records, and a PATCH/PUT/DELETE
-    attempt raises before a request is issued
+    attempt raises before a request is issued in this baseline
   - _Requirements: 2.5, 2.6, 12.7, 14.1, 14.5_
 
 - [x] 9. Lookup and choice cache — **done**
@@ -369,17 +378,20 @@ phase 10 and adds no new mechanism to `BaseImporter`.
     "aborted partway with writes" and "refused because the target was unusable" are different facts
     from `stale`, and an operator unwinding by hand needs to tell them apart
   - `ImportRowResult` stores the NetBox `url` rather than rebuilding it from `NETBOX_URL`, so a link
-    in an old report still resolves after the tool is repointed. `sequence` is the write order, which
-    is what a manual unwind reads backwards; it is zero for rows that wrote nothing
-  - Read-only `/runs/` and `/runs/<id>/`. Read-only means no route: POST, PUT, and DELETE on the
-    detail URL are 405 because nothing is registered behind them
+    in an old report still resolves after the tool is repointed. `sequence` is the legacy per-row
+    write order; it is zero for rows that wrote nothing. D14 deliberately adds a separate
+    object-operation journal instead of trying to make this row model reversible
+  - As built here, `/runs/` and `/runs/<id>/` are read-only. Phase 12 preserves those GET views and
+    adds separate POST-only preflight and confirmation routes; it does not turn the detail URL into a
+    mutating endpoint
   - `reports.py` owns both CSVs and the one `escape_cell` they share, so the formula guard cannot be
     forgotten on a new column. `RunReport.to_csv` was refactored onto it, which is how the apply report
     gained escaping it did not have
-  - Requirement 12.5's guarantee is rendered on the report itself, not left to the documentation
+  - Requirement 12.5's per-endpoint versus cross-endpoint guarantee is rendered on the report itself,
+    not left to the documentation; phase 12 adds the distinct compensating-revert guarantee
   - Tests: 29 in `test_run_history.py` — a rejected batch attributed to its line and column, an abort
     naming the endpoints that completed, a disclosed row-by-row replay, the token absent from every
-    persisted field and every rendered page, and no mutating route
+    persisted field and every rendered page, and no mutating history route in this baseline
   - _Requirements: 12.1, 12.2, 12.5, 12.6, 13.1–13.5_
 
 - [x] 18a. Sheet-supplied slugs, and rack names built from them (D9) — **done**
@@ -554,7 +566,8 @@ phase 10 and adds no new mechanism to `BaseImporter`.
   - The slug columns of D9: what they are for, that `-` is not allowed inside one, and that a
     multi-word datacenter or datahall name now needs its slug column filled in
   - How to read a validation report and fix a blocked file; that apply is impossible until validation
-    is clean; what to do if a run still aborts partway; that iteration 1 never updates or deletes
+    is clean; what to do if a run still aborts partway; that forward apply never deletes and updates
+    only the D11 primary-IP fields
   - **Empty-instance prep runbook:** local NetBox via `netbox-docker` (Postgres and Redis included),
     creating the device roles in use, importing device types from `netbox-community/devicetype-library`,
     and building one patch panel with front-to-rear mappings in the 4.5+ `rear_ports` format — plus
@@ -570,10 +583,10 @@ phase 10 and adds no new mechanism to `BaseImporter`.
     blocks the whole file — because every other instruction depends on them. The D9 slug columns are
     documented as a decision table ("fill it in when the name is more than one word") rather than as a
     rule about characters, since that is the form the operator needs
-  - **"A run aborted partway" is the section that mattered most** (Requirement 12.5), and its answer is
-    that re-uploading the same sheet *is* the recovery path: everything already created is skipped, so
-    the second run finishes the job. That is worth stating plainly, because the instinct on seeing a
-    partial import is to delete what exists first
+  - **"A run aborted partway" is the section that mattered most** (Requirement 12.5). Before D14 its
+    answer is that re-uploading the same sheet finishes the job because everything already created is
+    skipped. Phase 12 keeps that forward-recovery path and adds the alternative of a guarded revert
+    from history
   - The prep runbook is ordered by dependency and says why: device types before devices, because NetBox
     does not retro-fit ports onto devices that already exist. It documents the 4.5+ `rear_ports` mapping
     with the actual payload shape, and points at `scripts/seed_netbox.py`, which already builds three
@@ -953,8 +966,9 @@ Run it before this phase is called done, and amend 9.25's field list if reality 
 
 ## Phase 11 — Breakout child sub-interfaces and shuffle harnesses (D13)
 
-D13 is accepted: the cable terminates on physical parents (9.36), and the explicit device half of
-`{device}:{interface}` stays as a cross-check against `*_end` (9.35).
+D13 is accepted: the cable terminates on physical parents (9.36). Parent cells now carry only the
+interface name; the device is already supplied by `*_end`, and names are opaque rather than
+delimiter-parsed (9.35).
 
 The regression guard of phase 10 extends here: a sheet with `a_parent` / `b_parent` left blank behaves
 exactly as D10/D12 leave it, and with `NETBOX_AUTOCREATE_INTERFACES` off a child or cage that must be
@@ -982,18 +996,16 @@ cheap to correct if that probe disagrees.
   - _Requirements: 9.36, 9.40, D7_
 
 - [x] 35b. The two columns — **done**
-  - Two `ColumnSpec`s in `CABLING_COLUMNS`: `a_parent` / `b_parent`, optional, `{device}:{interface}`
-    free-text with a format check in S2 (exactly one colon, both halves non-blank), blank examples so
-    the template's example row stays the common case
-  - No `choice_sources` entry — the value is this tool's own `{device}:{interface}` vocabulary, like
-    `cable_group`, validated against `columns.py` rather than against NetBox
+  - Two `ColumnSpec`s in `CABLING_COLUMNS`: `a_parent` / `b_parent`, optional interface names resolved
+    on that row's end device, with blank examples so the template's example row stays the common case
+  - No `choice_sources` entry and no delimiter-format check — values are opaque NetBox interface
+    names, allowing vendor syntax such as `100GE1/1/1`
   - Help text: naming a parent turns `*_port` into a `virtual` child of it, the cable lands on the
     parent, and `*_interface_type` then types the parent
   - The generated template and `scripts/make_sample_sheets.py` emit the new columns in the order the
     header row already uses in `netbox-cabling-template.xlsx`
-  - Tests: the column parses; a malformed cell (`spineA`, `spineA:`, `:swp1`, `a:b:c`) is rejected; a
-    `{device}` half disagreeing with `a_end` is rejected (9.35); a blank cell leaves the row behaving
-    as it does today
+  - Tests: interface-only parent values parse, vendor child names containing `:` remain valid, panel
+    ends still reject parents, and a blank cell leaves the row behaving as it does today
   - _Requirements: 9.34, 9.35, 4.3_
 
 - [x] 35c. Parent / child resolution and planning — **done**
@@ -1030,18 +1042,176 @@ cheap to correct if that probe disagrees.
     matches the spec
   - _Requirements: 9.34–9.43, 17.6_
 
+## Phase 12 — Applied-change history and compensating revert (D14)
+
+D14 is built and tested. Forward import behaviour stays unchanged: this phase adds an
+object-operation journal around apply and a separate guarded inverse path from history. It does not
+infer reversibility from existing `ImportRowResult` rows, and it does not make NetBox's
+cross-endpoint writes transactional.
+
+- [x] 36. Append-only mutation journal and outcome reconciliation — **done 2026-10-09**
+  - Add `ImportMutation` with run, global sequence, action, endpoint, source lines, natural key,
+    object identity/link, allow-listed before/after values, post-write `last_updated`, and outcome;
+    use `PROTECT` from mutation to run so audit operations cannot be cascade-deleted
+  - Persist one intent per planned object mutation before issuing its NetBox request. Finalise each
+    successful create from the returned id/name/url and canonical response; for D11 updates capture
+    only `primary_ip4` / `primary_ip6` before and after
+  - Keep row results as presentation data. Tests pin the cardinality mismatch: one hierarchy row
+    journals several creates, while several grouped breakout rows journal one cable with all source
+    lines
+  - Add `reconciliation_required` for an intent whose response is unknown. Resolve by stored id or
+    natural key, distinguish applied/not-applied/conflicting, and withhold revert until no unknown
+    operation remains
+  - Store no serializer dump, token, headers, raw sheet row, or unrelated field; extend the reflective
+    secret test to every new field
+  - Migration preserves all existing history rows and labels them legacy/non-revertible rather than
+    inventing operation records from current NetBox state
+  - Tests: intent exists before the fake receives the write; success, atomic batch rejection,
+    timeout-before-write, timeout-after-write, and process-resume reconciliation
+  - _Requirements: 12.4, 12.8, 13.1–13.5, 18.1–18.4, 18.15_
+
+- [x] 37. History summaries, mutation detail, and CSV — **done 2026-10-09**
+  - `/runs/` shows apply status plus created, changed, skipped, failed, reverted, and still-applied
+    counts for every run, including applied, partially applied, aborted, and reverted runs
+  - `/runs/<id>/` groups mutations by action and object type, then lists them in sequence with source
+    lines, endpoint, id/name/link, before→after changed fields, and revert state. Do not render
+    unrelated object fields
+  - A run with no successful write, unresolved intent, all mutations reverted, or legacy data gets an
+    explicit non-revertible reason instead of a button
+  - Add formula-escaped `mutations.csv` containing the apply operations and linked revert outcomes;
+    retain the original apply report unchanged
+  - Tests cover the one-row/many-object and many-row/one-object summaries, D11 changed fields,
+    partially applied counts, escaped hostile values, legacy history, and query counts that do not
+    grow per mutation
+  - _Requirements: 12.1, 12.4, 12.6, 12.8, 13.4–13.5, 18.1–18.4, 18.13–18.15_
+
+- [x] 38. Revert preflight and explicit confirmation — **done 2026-10-09**
+  - Add `services/revert.py` and append-only `RevertAttempt` / `RevertItemResult` models. A preflight
+    selects only still-applied mutations and sorts them by descending apply sequence
+  - Add optional environment-only `NETBOX_REVERT_TOKEN`, defaulting to `NETBOX_TOKEN` when missing or
+    empty. A separately supplied value should have read/delete and field-scoped PATCH but no create
+    permission. Only the revert adapter can obtain the effective revert credential or issue DELETE;
+    importer clients remain forward-only even under fallback
+  - Require the configured host to equal the run's host. Fetch every object by endpoint/id and require
+    both its canonical recorded post-values and `last_updated` token to match; collect all drift before
+    blocking with zero writes
+  - Map a recorded create to an exact-id DELETE and a recorded update to a PATCH containing only its
+    `before_values`; never generate PUT, cascade, or an inverse for skipped/pre-existing objects
+  - POST-only, CSRF- and superuser-protected `/runs/<id>/revert/validate/` stores a short-lived
+    server-side plan fingerprint over operation ids, drift tokens, inverse payloads, host, actor, and
+    expiry. A separate confirmation POST repeats the drift check before its first write
+  - Confirmation names and counts deletes separately from field restorations and states plainly that
+    this is compensating work, not atomic rollback
+  - Tests assert zero writes for wrong host, legacy or fully reverted run, unresolved intent, missing
+    object, changed field, changed `last_updated`, expired/fabricated plan, GET request, missing CSRF,
+    and non-superuser access
+  - _Requirements: 2.1–2.2, 14.1, 14.3, 18.4–18.10, 18.15_
+
+- [ ] 39. Reverse execution, partial-revert recovery, and audit — **implementation complete;
+  security gates and Security Design Authority review pending**
+  - Execute one inverse at a time in descending apply sequence. Confirm and persist each success
+    before proceeding, so cables/addresses/interfaces/devices precede the parents they depend on
+  - Stop on the first rejection, auth/connection failure, or lost response; record successful,
+    failed/unknown, and not-attempted items and leave the original run immutable
+  - Reconcile a lost delete response by exact id and a lost restore response by the recorded before
+    values. A retry preflights only mutations still applied; a fully reverted run and repeated
+    confirmation are no-ops
+  - Render immutable revert-attempt reports linked in both directions with the original run; log
+    actor, timestamp, target host, status, and safe failure reason without credentials or headers
+  - Extend `FakeNetBox` with PATCH/DELETE, protected-dependency rejection, `last_updated`, and
+    injectable lost responses. Integration tests cover full apply→revert for all importers, revert of
+    an endpoint-partial apply, D11 field restoration, dependency-caused partial revert, retry, and
+    unknown-outcome reconciliation
+  - Update the operator runbook with inspect/preflight/confirm/retry steps, required delete
+    permissions, drift-blocked recovery, and the continued option to re-upload a partial apply
+  - Run `ruff`, the full hermetic suite, deploy checks, SAST/SCA, secret scan, and config scan; obtain
+    Security Design Authority review for the destructive flow before merge
+  - _Requirements: 12.5, 13.5, 14.1, 14.3, 14.7, 18.6–18.14_
+
+## Phase 13 — Profile-derived breakout tags on physical parents (D15)
+
+D15 implementation is complete and covered by the hermetic suite. The live 4.6.8 probe (40a),
+production security scans, and Security Design Authority review remain. It is the second forward
+PATCH exception, so the implementation preserves D14's mutation-before-request rule and extends the
+bounded-update security tests rather than adding an ad-hoc interface update.
+
+- [ ] 40a. Probe tag lookup and interface tag writes against disposable NetBox 4.6.8
+  - Read-only first: inspect `/api/extras/tags/` lookup/filter behavior and the `tags` field exposed
+    by `OPTIONS /api/dcim/interfaces/`
+  - On an approved throwaway interface, record its full tag set and `last_updated`, add a temporary
+    tag using an interface PATCH containing only `tags`, read back the returned representation, then
+    restore the exact original set and delete only fixtures the probe created
+  - Confirm ids versus nested objects for interface POST and PATCH, omitted fields remain untouched,
+    tag order is not semantically significant, and an unknown tag id is rejected atomically
+  - Add `scripts/probe_interface_tags.py`; print no token/header and refuse to target an interface
+    not created by the probe unless an explicit disposable-fixture option is supplied
+  - Record results in `design.md` and amend 9.47/9.49 if the API differs
+  - _Requirements: 9.47, 9.49, 9.52, 14.1_
+
+- [x] 40b. Derive and validate the required tag per parent and cable side — **done**
+  - Add constants mapping positions 2/4/8 to `port-breakout-2x` / `4x` / `8x`; factor 1 maps to no
+    tag. Use `ProfileStructure.positions(side)`, never row count or connector total
+  - During cabling prefetch, fetch only required `extras.tags` slugs and index exact case-folded slug
+    matches. Missing/ambiguous slugs raise `BREAKOUT_TAG_NOT_FOUND`
+  - A D13 parent with an unreadable, 6-, 12-, or 16-position profile raises
+    `BREAKOUT_TAG_UNSUPPORTED`; blank profile retains D10's warning and plans no tag
+  - Detect any different held breakout-family slug and raise `BREAKOUT_TAG_CONFLICT`; preserve all
+    unrelated tags. De-duplicate one parent repeated across group rows
+  - Add cabling readiness checks for all three tag slugs and document that only a factor actually
+    required by a sheet blocks validation
+  - Tests cover partial 4x population, 2C4P shuffle parents receiving 4x rather than 8x, both cable
+    sides, missing tags, unsupported factors, unknown profile structure, and held conflicts
+  - _Requirements: 9.44–9.48, 9.50–9.51, 17.2, 17.8_
+
+- [x] 41. Add parent tags to creates and field-scoped PATCH existing parents — **done**
+  - Add the required tag id to a newly planned physical parent's interface-create payload
+  - Add a named cabling apply phase after physical-parent POST and before child POST. Existing
+    parents receive a PATCH with only `{id, tags}` where tags is the complete existing id set plus
+    the desired id; an already-held desired tag produces no action
+  - Extend `BaseImporter`/client only as generally as needed to support a PATCH action selected by
+    endpoint, method, and phase. Keep arbitrary PATCH unavailable to other forward paths
+  - Add every affected parent's order-insensitive tag-id set to validation state; a concurrent add
+    or remove aborts before the first write
+  - Preview states already present / included in create / will be patched, and object counts include
+    each distinct PATCHed parent once
+  - Tests assert parent→tag-PATCH→child→cable order, exact minimal payload, unrelated-tag
+    preservation, multi-row de-duplication, idempotent re-upload, tag drift, and each endpoint-phase
+    failure residue
+  - _Requirements: 9.48–9.54, 10.14, 10.18, 11.3, 12.4_
+
+- [ ] 42. Journal, revert, documentation, and security gates for tag updates — **implementation
+  and hermetic tests complete; production security gates and review pending**
+  - Journal each parent tag PATCH as one D14 UPDATE intent before the request, with only `tags` in
+    exact before/after values; mark applied/failed/unknown through the shared mutation path
+  - Revert preflight requires same host/id, `last_updated`, and exact post-tag set, then restores the
+    prior set with a tags-only PATCH in reverse sequence. A concurrent tag edit blocks all revert
+    writes
+  - Extend history summaries/CSV and changed counts to identify parent-interface tag changes without
+    storing unrelated interface fields
+  - Update operator and empty-instance runbooks: create the three tag slugs, profile-side mapping,
+    unsupported factors, conflict remediation, half-applied tag residue, and safe re-upload/revert
+  - Update the threat model and transport allow-list; security tests prove forward PATCH is limited
+    to device primary fields and interface tags, PUT remains absent, DELETE remains revert-only, and
+    tag ids/metadata cannot carry credentials or raw rows
+  - Run full tests, ruff, deploy checks, SAST/SCA, secret/config scans, and Security Design Authority
+    review because D15 expands forward mutation of pre-existing objects
+  - _Requirements: 9.49, 9.52–9.54, 11.3, 13.2a–13.2b, 14, 18_
+
 ## Deferred to iteration 2 (do not build now)
 
-Update and delete of existing objects (other than the primary-IP PATCH of D11); IPAM beyond the
-device sheet's loopback and management addresses (prefixes, VRFs, VLANs); multi-user roles and SSO;
-background workers for very large sheets; multi-instance NetBox switching; compensating rollback of
-applied creates. Dual-stack on the device sheet is in scope for D11 (four columns), not deferred.
+Update and delete of existing objects (other than the primary-IP PATCH of D11 and parent-interface
+tags PATCH of D15); IPAM beyond the device sheet's loopback and management addresses (prefixes, VRFs,
+VLANs); multi-user roles and SSO; background workers for very large sheets; multi-instance NetBox
+switching. General update/delete remains deferred: D14 permits only the exact inverse of a journaled
+write after a drift check.
+Dual-stack on the device sheet is in scope for D11 (four columns), not deferred.
 
 **Transceiver recording (D3, D6).** Dropped from iteration 1 because setting `interface.type` cannot
 hold a part number once device types define interface types. Iteration 2 should pick between a
 `dcim.InventoryItem` bound to the interface and a module in a module bay, then build the part-number
 map from the transceiver models actually in use. Note this reintroduces writes to objects the tool did
-not create, so the create-only invariant and its test will need revisiting deliberately.
+not create, so the forward-create invariant and its test will need revisiting deliberately; D14's
+inverse-only adapter is not precedent for a general update path.
 
 **Completing a partly cabled breakout (D10, Requirement 9.22).** Adding the missing lane to a cable
 that already exists is a PATCH, so it lands with the update operations above rather than with phase 8.

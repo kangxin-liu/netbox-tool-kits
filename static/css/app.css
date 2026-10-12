@@ -199,6 +199,26 @@ table.codes { max-width: 460px; }
 .resolved-item { display: block; }
 .row-issues div { margin-bottom: 4px; }
 
+.history-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+table.runs { min-width: 860px; margin-top: 0; }
+table.runs td:nth-child(4) { overflow-wrap: anywhere; }
+.run-metrics { display: grid; gap: 1px; min-width: 92px; color: var(--muted); }
+.run-metrics span { white-space: nowrap; }
+.run-metrics strong {
+  display: inline-block;
+  min-width: 2ch;
+  color: var(--ink);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.run-metrics .metric-error { color: var(--error); }
+.run-metrics .metric-warn { color: var(--warn); }
+.history-legacy { white-space: nowrap; }
+
 .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.85em; white-space: nowrap; }
 .pill-create, .pill-applied, .pill-ready { background: #e6f4ec; color: var(--ok); }
 .pill-skip-already-exists { background: #eef1f5; color: var(--muted); }

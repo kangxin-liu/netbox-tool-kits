@@ -664,7 +664,7 @@ class TestApply:
         report = apply_plan(importer, netbox, plan)
         assert "all-or-nothing" in report.guarantee
         assert "not atomic" in report.guarantee
-        assert "Nothing this tool creates can be rolled back by this tool" in report.guarantee
+        assert "can be reverted later from history" in report.guarantee
 
 
 class TestApplyGate:

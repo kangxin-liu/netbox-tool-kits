@@ -1100,7 +1100,8 @@ CABLING_INVALID = (
 #
 # The physical story: physical cage swp3 breaks out to four panel ports. The cable terminates on
 # swp3, while swp3s0..swp3s3 are virtual children created under it. `cable_group` remains an opaque
-# harness tag; the `{device}:{interface}` value belongs in `a_parent` (D13).
+# harness tag; the parent interface name belongs in `a_parent` (D13), with the device taken from
+# `a_end`.
 #
 # Requires NETBOX_AUTOCREATE_INTERFACES=true because the children do not exist yet.
 
@@ -1136,7 +1137,7 @@ def lane(child: str, parent: str, b_port: str, group: str, *note: str) -> tuple[
         "lab1-dh1-r01-leaf01",
         "device",
         child,
-        f"lab1-dh1-r01-leaf01:{parent}",
+        parent,
         "",
         "lab1-dh1-r01-pp02",
         "panel",
@@ -1160,7 +1161,7 @@ BREAKOUT_VALID = (
         "lab1-dh1-r01-leaf01",
         "device",
         "swp3s0",
-        "lab1-dh1-r01-leaf01:swp3",
+        "swp3",
         "",
         "lab1-dh1-r01-pp02",
         "panel",
@@ -1187,7 +1188,7 @@ BREAKOUT_INVALID = (
         "lab1-dh1-r01-leaf01",
         "device",
         "swp4s0",
-        "lab1-dh1-r01-leaf01:swp4",
+        "swp4",
         "",
         "lab1-dh1-r01-pp02",
         "panel",
@@ -1219,7 +1220,7 @@ BREAKOUT_INVALID = (
         "lab1-dh1-r01-leaf01",
         "device",
         "swp5s0",
-        "lab1-dh1-r01-leaf01:swp5",
+        "swp5",
         "",
         "lab1-dh1-r01-pp02",
         "panel",
@@ -1240,7 +1241,7 @@ BREAKOUT_INVALID = (
         "lab1-dh1-r01-leaf01",
         "device",
         "swp5s1",
-        "lab1-dh1-r01-leaf01:swp5",
+        "swp5",
         "",
         "lab1-dh1-r01-pp02",
         "panel",
@@ -1263,7 +1264,7 @@ BREAKOUT_INVALID = (
         "lab1-dh1-r01-leaf01",
         "device",
         "swp6s0",
-        "lab1-dh1-r01-leaf01:swp6",
+        "swp6",
         "",
         "lab1-dh1-r01-pp02",
         "panel",
@@ -1284,7 +1285,7 @@ BREAKOUT_INVALID = (
         "lab1-dh1-r01-leaf01",
         "device",
         "swp6s1",
-        "lab1-dh1-r01-leaf01:swp6",
+        "swp6",
         "",
         "lab1-dh1-r01-pp02",
         "panel",
@@ -1326,13 +1327,13 @@ def shuffle_lane(
         "lab1-dh1-r01-spine01",
         "device",
         a_child,
-        f"lab1-dh1-r01-spine01:{a_parent}",
+        a_parent,
         "",
         b_end,
         "device",
         b_child,
         "",
-        f"{b_end}:{b_parent}",
+        b_parent,
         "",
         "mmf-om4" if first else "",
         "breakout-2c4p-8c1p-shuffle" if first else "",
@@ -1398,7 +1399,7 @@ SHUFFLE_INVALID = (
         "device",
         "swp9s0",
         "",
-        "lab1-dh1-r02-leaf01:swp9",
+        "swp9",
         "",
         "",
         "",
@@ -1407,19 +1408,20 @@ SHUFFLE_INVALID = (
         "",
         "",
         "",
-        "a_parent is malformed: expected {device}:{interface}",
+        "a_parent names no existing/template parent and supplies no type: "
+        "INTERFACE_TYPE_REQUIRED after S3 is fixed",
     ),
     (
         "lab1-dh1-r01-spine01",
         "device",
-        "swp2s0",
-        "lab1-dh1-r01-leaf01:swp2",
+        "swp1s0",
+        "swp2",
         "",
         "lab1-dh1-r01-leaf01",
         "device",
         "swp9s1",
         "",
-        "lab1-dh1-r01-leaf01:swp9",
+        "swp9",
         "",
         "",
         "",
@@ -1428,7 +1430,7 @@ SHUFFLE_INVALID = (
         "",
         "",
         "",
-        "a_parent device disagrees with a_end: BREAKOUT_PARENT_MISMATCH after S2 is fixed",
+        "the same child swp1s0 is assigned to swp1 on line 2 and swp2 here: CHILD_PARENT_CONFLICT",
     ),
 )
 
@@ -1699,8 +1701,8 @@ SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...
         "3_cabling_shuffle_invalid",
         BREAKOUT_COLUMNS,
         SHUFFLE_INVALID,
-        "line 2 is valid; line 3 has malformed parent syntax (S2), and line 4 names a parent on "
-        "the wrong device (S3 after the S2 fault is fixed)",
+        "line 2 is valid; line 4 assigns one child to two parents (S3), and after that is fixed "
+        "line 3 names an unknown parent without supplying its type (S4)",
     ),
     (
         "3_cabling_newports_valid",

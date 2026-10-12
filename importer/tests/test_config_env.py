@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 import pytest
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 from config import env
@@ -113,6 +114,9 @@ class TestNoSecretsInSource:
         source = (REPO_ROOT / "config" / "settings.py").read_text()
         statements = [line for line in source.splitlines() if line.startswith("NETBOX_TOKEN")]
         assert statements == ['NETBOX_TOKEN = env.require(ENVIRON, "NETBOX_TOKEN")']
+
+    def test_revert_token_defaults_to_the_forward_token(self):
+        assert settings.NETBOX_REVERT_TOKEN == settings.NETBOX_TOKEN
 
     def test_no_template_can_reach_the_token(self):
         templates = (REPO_ROOT / "importer" / "templates").rglob("*.html")

@@ -83,9 +83,17 @@ def every_stored_value() -> str:
     for run in ImportRun.objects.all():
         for field in run._meta.fields:
             chunks.append(str(getattr(run, field.name)))
-        for related in (run.issues.all(), run.results.all()):
+        for related in (
+            run.issues.all(),
+            run.results.all(),
+            run.mutations.all(),
+            run.revert_attempts.all(),
+        ):
             for record in related:
                 chunks.extend(str(getattr(record, f.name)) for f in record._meta.fields)
+                if hasattr(record, "items"):
+                    for item in record.items.all():
+                        chunks.extend(str(getattr(item, f.name)) for f in item._meta.fields)
     return "\n".join(chunks)
 
 
@@ -97,6 +105,7 @@ class TestTheTokenStaysPut:
     def sentinel_token(self, settings):
         """A distinctive token for the length of each test, so a hit is unambiguous."""
         settings.NETBOX_TOKEN = SENTINEL
+        settings.NETBOX_REVERT_TOKEN = SENTINEL
 
     @pytest.mark.parametrize("name", PAGES)
     def test_no_page_carries_it(self, browser, netbox, name):
@@ -118,8 +127,10 @@ class TestTheTokenStaysPut:
         # Both downloads too: they are built from the same records but by different code.
         issues = browser.get(reverse("importer:run_issues", args=[run.pk]))
         results = browser.get(reverse("importer:run_report", args=[run.pk]))
+        mutations = browser.get(reverse("importer:run_mutations", args=[run.pk]))
         assert SENTINEL not in issues.content.decode()
         assert SENTINEL not in results.content.decode()
+        assert SENTINEL not in mutations.content.decode()
 
     def test_an_unreachable_target_reports_the_failure_without_it(self, browser, netbox, caplog):
         """The error paths are the ones that leak, so they are the ones tested hardest."""
@@ -160,6 +171,7 @@ class TestTheTokenStaysPut:
         """Requirement 14.1 covers error pages, which Django builds from settings itself."""
         safe = SafeExceptionReporterFilter().get_safe_settings()
         assert safe["NETBOX_TOKEN"] != SENTINEL
+        assert safe["NETBOX_REVERT_TOKEN"] != SENTINEL
         assert safe["SECRET_KEY"] != settings.SECRET_KEY
 
     def test_it_is_never_put_in_a_session_or_a_cookie(self, browser, netbox):

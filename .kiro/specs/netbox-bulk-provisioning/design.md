@@ -1,4 +1,4 @@
-# Design — NetBox bulk provisioning (iteration 1: create only)
+# Design — NetBox bulk provisioning (forward imports create only)
 
 ## Overview
 
@@ -20,12 +20,14 @@ The gate is all-or-nothing per file: one bad row blocks the file. Partial applic
 even on request (Req 10.7), because a half-applied sheet is the exact failure this design exists to
 prevent.
 
-The app holds no copy of NetBox's inventory. Its only persistent data is the local user table and
-an audit log of what each run submitted. NetBox stays the system of record.
+The app holds no general copy of NetBox's inventory. Its persistent data is the local user table,
+the run audit log, and the minimal before/after values of fields the tool wrote. Those values form an
+append-only mutation journal used for history summaries, drift checks, and compensating reverts;
+NetBox remains the system of record.
 
-Design status: **verified against NetBox 4.6.8, implementation complete.** Decisions D1–D9 in
-`requirements.md` are settled and built; each one's blast radius if reversed is named in the table
-below. **D10 — cable profiles and breakout — is built and verified**: its field-level facts were
+Design status: **the original baseline is verified against NetBox 4.6.8 and complete.** Decisions
+D1–D9 in `requirements.md` are settled and built; each one's blast radius if reversed is named in the
+table below. **D10 — cable profiles and breakout — is built and verified**: its field-level facts were
 probed read-only on 2026-08-20 and its behavioural ones by creating and deleting cables on
 2026-08-24. Every assumption held, so nothing in Requirement 9 needed amending. The one thing still
 taken on trust is the internal position map of a `-shuffle` profile, which NetBox does not serve. **D11 — loopback and management
@@ -43,6 +45,16 @@ child created under a named cage, while the cable stays on the cage, and it deco
 `cable_group` so a shuffle (several cages per side under one harness) can be written at all. Three
 facts need a live probe first — `virtual` + `parent` in a bulk POST, a `virtual` child refused as a
 cable termination, and a cage's occupancy while children hang off it — carried as task 31b below.
+**D14 — applied-change history and compensating revert — is decided and built, with Security Design
+Authority review pending before merge or deployment.** It adds an
+operation journal, history summaries, and a reverse-order revert flow that deletes only recorded
+creates and restores only recorded changed fields after a strict drift check.
+**D15 — profile-derived breakout tags — is built and tested, with its live probe outstanding.** It
+adds an existing
+`port-breakout-2x`, `port-breakout-4x`, or `port-breakout-8x` tag to each D13 physical parent,
+derived from that profile side's positions per connector. Existing parents require a tags-only,
+drift-checked PATCH and D14 UPDATE journal entry; a live 4.6.8 probe must confirm the writable tag
+payload shape before implementation.
 Field names in this document were checked against the target instance's own
 `OPTIONS` responses rather than from memory — see "Verified against the target instance".
 
@@ -65,23 +77,27 @@ flowchart TB
         I["importers/ — hierarchy | devices | cabling"]
         L["services/lookups.py — cached natural-key lookups"]
         K["services/netbox_client.py — pynetbox factory"]
-        M["models.py — ImportRun / ImportRowResult"]
+        M["models.py — runs / mutations / revert attempts"]
+        R["services/revert.py — preflight + compensate"]
     end
 
     DB[("SQLite\nusers + audit log")]
     NB[("NetBox 4.6.x\nREST API")]
-    ENV["Environment\nNETBOX_URL / NETBOX_TOKEN"]
+    ENV["Environment\nNETBOX_URL / forward + revert tokens"]
 
     UI -->|"HTTPS, session cookie"| V
     V --> F --> S
     S --> C
     C --> S
     V --> I
+    V --> R
     I --> N
     I --> VAL
     I --> L --> K
     K -->|"HTTPS + token"| NB
     V --> M --> DB
+    R --> M
+    R --> K
     ENV -.->|"read at startup"| K
 ```
 
@@ -345,11 +361,11 @@ not cabling import. `scripts/seed_netbox.py` already builds panels in the `rear_
 
 | Store / flow | Classification | Handling |
 | --- | --- | --- |
-| `NETBOX_TOKEN` | CONFIDENTIAL | Environment only. Never rendered, logged, persisted, or included in an error. |
+| `NETBOX_TOKEN` / `NETBOX_REVERT_TOKEN` | CONFIDENTIAL | Environment only. The optional revert token falls back to the forward token; a separate least-privilege value is preferred. Neither is rendered, logged, persisted, or included in an error. |
 | `DJANGO_SECRET_KEY` | CONFIDENTIAL | Environment only. |
 | Uploaded spreadsheet | INTERNAL | Parsed in memory / temp file, deleted in `finally`. Never written to a served path. |
 | Plan held between preview and confirm | INTERNAL | Server-side session or short-lived DB row, scoped to the user, cleared on logout. |
-| `ImportRun` / `ImportRowResult` | INTERNAL | Object ids, names, outcomes. No credentials, no file contents. |
+| Run, mutation, and revert audit records | INTERNAL | Object ids, names, outcomes, and only the before/after fields the tool wrote. No credentials, file contents, or whole-object snapshots. |
 | Local user table | CONFIDENTIAL (password hashes) | Django's default hasher. |
 | App → NetBox | INTERNAL over TLS | HTTPS with certificate verification on. |
 
@@ -359,7 +375,9 @@ not cabling import. `scripts/seed_netbox.py` already builds panels in the `rear_
  session auth, superuser check, CSRF on every mutation, upload type and size limits.
 2. **Spreadsheet → Django.** The file is untrusted input regardless of who uploaded it. Formulas
  are not evaluated, cells are coerced explicitly, nothing is rendered as raw HTML.
-3. **Django → NetBox.** The token crosses this boundary and must not cross any other.
+3. **Django → NetBox.** The effective forward or revert credential crosses this boundary and must
+ not cross any other. Only the isolated revert adapter can request the effective revert credential,
+ even when its configured value falls back to `NETBOX_TOKEN`.
 4. **NetBox response → Django.** API responses are data, never instructions; error strings are
  escaped before display.
 
@@ -369,20 +387,24 @@ OWASP Top 10 baseline, scoped to what this app actually does.
 
 | # | Threat | Vector | Mitigation | Requirement |
 | --- | --- | --- | --- | --- |
-| T1 | Token disclosure | Token echoed in a debug page, log line, or audit record | Env-only; `DEBUG=false`; explicit redaction in the error formatter; audit schema has no token field | 2.4, 12.7, 14.1 |
+| T1 | Token disclosure | Either token echoed in a debug page, log line, or audit record | Env-only; `DEBUG=false`; explicit redaction in the error formatter; audit schema has no token field | 2.4, 12.7, 14.1 |
 | T2 | Broken access control | Unauthenticated or non-superuser reaching an importer | `login_required` + superuser test on every view; default-deny mixin on the base view class | 1.2, 1.3 |
 | T3 | Unauthorised bulk write (CSRF) | Forged POST applying a plan | CSRF token required; apply is POST-only; plan bound to the session that created it | 10.6, 10.17, 14.3 |
 | T4 | Malicious upload | Zip-bomb / huge xlsx, formula injection, spoofed extension | Size cap before parse; extension + content-type allow-list; `openpyxl` read-only, values not formulas | 5.1, 5.2, 5.3 |
 | T5 | Stored XSS via cell content | A cell containing markup rendered into the preview table | Django autoescaping; no `mark_safe` on sheet or NetBox values | 5.7, 14.4 |
-| T6 | Destructive mistake at scale | A wrong sheet mass-creating objects | Create-only (never update/delete); mandatory preview; explicit confirm; idempotent skip | 10.1, 10.4, 11.3 |
+| T6 | Destructive mistake at scale | A wrong sheet mass-creating objects or tagging many parent ports incorrectly | Forward applies stay create-first with only primary-IP and derived-tag field-scoped writes; exact profile mapping; conflicting tags block; mandatory preview; explicit confirm; idempotent skip | 9.44–9.54, 10.1, 10.4, 11.3 |
 | T7 | MITM on the NetBox path | Downgraded or unverified TLS | HTTPS only, verification on by default; override warns loudly in logs and UI | 2.3, 14.5 |
 | T8 | CSV injection in exported reports | Report cell beginning `=`/`+`/`-`/`@` executing in Excel | Prefix formula-leading values with `'` when writing report CSVs | 12.6, 16.9 |
 | T9 | Repudiation | No record of who ran a bulk change | Durable `ImportRun` per apply, UI-immutable, with actor and counts | 13.1, 13.5 |
-| T10 | Partial-write confusion | Aborted run leaves NetBox half-populated and operator misled | Ordered record of applied creates; UI states rollback is not possible | 12.4, 12.5 |
+| T10 | Partial-write confusion | Aborted apply or revert leaves NetBox and the local audit record ambiguous | Intent before each request; reconcile unknown outcomes; immutable ordered mutation and revert records | 12.4, 13.2–13.2b, 18.11–18.13 |
+| T11 | Revert destroys later work | An old run deletes an object that was edited or gained dependencies after apply | Prefer a separate no-create revert credential; isolate DELETE in the revert adapter even under token fallback; same-host and exact post-state checks; short-lived plan fingerprint; reverse order; stop on first failure | 2.1, 18.5–18.12 |
+| T12 | Interface tag PATCH overwrites concurrent work | NetBox's relationship-list write replaces tags added by another operator after validation | Preserve the complete existing set, compare tag ids order-insensitively immediately before apply, abort on any drift, PATCH only `tags`, journal exact before/after sets | 9.49, 9.52–9.54, 10.14 |
 
-**Known residual risk.** NetBox offers no cross-request transaction, so a batch can be partially
-applied. Iteration 1 accepts this and mitigates with ordered audit records for manual unwind
-rather than attempting compensating deletes, which could destroy pre-existing objects.
+**Known residual risk.** NetBox offers no cross-request transaction, and its database cannot share a
+transaction with the local audit database. An apply or compensating revert can therefore stop between
+endpoints. D14 makes the state explicit and retryable but does not call it atomic rollback. A create
+that later gained an external dependency may pass the field drift check and still have its DELETE
+rejected; revert stops there and records the successful, failed, and not-attempted operations.
 
 **Approval.** This threat model needs Security sign-off before implementation proceeds. Note also
 that the working copy's `.env` contains a live production token committed to no repo but present
@@ -403,7 +425,9 @@ on disk — it should be rotated if it has ever been shared, and `.gitignore` no
 | D10 **(proposed)** | Optional `cable_profile` *and* `cable_group` columns, so several rows can describe one multi-connector cable | A breakout is one cable with one A termination and several B terminations. The profile column alone cannot express it: the rows sharing the A port are rejected as duplicate terminations before the profile is read | `columns.py`, `importers/cabling.py` (S3 + planning), one grouping hook on `importers/base.py`, per-line report attribution |
 | D11 **(proposed)** | Optional `loopback_ip4` / `loopback_ip6` / `management_ip4` / `management_ip6`; names from the device type; IPv4 preferred as primary unless the row has none, then management over loopback within the family; first PATCH, scoped to those two fields | Dual-stack cannot fit in two family-agnostic cells. Vendor names belong on the type once. NetBox cannot set `primary_ip4` at device create because the IP does not exist yet | `columns.py`, `importers/devices.py` (S2–S4 + apply), `ipam.ip-addresses` endpoint, Requirement 11.3's exception, devices readiness, empty-instance prep |
 | D12 **(built, probe outstanding)** | A cabling row may create a missing *device* interface — from the device type's template first, from optional `a_interface_type` / `b_interface_type` otherwise — behind `NETBOX_AUTOCREATE_INTERFACES`, off by default | NetBox never copies a newly added template onto existing devices, so the common failure is a port the type defines and the device lacks; creating it from the template invents nothing and makes a typo fall through to a row that demands an explicit type. Off by default because the tool cannot tell a new port from a mistyped one | `columns.py`, `importers/cabling.py` (port resolution + a second `endpoint_order` entry), the pre-apply drift check, one settings flag, Requirement 8.23 |
-| D13 **(built, probe outstanding)** | Optional `a_parent` / `b_parent` (`{device}:{interface}`): the end's `*_port` becomes a `virtual` child created under that parent, the cable terminates on the physical parent, and `*_interface_type` types the parent. Decoupled from `cable_group`, which stays a free-text tag, so a shuffle harness is one group with child rows on both ends | D10 cabled the cage but left the breakout children uncreated, so NetBox shows a consumed cage as free and nothing stops a lane being cabled twice; `virtual` children with a parent fix both. The parent must be its own column, not `cable_group`, because a shuffle has several parents per side under one harness | `columns.py`, `importers/cabling.py` (parent/child end-resolution, S3 child-vs-parent checks, plan-on-parent), the preview's lane-pairing line, sample/template generation, the live probe |
+| D13 **(built, probe outstanding)** | Optional `a_parent` / `b_parent` interface names, resolved on the corresponding `*_end` device: the end's `*_port` becomes a `virtual` child created under that parent, the cable terminates on the physical parent, and `*_interface_type` types the parent. Decoupled from `cable_group`, which stays a free-text tag, so a shuffle harness is one group with child rows on both ends | D10 cabled the cage but left the breakout children uncreated, so NetBox shows a consumed cage as free and nothing stops a lane being cabled twice; `virtual` children with a parent fix both. The parent must be its own column, not `cable_group`, because a shuffle has several parents per side under one harness | `columns.py`, `importers/cabling.py` (parent/child end-resolution, S3 child-vs-parent checks, plan-on-parent), the preview's lane-pairing line, sample/template generation, the live probe |
+| D14 **(built)** | Append-only operation journal plus a two-step, reverse-order compensating revert | Row results cannot represent one-row/many-object and many-row/one-object writes precisely. Safe reversion needs operation identity, minimal before/after values, same-target and post-state checks, and immutable attempt outcomes; without those, a history button could delete later work | apply instrumentation, audit models, history UI/CSV, `services/revert.py`, NetBox delete permission, Requirement 18 |
+| D15 **(built, probe outstanding)** | Derive `port-breakout-2x` / `4x` / `8x` from each D13 parent's profile-side positions and add the existing tag to that physical parent | Row count is population, not breakout capacity; total profile connectors misstate shuffle parents. Positions per connector is the stable factor. Existing parents need a bounded tags-only PATCH, while conflicting factor tags block rather than being removed | tag lookup/readiness, cabling S3/S4 planning, interface create payloads, an interface PATCH phase, drift signatures, D14 UPDATE/revert coverage, live probe |
 
 ## Component design
 
@@ -608,8 +632,10 @@ record keeps whatever casing NetBox holds.
 
 ### `services/netbox_client.py`
 
-Builds the client from environment config, applies `NETBOX_VERIFY_SSL` and `NETBOX_TIMEOUT`, probes
-`/api/status/` once per process for the version, and enforces the supported range `>=4.6, <4.7`.
+Builds the forward client from environment config, applies `NETBOX_VERIFY_SSL` and `NETBOX_TIMEOUT`,
+probes `/api/status/` once per process for the version, and enforces the supported range
+`>=4.6, <4.7`. D14 adds a separate revert adapter backed by `NETBOX_REVERT_TOKEN` when supplied and
+`NETBOX_TOKEN` otherwise; importers cannot obtain the adapter or its DELETE capability.
 
 `classify()` turns a raw exception into one of DNS / TLS / TIMEOUT / AUTH / CONNECTION / VERSION /
 SERVER, each carrying a sentence naming the operator's next action, because "DNS does not resolve
@@ -623,9 +649,11 @@ Three things differ from the original sketch:
   interpolated into `str(e)`, which is precisely what Req 14.1 and task 21 must guarantee cannot
   happen. This module's own session gives redaction a single choke point — and it is the only place
   the token crosses (trust boundary 3).
-- **The session refuses any method outside GET / OPTIONS / POST**, raising before a request is issued.
-  The create-only invariant is then enforced by the transport rather than trusted separately in three
-  importers.
+- **The generic session API refuses arbitrary methods.** It exposes GET / OPTIONS / POST to importers,
+  the field-scoped D11 PATCH to the device writer, the D15 tags-only PATCH to the cabling writer, and
+  PATCH / DELETE only through the D14 revert adapter; PUT is refused everywhere. The bounded forward-
+  update policy is therefore enforced at the transport boundary rather than trusted separately in
+  three importers.
 - **The two exception types redact themselves** (added in task 21, after the security sweep found both
   paths). `NetBoxUnavailable` redacts its detail in `__init__` rather than trusting each construction
   site to have done it, and `NetBoxWriteRejected` redacts NetBox's error body — recursively, so the
@@ -688,7 +716,7 @@ Example row: `SYD1-DH1-R01, front, 12, 2, syd1-dh1-r01-leaf01, DCS-7050SX3-48YC8
 | `a_end_kind` / `b_end_kind` | no | device / panel, default device | selects the termination model |
 | `a_port` / `b_port` | yes | port name on that end | interface, or front/rear port for a panel |
 | `a_port_side` / `b_port_side` | no | front / rear, default front | panels only; ignored for devices |
-| `a_parent` / `b_parent` | no | `{device}:{interface}`, e.g. `spine01:swp1` | D13; sets the port's parent cage — `*_port` becomes a `virtual` child, cable terminates on the parent |
+| `a_parent` / `b_parent` | no | interface name on the corresponding end, e.g. `swp1` | D13; sets the port's parent cage — `*_port` becomes a `virtual` child, cable terminates on the parent |
 | `a_interface_type` / `b_interface_type` | no | from API (`400gbase-x-qsfpdd`, `100gbase-x-qsfp28`, …) | D12 (port type) / D13 (parent type when a parent is named); read only when creating an interface the device type does not define |
 | `cable_type` | yes | from API (`cat6`, `cat6a`, `mmf-om4`, `smf-os2`, `dac-passive`, …) | |
 | `cable_profile` | no | from API — 26 values (`single-1c2p`, `trunk-2c4p`, `breakout-1c4p-4c1p`, …) | D10; blank omits `profile` from the payload |
@@ -776,10 +804,13 @@ interfaces rather than re-typing ones that already exist.
 The section above cables the physical cage and leaves the children to device-type preparation. In
 practice that preparation never happens: the children do not exist on the device, NetBox shows the cage
 as free while its lanes are patched, and the sheet carries no way to say which lane is which. D13 closes
-that without moving the cable. Two columns do it — `a_parent` and `b_parent`, each `{device}:{interface}`
-— and they separate two facts D10 had let coincide.
+that without moving the cable. Two columns do it — `a_parent` and `b_parent`, each an interface name
+resolved on the device already named by `a_end` / `b_end` — and they separate two facts D10 had let
+coincide. Values are opaque NetBox interface names, so vendor delimiters such as the `:` in
+`100GE1/1/1:1` are never parsed.
 
-**One fact: which cage a lane hangs off.** When `a_parent` is `spine01:swp1`, `a_port` is no longer an
+**One fact: which cage a lane hangs off.** When `a_end` is `spine01` and `a_parent` is `swp1`,
+`a_port` is no longer an
 independent interface; it is a child of `swp1`, created as `type = virtual` with `parent` pointing at the
 cage. The cable still terminates on `swp1` (Req 9.36), so the profile and its connector counts (9.19)
 are the same object they were before D13. The child is the record of the lane and — because a `virtual`
@@ -789,9 +820,9 @@ interface is not cable-capable — the thing that stops someone cabling `swp1s0`
 The non-shuffle breakout the template ships therefore reads:
 
 ```
-a_end,     a_parent,     a_port,  a_interface_type,  b_end,      b_port,  b_interface_type,  cable_type,  cable_profile,       cable_group
-…SPF90001, …SPF90001:swp1, swp1s0, 800gbase-x-osfp,  …LFB00101,  swp1,   400gbase-x-qsfpdd, mmf-om4,     breakout-1c2p-2c1p,  brk-01
-…SPF90001, …SPF90001:swp1, swp1s1, 800gbase-x-osfp,  …LFB00101,  swp2,   400gbase-x-qsfpdd, ,            ,                    brk-01
+a_end,     a_parent, a_port,  a_interface_type,  b_end,      b_port,  b_interface_type,  cable_type,  cable_profile,       cable_group
+…SPF90001, swp1,     swp1s0, 800gbase-x-osfp,  …LFB00101,  swp1,   400gbase-x-qsfpdd, mmf-om4,     breakout-1c2p-2c1p,  brk-01
+…SPF90001, swp1,     swp1s1, 800gbase-x-osfp,  …LFB00101,  swp2,   400gbase-x-qsfpdd, ,            ,                    brk-01
 ```
 
 Two rows, one cable on `swp1` ↔ `{swp1, swp2}` with profile `breakout-1c2p-2c1p` (one A connector, two
@@ -801,20 +832,20 @@ B connectors — unchanged by D13), plus two `virtual` children `swp1s0`/`swp1s1
 **The other fact, and the one that forced the split: a shuffle.** A shuffle harness carries lanes from
 several cages on each side to several cages on the other — `swp1`'s lanes reach children on three leaves,
 and each of those leaf ports is itself a child of a cage fanning out elsewhere. One `cable_group` tag
-can name one harness, but it cannot name the several parents on each side; a `{device}:{interface}`
-grouping tag (the first sketch) can name one parent but not the harness. Only when the two are different
+can name one harness, but it cannot name the several parents on each side; a parent-derived grouping
+tag (the first sketch) can name one parent but not the harness. Only when the two are different
 columns can a shuffle be written — one tag across all the rows, a per-end parent on each:
 
 ```
-a_end,  a_parent,     a_port,  b_end,  b_parent,     b_port,  cable_profile,               cable_group
-spineA, spineA:swp1,  swp1s0,  leafB,  leafB:swp9,   swp9s0,  breakout-2c4p-8c1p-shuffle,  shuf-01
-spineA, spineA:swp1,  swp1s1,  leafC,  leafC:swp9,   swp9s0,  ,                            shuf-01
-spineA, spineA:swp2,  swp2s0,  leafB,  leafB:swp9,   swp9s1,  ,                            shuf-01
-spineA, spineA:swp2,  swp2s1,  leafC,  leafC:swp9,   swp9s1,  ,                            shuf-01
+a_end,  a_parent, a_port,  b_end,  b_parent, b_port,  cable_profile,               cable_group
+spineA, swp1,     swp1s0,  leafB,  swp9,     swp9s0,  breakout-2c4p-8c1p-shuffle,  shuf-01
+spineA, swp1,     swp1s1,  leafC,  swp9,     swp9s0,  ,                            shuf-01
+spineA, swp2,     swp2s0,  leafB,  swp9,     swp9s1,  ,                            shuf-01
+spineA, swp2,     swp2s1,  leafC,  swp9,     swp9s1,  ,                            shuf-01
 ```
 
-This resolves to one cable whose A terminations are the distinct A-side parents `{spineA:swp1,
-spineA:swp2}` and whose B terminations the distinct B-side parents `{leafB:swp9, leafC:swp9}` (Req 9.38),
+This resolves to one cable whose A terminations are parents `swp1` and `swp2` on `spineA`, and whose
+B terminations are parent `swp9` on each of `leafB` and `leafC` (Req 9.38),
 plus the eight `virtual` children the rows name. `breakout-2c4p-8c1p-shuffle` declares two A connectors
 and eight B connectors, so two A parents fills the A side and two B parents is a legal partial fill of
 the B side (9.19 is `<=`). The row-level `swp1s0 ↔ swp9s0` pairing is the lane map; the NetBox cable is
@@ -836,6 +867,72 @@ bulk POST; that a `virtual` child is rejected as a cable termination (the proper
 that cabling the parent while children exist under it reports the parent's occupancy the way D10's
 occupancy check expects. Until that probe runs, D13's field-level claims are assertions, and the tasks
 below carry the probe as their first item.
+
+#### Profile-derived parent tags (D15)
+
+D13 records the physical relationship, but it leaves a fact operators use for filtering and
+automation unstated: how many logical ports the physical parent is broken into. D15 derives that fact
+from the cable profile already validated by D10 and attaches one existing NetBox tag to each D13
+parent:
+
+| Positions on this profile side, per connector | Required tag slug |
+| --- | --- |
+| 1 | none — this side is not broken out |
+| 2 | `port-breakout-2x` |
+| 4 | `port-breakout-4x` |
+| 8 | `port-breakout-8x` |
+
+The input is `ProfileStructure.positions(side)`, not the number of spreadsheet rows and not the
+profile's connector total. A partly populated `breakout-1c4p-4c1p` remains 4x when only one child is
+connected. For `breakout-2c4p-8c1p-shuffle`, each of the two A connectors has four positions, so each
+A parent receives `port-breakout-4x`; the eight B connectors have one position each and receive no
+breakout tag. This side-specific rule is what makes the same algorithm work for breakouts, trunks,
+reversed cable orientation, and shuffle groups.
+
+The three strings are **tag slugs**, not names to create. S4 prefetches `extras.tags` by the factors
+the sheet actually needs. Zero or multiple matches blocks validation. Profiles with 6, 12, or 16
+positions — and a future profile whose structure cannot be parsed — also block when used on a D13
+parent: NetBox may accept the cable profile, but this deployment has no approved tag representing
+that breakout state, and silently omitting it would make the downstream automation this decision
+serves incorrect.
+
+For a new physical parent, the normal `dcim.interfaces` create payload gains the required tag id. For
+an existing parent, the update is deliberately narrow:
+
+```python
+{
+    "id": parent_id,
+    "tags": [*existing_tag_ids, required_breakout_tag_id],
+}
+```
+
+The list is de-duplicated and compared without order. No unrelated tag is removed. If a parent holds
+a different slug from the three-tag breakout family, validation blocks rather than replacing it or
+leaving contradictory factors. If the desired tag is already present, no PATCH is planned. The
+pre-apply signature includes the full tag-id set so a concurrent tag edit aborts before any write;
+this is essential because NetBox's writable `tags` field replaces the relationship set supplied in
+the request.
+
+Apply gains one phase between physical-parent creation and virtual-child creation:
+
+```
+POST missing physical parents (tag included)
+PATCH tags on existing physical parents
+POST missing virtual children
+POST cables
+```
+
+That PATCH is the second forward-update exception after D11's primary IP. D14 records it as an
+`UPDATE` mutation with only `tags` in `before_values` and `after_values`. Revert restores the exact
+previous set only when the interface still matches the journalled post-state. A cable failure can
+therefore leave the tag behind, but the report identifies the completed mutation and re-upload is
+idempotent because an already-held desired tag plans no update.
+
+**Live probe before build.** Against disposable NetBox 4.6.8, confirm: tag lookup by slug; the
+accepted interface create/PATCH representation (ids versus nested objects); whether a tags-only PATCH
+preserves fields omitted from the payload; and the read-back shape/order of `Interface.tags`. The
+probe must create its own temporary tag/interface or use approved disposable fixtures, restore/delete
+everything it creates, and never alter a shared production interface.
 
 #### Creating a missing interface (D12)
 
@@ -1072,29 +1169,31 @@ table, but the cabling importer never reaches `compare_to_existing`, because an 
 a skip long before any field is compared. The same is already true of `cable_type`. The class records
 what a future iteration that *can* update a cable should do with a mismatch.
 
-### Every write is a create
+### Forward apply is create-first, with two field-scoped PATCH exceptions
 
-With transceiver recording deferred (D3), iteration 1 has **no** code path that modifies an object it
-did not create — except the primary-IP PATCH of D11, which is named, field-scoped, and not a general
-update path. That is worth stating as an invariant rather than a coincidence: it makes the blast
-radius of a mistaken import bounded by what it added, and it means a reviewer can verify the property
-by grepping for `PATCH` and `DELETE` and finding only the device-importer primary-IP call.
+With transceiver recording deferred (D3), forward apply is create-first and has exactly two code
+paths that modify an object it did not create: D11's primary-IP PATCH and D15's parent-interface
+tags PATCH. Both are named, field-scoped, derived from validated input, drift-checked, and journalled;
+neither is a general update path. D14's inverse `PATCH` and `DELETE` calls remain isolated in
+`services/revert.py`, take only journaled operations, and are unreachable from sheet planning or
+ordinary apply.
 
 **D10 preserves the invariant, and that is why Requirement 9.22 blocks instead of helping.** The obvious thing to
 do with a breakout that already has three of its four lanes is to add the fourth, and the only way to
 add a termination to an existing cable is to PATCH it. So the useful behaviour and the invariant are in
 direct conflict, and the invariant wins: a partly cabled group is reported for a human to finish in
 NetBox. Adding terminations to existing cables belongs with the other update operations in iteration 2,
-where the create-only test is being revisited deliberately rather than eroded by one exception.
+where the bounded-update allow-list is revisited deliberately rather than widened ad hoc.
 
 **D12 adds objects, not exceptions.** Creating a `dcim.Interface` against a device that already
 exists looks at first like editing that device's inventory, and Requirement 8.23 originally read it
 that way and refused. The distinction that matters is which object is written: an interface is its
 own object with its own id, and nothing about the device record changes when one appears beneath it.
 It is the same shape as D11 creating an `ipam.IPAddress` against an existing device, which nobody
-called an update. What would breach the invariant is re-typing or renaming an interface the tool did
-not create, and 9.8 forbids exactly that. So the grep still finds one `PATCH` and no `DELETE`
-(Req 11.3a), and Requirement 8.23 is amended to match rather than left contradicting 9.25.
+called an update. What would breach the bounded-update rule is re-typing or renaming an interface the
+tool did not create, and 9.8 forbids exactly that. D15 adds only the separately tested tags-only
+PATCH; no forward `DELETE` exists (Req 11.3a), and Requirement 8.23 is amended to match rather than
+left contradicting 9.25.
 
 **D11 is the first exception, and it is a different kind of PATCH.** NetBox will not accept
 `primary_ip4` on the device POST: the IP does not exist yet. The sequence is create device → create
@@ -1102,6 +1201,13 @@ not create, and 9.8 forbids exactly that. So the grep still finds one `PATCH` an
 and/or `primary_ip6`. The PATCH does not rename, re-parent, or rewrite any other field, and a
 primary IP already set to a *different* address is not patched — it blocks (Req 11.5). Completing a
 partly-cabled breakout stays on the other side of that line.
+
+**D15 is the second exception, limited to interface tags.** The cable profile already states the
+breakout factor, and downstream automation needs the corresponding existing tag on the physical
+parent. A create-only rule cannot attach a tag to a parent that predates the sheet, so D15 permits a
+PATCH containing only `tags`: the drift-checked existing set plus one allow-listed derived tag.
+Different breakout-factor tags block; unrelated tags are preserved; an already-present desired tag
+plans no write. This does not permit changing interface type, parent, name, or any cable field.
 
 Why the interface-type route was abandoned: a device type defines interface templates, and devices
 inherit their interfaces — already typed — from them. Requirement 11.3 forbids overwriting an
@@ -1113,7 +1219,7 @@ Terminations are always sent as arrays on `/api/dcim/cables/`. The
 `/api/dcim/cable-terminations/` endpoint is read-only in current NetBox and is never written to,
 since bypassing the cables endpoint breaks path tracing.
 
-## Data models (local, audit only)
+## Data models (local audit and mutation journal)
 
 ```python
 class ImportRun(models.Model):
@@ -1128,6 +1234,7 @@ class ImportRun(models.Model):
     skipped_count = models.PositiveIntegerField(default=0)
     error_count   = models.PositiveIntegerField(default=0)
     warning_count = models.PositiveIntegerField(default=0)
+    changed_count = models.PositiveIntegerField(default=0)       # D14
     # A blocked attempt is still a run: it is auditable even though nothing was written.
     # As built, the states are blocked | ready | applied | aborted | stale | expired | unavailable.
     # `aborted` (writes happened, then the run stopped) and `unavailable` (the target was refused
@@ -1149,7 +1256,7 @@ class ImportRowResult(models.Model):
     object_id    = models.PositiveIntegerField(null=True, blank=True)
     object_name  = models.CharField(max_length=255, blank=True)
     message      = models.TextField(blank=True)
-    sequence     = models.PositiveIntegerField()       # apply order, for manual unwind
+    sequence     = models.PositiveIntegerField()       # legacy per-row apply order
     # As built, also `url` and `column`. The link is stored rather than rebuilt from NETBOX_URL, so a
     # link in an old report still resolves after the tool is repointed at a different instance;
     # `column` carries NetBox's own field-level error back to the offending cell (Requirement 12.2).
@@ -1165,10 +1272,65 @@ class ValidationIssueRecord(models.Model):
     value      = models.TextField(blank=True)
     expected   = models.TextField(blank=True)
     message    = models.TextField(blank=True)
+
+class ImportMutation(models.Model):
+    """One intended NetBox object mutation, independent of spreadsheet row cardinality."""
+    run          = models.ForeignKey(ImportRun, related_name="mutations", on_delete=models.PROTECT)
+    sequence     = models.PositiveIntegerField()       # global apply order; unique within the run
+    action       = models.CharField(choices=["create", "update"])
+    endpoint     = models.CharField(max_length=96)
+    source_lines = models.JSONField(default=list)
+    natural_key  = models.JSONField(default=dict)      # permits reconciliation before an id is known
+    object_type  = models.CharField(max_length=64)
+    object_id    = models.PositiveIntegerField(null=True)
+    object_name  = models.CharField(max_length=255, blank=True)
+    url           = models.URLField(blank=True)
+    before_values = models.JSONField(default=dict)     # UPDATE: changed fields only
+    after_values  = models.JSONField(default=dict)     # fields this operation wrote
+    post_last_updated = models.CharField(max_length=64, blank=True)  # strict drift token
+    outcome       = models.CharField(choices=["intent", "applied", "failed", "unknown"])
+    applied_at    = models.DateTimeField(null=True)
+
+class RevertAttempt(models.Model):
+    original_run = models.ForeignKey(
+        ImportRun, related_name="revert_attempts", on_delete=models.PROTECT
+    )
+    user          = models.ForeignKey(User, on_delete=models.PROTECT)
+    netbox_host   = models.CharField(max_length=255)
+    plan_fingerprint = models.CharField(max_length=64)
+    status        = models.CharField(
+        choices=["preflight_blocked", "ready", "reverted", "partially_reverted", "aborted"]
+    )
+    started_at    = models.DateTimeField(auto_now_add=True)
+    finished_at   = models.DateTimeField(null=True)
+    failure_reason = models.CharField(max_length=255, blank=True)
+
+class RevertItemResult(models.Model):
+    attempt      = models.ForeignKey(
+        RevertAttempt, related_name="items", on_delete=models.PROTECT
+    )
+    mutation     = models.ForeignKey(ImportMutation, on_delete=models.PROTECT)
+    reverse_sequence = models.PositiveIntegerField()
+    outcome      = models.CharField(
+        choices=["planned", "reverted", "failed", "not_attempted", "drifted"]
+    )
+    message      = models.TextField(blank=True)
 ```
 
-Deliberately absent: the token, the uploaded file, and any raw cell dump. `value` holds only the
-single offending cell, which is what makes the issue actionable.
+`ImportMutation` is the reversible source of truth; `ImportRowResult` remains the per-line
+presentation record. That separation is required because one hierarchy line may create four objects
+and four breakout lines may create one cable. An operation intent is committed locally before its
+NetBox request. A response finalises it as applied or failed; a timeout leaves it `unknown`, keeps the
+run `reconciliation_required`, and resolves it by id or natural key before history offers revert.
+
+`post_last_updated` is fetched after each successful write and is the strict drift token. Comparing
+only submitted fields would miss a later manual edit to an unrelated field and could still delete
+that work. Revert therefore requires both the token and the recorded post-values to match. The JSON
+maps are allow-listed, canonical API field values, not serializer dumps.
+
+Deliberately absent: the token, the uploaded file, raw cell dumps, request headers, and whole-object
+snapshots. `ValidationIssueRecord.value` holds only the single offending cell, which is what makes the
+issue actionable.
 
 ## Pages and URLs
 
@@ -1183,15 +1345,19 @@ single offending cell, which is what makes the issue actionable.
 | `/<page>/validate/` | `importer:<page>_validate` | POST-only; upload + validate, never writes |
 | `/<page>/acknowledge/` | `importer:<page>_ack` | POST-only; acknowledge warnings |
 | `/<page>/apply/` | `importer:<page>_apply` | POST-only, CSRF-protected, refuses unless applyable |
-| `/runs/`, `/runs/<id>/` | `importer:runs`, `importer:run_detail` | Audit history, read-only |
+| `/runs/`, `/runs/<id>/` | `importer:runs`, `importer:run_detail` | Audit history and applied-change summary |
 | `/runs/<id>/issues.csv` | `importer:run_issues` | Validation report CSV, formula-escaped |
 | `/runs/<id>/report.csv` | `importer:run_report` | Apply result CSV, formula-escaped |
+| `/runs/<id>/mutations.csv` | `importer:run_mutations` | Mutation and revert history CSV, formula-escaped |
+| `/runs/<id>/revert/validate/` | `importer:revert_validate` | POST-only preflight; stores a short-lived revert plan |
+| `/runs/<id>/revert/confirm/` | `importer:revert_confirm` | POST-only, CSRF-protected compensating revert |
 
-The three POST endpoints are POST-only because their views define no `get`, which makes the verb
+The five state-changing endpoints are POST-only because their views define no `get`, which makes the verb
 restriction structural: Django answers 405 before any view code runs, so a link, a crawler, or a
 mistyped URL cannot reach them. Both state changes redirect: validating goes back to the page and
 applying goes to `/runs/<id>/`, so a refresh can neither re-upload nor re-apply. The server refuses a
-second apply regardless — the redirect only means the operator never has to discover that.
+second apply regardless — the redirect only means the operator never has to discover that. Revert
+confirmation likewise redirects to the immutable attempt report, so refresh cannot repeat it.
 
 UI is one `base.html` with the nav bar, plus three shared partials: `_verdict_banner.html` (the
 blocked/ready summary), `_issue_list.html` (issues grouped by severity then line), and
@@ -1220,6 +1386,41 @@ region, a site, a location, and a rack, so "1 row" and "4 objects in NetBox" are
 the apply button quotes the second. `object_count` counts distinct `(endpoint, key)` pairs rather than
 actions, because twenty rows in one new datahall each carry an action for it and apply creates it once
 (Requirement 7.6) — counting actions would overstate what the operator is authorising.
+
+### History summary and compensating revert
+
+The history list derives its created, changed, reverted, and still-applied counts from
+`ImportMutation`, not from run verdicts or spreadsheet rows. The run detail first groups mutations by
+`action × object_type`, then shows them in apply sequence with their source lines. An update expands
+to field-level before/after values. A create shows identity and the allow-listed values used by the
+drift check. Legacy runs remain readable but have no revert control if they predate this journal.
+
+`services/revert.py` owns both preflight and execution:
+
+1. Select mutations whose outcome is `applied` and which have no successful `RevertItemResult`; an
+   already reverted mutation is never planned again. The apply record itself is not changed.
+2. Refuse a different configured NetBox host or any run with `intent` / `unknown` mutations.
+3. Read every target by stored endpoint and id. Require it to exist and require its canonical
+   post-values and `last_updated` token to equal the journal. Collect all conflicts before returning,
+   so a blocked preflight is actionable and performs zero writes.
+4. Sort the clean plan by descending apply sequence. A create becomes `DELETE endpoint/id`; an update
+   becomes a field-scoped `PATCH` of `before_values`.
+5. Hash the ordered operation ids, current drift tokens, inverse payloads, target host, actor, and
+   expiry into the server-side plan. The browser receives only the attempt id and CSRF token.
+6. On confirmation, repeat step 3 before the first write. Execute one operation at a time, committing
+   each `RevertItemResult` locally after NetBox confirms it. Stop on the first failure and mark the
+   remaining operations `not_attempted`.
+
+One-at-a-time execution is deliberate even though forward creates are bulked. Revert must preserve a
+durable boundary after each destructive request so a timeout or dependency rejection identifies the
+smallest possible unknown set. If a response is lost, the item is reconciled before retry: absence by
+stored id proves a create's delete succeeded; an updated object whose recorded fields equal
+`before_values` proves restoration succeeded. Any other state requires a new preflight or manual
+resolution.
+
+The planner does not pretend it can enumerate every NetBox dependency. Reverse apply order handles
+dependencies this run introduced; dependencies introduced later are expected to make NetBox reject a
+delete. That is a partial revert, not permission to cascade or force deletion.
 
 Styling is a single hand-rolled `static/css/app.css` — no CDN, no build step, and no vendored
 third-party asset. This replaces an earlier "Bootstrap 5 from a pinned local static file": three
@@ -1259,6 +1460,11 @@ merely greyed out.
 | NetBox 400/500 despite validation | apply | The batch rolled back (D7): mark its rows `BLOCKED`, halt before the next endpoint | NetBox's error mapped to line and column, replaying row by row if it came back un-indexed |
 | NetBox 401/403 | apply | Abort run | Auth failure with host, never the token |
 | Connection loss / timeout | apply | Abort run | Rows applied before the abort, in order |
+| Write intent has no known response | apply reconciliation | Keep run `reconciliation_required`; resolve by id/natural key before revert | The uncertain object and that no revert is available yet |
+| Object missing or `last_updated` / post-values differ | revert preflight | Block the whole revert with zero writes | Every drifted object and the mismatched fields or token |
+| Revert plan expired or changed | pre-revert | Abort with zero writes | That a fresh preflight is required |
+| NetBox rejects an inverse write | revert | Stop after recording prior successes; mark the rest not attempted | Failed object, safe error text, and partial-revert status |
+| Revert response lost | revert reconciliation | Resolve the one unknown inverse before permitting retry | The uncertain object and reconciliation outcome |
 | Unexpected exception | any | Abort, log traceback server-side | Generic message + run id; no traceback, no headers |
 
 `RowError(code, column, value, expectation)` is the single exception type carrying a row-level
@@ -1343,13 +1549,21 @@ The whole suite runs in about twenty seconds, which is why it gets run on every 
  report rejected, one interface named by four rows of a group created once, two rows disagreeing about
  the type blocked, the create warning present and the plan unappliable until acknowledged, and the
  re-upload of an applied sheet creating neither interface nor cable
-- **Two-batch ordering (D12):** the interface batch precedes the cable batch and the cable payload
- carries the id NetBox returned, not a placeholder; a cable batch rejected after the interface batch
- succeeded reports its rows blocked and leaves the interfaces in place, which is the half-applied
- state Requirement 9.32 accepts and the test that pins it as deliberate rather than accidental
-- **Create-only invariant:** across the whole suite, assert that no test ever causes a `PATCH`,
- `PUT`, or `DELETE` request to NetBox. This is the machine-checkable form of Requirement 11.3 and it
- is what makes the "we cannot damage what we did not create" claim verifiable rather than aspirational.
+- **Cabling phase ordering (D12/D13/D15):** physical-parent creates precede tags-only PATCHes on
+ existing parents, which precede virtual-child creates and the cable batch; every `Ref` carries the
+ id NetBox returned, not a placeholder. A later rejection reports the completed earlier mutations
+ and leaves them in place, pinning the documented half-applied state as deliberate rather than
+ accidental
+- **Bounded forward-update invariant:** across importer and apply tests, assert that no code outside
+ the device primary-IP writer, the cabling parent-tag writer, and `services/revert.py` can issue
+ `PATCH`, and no code outside
+ `services/revert.py` can issue `DELETE`; `PUT` is absent everywhere. This is the machine-checkable
+ form of Requirement 11.3 after D15.
+- **Breakout parent tags (D15):** 2/4/8 positions on each side derive the matching slug; one
+ position plans no tag; row count does not affect the factor; a 2C4P shuffle tags each A parent 4x,
+ not 8x; missing tags, 6/12/16 factors, unreadable profiles, and conflicting held factors block.
+ Existing unrelated tags survive the tags-only PATCH; an already-held desired tag plans no PATCH;
+ one parent repeated by many rows changes once; tag drift aborts before writing
 - **The gate — the highest-value tests in the suite (Req 10):**
  - a file with exactly one ERROR writes **nothing**: assert zero POST requests were issued
  - a forged POST to the apply endpoint on a blocked plan returns 409 and issues zero requests
@@ -1367,6 +1581,19 @@ The whole suite runs in about twenty seconds, which is why it gets run on every 
  cap while the CSV keeps everything.
 - **Idempotency:** validate and apply the same file twice against a stubbed NetBox that starts
  empty; the second validation finds zero errors and the second apply creates nothing (Req 11.7).
+- **Mutation journal and history (Req 13, 18):** one hierarchy row records each created object while
+ one grouped breakout records one cable with all source lines; the D11 PATCH records only primary-IP
+ fields and the D15 PATCH only `tags`, with exact before/after sets. Fully and partially applied runs
+ render grouped counts and ordered items.
+ An intent is durable before the fake sees a write; a lost response leaves reconciliation required;
+ reconciliation resolves created, not-created, and conflicting states without guessing. Tokens,
+ headers, raw rows, and unrelated object fields are absent from models, pages, CSV, and logs.
+- **Revert safety (Req 18):** full apply and endpoint-two abort both plan only successful mutations;
+ creates delete and D11/D15 changes restore in strict reverse sequence. A changed host, missing object,
+ changed `last_updated`, changed post-value, expired/fabricated plan, unknown intent, or legacy run
+ causes zero revert writes. A dependency rejection stops execution and records reverted/failed/
+ not-attempted items; retry touches only still-applied mutations; a second confirmation after full
+ revert is a no-op. Every mutating route is POST-only, CSRF-protected, and superuser-only.
 - **View tests:** anonymous redirect, non-superuser 403, validate writes nothing, apply requires
  POST + CSRF, applying a plan twice is refused, logout clears the pending plan (Req 1, 10).
 - **End-to-end per importer (`test_gate_integration.py`):** the same nine assertions run over all three

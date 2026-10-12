@@ -1,8 +1,8 @@
 {% extends "importer/base.html" %}
 {% comment %}Classification: INTERNAL. AI-assisted (Cursor) — review before merge.
 
-Read-only history, newest first (Requirement 13.4). There is no edit or delete control here and no
-endpoint behind one either (Requirement 13.5).
+Read-only audit records, newest first (Requirement 13.4). Revert actions append attempts from a run's
+detail page; they never edit or delete the original history record (Requirement 13.5).
 
 Blocked attempts are listed alongside applied ones on purpose: "someone uploaded this at 14:05 and the
 tool refused it" is part of the audit trail, not an absence of one.
@@ -17,12 +17,13 @@ tool refused it" is part of the audit trail, not an absence of one.
 </p>
 
 <section class="panel">
+  <div class="history-table-wrap">
   <table class="runs">
     <caption>{{ runs|length }} most recent run{{ runs|length|pluralize }}</caption>
     <thead>
       <tr>
         <th>Run</th><th>Started</th><th>Sheet</th><th>File</th><th>By</th>
-        <th>Verdict</th><th>Created</th><th>Skipped</th><th>Errors</th>
+        <th>Verdict</th><th>Changes</th><th>Revert</th><th>Skipped</th><th>Errors</th>
       </tr>
     </thead>
     <tbody>
@@ -33,15 +34,39 @@ tool refused it" is part of the audit trail, not an absence of one.
         <td>{{ run.importer }}</td>
         <td><code>{{ run.filename }}</code></td>
         <td>{{ run.user.get_username }}</td>
-        <td><span class="pill pill-{{ run.verdict }}">{{ run.get_verdict_display }}</span></td>
-        <td class="tally">{{ run.created_count }}</td>
+        <td>
+          <span class="pill pill-{{ run.verdict }}" title="{{ run.get_verdict_display }}">
+            {% if run.verdict == "reconciliation_required" %}Reconcile required{% else %}{{ run.verdict|capfirst }}{% endif %}
+          </span>
+        </td>
+        <td>
+          <div class="run-metrics">
+            <span><strong>{% if run.has_mutation_journal %}{{ run.mutation_summary.created }}{% else %}{{ run.created_count }}{% endif %}</strong> created</span>
+            <span><strong>{{ run.mutation_summary.changed }}</strong> changed</span>
+          </div>
+        </td>
+        <td>
+          {% if run.has_mutation_journal %}
+          <div class="run-metrics">
+            <span><strong>{{ run.mutation_summary.still_applied }}</strong> applied</span>
+            <span><strong>{{ run.mutation_summary.reverted }}</strong> reverted</span>
+            {% if run.mutation_summary.failed %}<span class="metric-error"><strong>{{ run.mutation_summary.failed }}</strong> failed</span>{% endif %}
+            {% if run.mutation_summary.unknown %}<span class="metric-warn"><strong>{{ run.mutation_summary.unknown }}</strong> uncertain</span>{% endif %}
+          </div>
+          {% elif run.was_applied %}
+          <span class="muted history-legacy">legacy record</span>
+          {% else %}
+          <span class="muted">—</span>
+          {% endif %}
+        </td>
         <td class="tally">{{ run.skipped_count }}</td>
         <td class="tally">{{ run.error_count }}</td>
       </tr>
       {% empty %}
-      <tr><td colspan="9" class="muted">Nothing has been validated yet.</td></tr>
+      <tr><td colspan="10" class="muted">Nothing has been validated yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% endblock %}

@@ -30,6 +30,26 @@ urlpatterns = [
     path("runs/<int:pk>/", views.RunDetailView.as_view(), name="run_detail"),
     path("runs/<int:pk>/issues.csv", views.RunIssuesCsvView.as_view(), name="run_issues"),
     path("runs/<int:pk>/report.csv", views.RunResultsCsvView.as_view(), name="run_report"),
+    path(
+        "runs/<int:pk>/mutations.csv",
+        views.RunMutationsCsvView.as_view(),
+        name="run_mutations",
+    ),
+    path(
+        "runs/<int:pk>/reconcile/",
+        views.ReconcileRunView.as_view(),
+        name="run_reconcile",
+    ),
+    path(
+        "runs/<int:pk>/revert/validate/",
+        views.RevertPreflightView.as_view(),
+        name="revert_validate",
+    ),
+    path(
+        "runs/<int:pk>/revert/<int:attempt_pk>/confirm/",
+        views.RevertConfirmView.as_view(),
+        name="revert_confirm",
+    ),
 ]
 
 for slug, view in PAGE_VIEWS.items():

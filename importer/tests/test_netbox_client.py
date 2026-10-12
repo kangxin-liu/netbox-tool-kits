@@ -304,12 +304,12 @@ class TestCreates:
 
 
 class TestCreateOnlyInvariant:
-    """Requirement 11.3: the transport itself refuses to update or delete."""
+    """Forward imports cannot reach the inverse-capable transport (Requirements 11.3, 18.7)."""
 
     @pytest.mark.parametrize("method", ["PUT", "DELETE"])
     def test_the_session_refuses_modifying_verbs(self, client, method):
         session = client._api.http_session
-        with pytest.raises(RuntimeError, match="only creates objects"):
+        with pytest.raises(RuntimeError, match="not permitted"):
             session.request(method, f"{BASE}/api/dcim/racks/1/")
 
     def test_the_client_exposes_patch_but_no_delete(self):
@@ -317,13 +317,54 @@ class TestCreateOnlyInvariant:
         assert "patch" in surface
         assert not surface & {"update", "delete", "save", "remove"}
 
-    def test_patch_refuses_any_endpoint_other_than_devices(self, client):
-        with pytest.raises(RuntimeError, match="only PATCHes"):
+    def test_patch_refuses_endpoints_outside_the_two_forward_exceptions(self, client):
+        with pytest.raises(RuntimeError, match="primary IPs and interface tags"):
             client.patch("dcim.racks", {"id": 1, "primary_ip4": 1})
 
     def test_patch_refuses_fields_other_than_primary_ip(self, client):
-        with pytest.raises(RuntimeError, match="primary_ip4"):
+        with pytest.raises(RuntimeError, match="forbidden field"):
             client.patch("dcim.devices", {"id": 1, "primary_ip4": 1, "name": "leaf01"})
+
+    def test_interface_patch_refuses_every_field_except_tags(self, client):
+        with pytest.raises(RuntimeError, match="forbidden field"):
+            client.patch("dcim.interfaces", {"id": 1, "tags": [7], "name": "swp1"})
+
+    @responses.activate
+    def test_interface_patch_accepts_only_id_and_integer_tag_ids(self, client):
+        responses.add(
+            responses.PATCH,
+            f"{BASE}/api/dcim/interfaces/9/",
+            json={"id": 9, "tags": [{"id": 7, "slug": "port-breakout-4x"}]},
+            status=200,
+        )
+        updated = client.patch("dcim.interfaces", {"id": 9, "tags": [7]})
+        assert updated[0]["tags"][0]["id"] == 7
+        with pytest.raises(RuntimeError, match="integer tag ids"):
+            client.patch("dcim.interfaces", {"id": 9, "tags": ["7"]})
+
+    @responses.activate
+    def test_revert_client_can_delete_but_cannot_create(self):
+        inverse = netbox_client.RevertNetBoxClient(
+            f"{BASE}/", TOKEN, verify_ssl=True, timeout=7, host="netbox.example.com"
+        )
+        responses.add(responses.DELETE, f"{BASE}/api/dcim/racks/1/", status=204)
+        inverse.delete("dcim.racks", 1)
+        with pytest.raises(RuntimeError, match="not permitted"):
+            inverse._api.http_session.post(f"{BASE}/api/dcim/racks/", json={"name": "no"})
+
+    @responses.activate
+    def test_revert_restore_patches_only_the_supplied_inverse_fields(self):
+        inverse = netbox_client.RevertNetBoxClient(
+            f"{BASE}/", TOKEN, verify_ssl=True, timeout=7, host="netbox.example.com"
+        )
+        responses.add(
+            responses.PATCH,
+            f"{BASE}/api/dcim/devices/7/",
+            json={"id": 7, "primary_ip4": None},
+            status=200,
+        )
+        restored = inverse.restore("dcim.devices", 7, {"primary_ip4": None})
+        assert restored == {"id": 7, "primary_ip4": None}
 
 
 class TestFactory:

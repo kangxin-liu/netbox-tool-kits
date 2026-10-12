@@ -47,18 +47,26 @@ property, not a preference: it invents nothing, and a mistyped `swp1o` matches n
 so it falls through to a branch that demands an explicit type rather than becoming a port quietly.
 
 **Breakout children (D13).** `a_parent` / `b_parent` decouple a row's lane from the physical cable
-termination. A value such as `spine01:swp1` makes `swp1` the cabled termination while the row's
+termination. A value such as `swp1` makes that interface on the row's `*_end` device the cabled
+termination while the row's
 `swp1s0` port is an uncabled `virtual` child with `parent=swp1`. Both ends are symmetric, so one
 free-text `cable_group` can describe a shuffle with several physical parents per side. Distinct
 terminations, profile limits, duplicate checks, and occupancy all use parents; the preview retains
 the child-to-child lane map (Requirements 9.34–9.43).
 
+**Parent breakout tags (D15).** A parented profile side with 2, 4, or 8 positions per connector
+requires the matching pre-existing `port-breakout-*` tag on every distinct physical parent. New
+parents carry it in their POST; existing parents receive a tags-only PATCH that preserves unrelated
+tags. Missing/unsupported/conflicting factors block, already-held tags are idempotent, and tag sets
+are part of the pre-apply drift signature (Requirements 9.44–9.54).
+
 That costs this sheet the property it used to have. `endpoint_order` was one entry, so the whole
 file was a single transactional batch with no half-applied window at all. D12 made it interfaces
-then cables; D13 may make it physical parents, virtual children, then cables. A later batch failure
-leaves earlier interfaces behind, and re-uploading clears the residue because they are then found
-rather than planned (Requirement 9.32). Panel ports are never created: a front port is defined by
-the rear port and position it maps to, and no column here says either (9.29).
+then cables; D13/D15 may make it physical parents, parent-tag PATCHes, virtual children, then
+cables. A later batch failure leaves earlier interfaces/tags behind, and re-uploading clears the
+residue because those steps are idempotent (Requirements 9.32, 9.50). Panel ports are never created:
+a front port is defined by the rear port and position it maps to, and no column here says either
+(9.29).
 """
 
 import re
@@ -67,6 +75,7 @@ from typing import Any, ClassVar
 
 from django.conf import settings
 
+from importer.breakout_tags import BREAKOUT_TAG_FAMILY, BREAKOUT_TAGS, TAGS_ENDPOINT
 from importer.cable_profiles import structure as profile_structure
 from importer.device_addresses import choice_value, related_id
 from importer.importers.base import (
@@ -90,6 +99,7 @@ DEVICES = "dcim.devices"
 CABLES = "dcim.cables"
 INTERFACES = "dcim.interfaces"
 INTERFACE_TEMPLATES = "dcim.interface-templates"
+TAGS = TAGS_ENDPOINT
 
 DEVICE = "device"
 PANEL = "panel"
@@ -102,6 +112,7 @@ DEFAULT_STATUS = "connected"
 VIRTUAL = "virtual"
 
 INTERFACE_PHASE = "interfaces"
+PARENT_TAG_PHASE = "parent-tags"
 CHILD_PHASE = "children"
 CABLE_PHASE = "cables"
 
@@ -181,8 +192,6 @@ class End:
     port_side: str
     object_type: str
     termination_kind: str
-    parent_value: str = ""
-    parent_device: str = ""
     parent_port: str = ""
     line: int = 0
     """The spreadsheet line this end was read from.
@@ -282,11 +291,7 @@ def read_end(row: Row, side: str) -> End:
     kind = fold(row.get(f"{side}_end_kind")) or DEFAULT_END_KIND
     port_side = fold(row.get(f"{side}_port_side")) or DEFAULT_PORT_SIDE
     object_type, termination_kind = PORT_MODELS[(kind, port_side)]
-    parent_value = row.get(f"{side}_parent").strip()
-    parent_device = ""
-    parent_port = ""
-    if parent_value.count(":") == 1:
-        parent_device, parent_port = (part.strip() for part in parent_value.split(":", 1))
+    parent_port = row.get(f"{side}_parent").strip()
     return End(
         side=side,
         name=row.get(f"{side}_end").strip(),
@@ -295,8 +300,6 @@ def read_end(row: Row, side: str) -> End:
         port_side=port_side,
         object_type=object_type,
         termination_kind=termination_kind,
-        parent_value=parent_value,
-        parent_device=parent_device,
         parent_port=parent_port,
         line=row.line,
     )
@@ -306,6 +309,31 @@ def describe_cable(cable: dict[str, Any]) -> str:
     """Name an existing cable well enough for an operator to find it (Requirement 16.7)."""
     label = str(cable.get("label") or cable.get("display") or "").strip()
     return f"Cable #{cable.get('id')}" + (f" ({label})" if label else "")
+
+
+def _tag_id(value: Any) -> int | None:
+    if isinstance(value, dict):
+        value = value.get("id")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tag_slug(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return fold(value.get("slug") or value.get("name"))
+
+
+def _interface_tag_ids(interface: dict[str, Any]) -> tuple[int, ...]:
+    return tuple(
+        sorted(
+            tag_id
+            for value in (interface.get("tags") or [])
+            if (tag_id := _tag_id(value)) is not None
+        )
+    )
 
 
 @dataclass
@@ -383,6 +411,7 @@ class CablingImporter(BaseImporter):
     # the cable batch. Rows without children still use the D12 two-batch path.
     apply_phases = (
         (INTERFACES, "post", INTERFACE_PHASE),
+        (INTERFACES, "patch", PARENT_TAG_PHASE),
         (INTERFACES, "post", CHILD_PHASE),
         (CABLES, "post", CABLE_PHASE),
     )
@@ -404,6 +433,7 @@ class CablingImporter(BaseImporter):
     def __init__(self) -> None:
         self._templates: dict[tuple[int, str], dict[str, Any]] = {}
         self._planned: dict[tuple[int, str], PlannedInterface] = {}
+        self._breakout_tags: dict[str, list[dict[str, Any]]] = {}
         """One entry per interface this run will create, so four rows naming the same missing port
         create it once and warn about it once (Requirement 9.30). Reset by `prefetch`, which runs
         once per validation — including the pre-apply re-validation of Requirement 10.14."""
@@ -413,26 +443,6 @@ class CablingImporter(BaseImporter):
     def extra_cell_checks(self, row: Row, lookups: Lookups) -> list[RowError]:
         errors: list[RowError] = []
         specs = self.specs()
-
-        for side in SIDES:
-            column = f"{side}_parent"
-            value = row.get(column).strip()
-            if not value:
-                continue
-            parts = [part.strip() for part in value.split(":")]
-            if len(parts) != 2 or not all(parts):
-                errors.append(
-                    RowError(
-                        Code.BREAKOUT_PARENT_MALFORMED,
-                        column=column,
-                        value=value,
-                        expected="{device}:{interface}, for example spine01:swp1",
-                        message=(
-                            f"{column} {value!r} is not a breakout parent. Use exactly "
-                            f"{{device}}:{{interface}} with both names present."
-                        ),
-                    )
-                )
 
         # Requirement 9.14: cable profiles arrived in NetBox 4.5 and the supported range starts at
         # 4.6, so an instance reporting no profile choices means the field has gone rather than not
@@ -558,7 +568,7 @@ class CablingImporter(BaseImporter):
                         Code.BREAKOUT_PARENT_MISMATCH,
                         line=row.line,
                         column=end.parent_column,
-                        value=end.parent_value,
+                        value=end.parent_port,
                         expected="a parent only on a device end",
                         message=(
                             f"{end.parent_column} declares interface {end.parent_port!r}, but "
@@ -566,20 +576,6 @@ class CablingImporter(BaseImporter):
                         ),
                     )
                     continue
-                if fold(end.parent_device) != fold(end.name):
-                    collector.add(
-                        Severity.ERROR,
-                        Code.BREAKOUT_PARENT_MISMATCH,
-                        line=row.line,
-                        column=end.parent_column,
-                        value=end.parent_value,
-                        expected=f"{end.name}:{end.parent_port}",
-                        message=(
-                            f"{end.parent_column} names device {end.parent_device!r}, but "
-                            f"{end.end_column} names {end.name!r}. A child and its parent must be "
-                            f"on the same device."
-                        ),
-                    )
 
                 child_key = (fold(end.name), fold(end.port))
                 earlier_parent = child_parents.get(child_key)
@@ -591,8 +587,8 @@ class CablingImporter(BaseImporter):
                         Code.CHILD_PARENT_CONFLICT,
                         line=row.line,
                         column=end.parent_column,
-                        value=end.parent_value,
-                        expected=f"{end.name}:{earlier_parent[1]}",
+                        value=end.parent_port,
+                        expected=earlier_parent[1],
                         message=(
                             f"Line {row.line} places child {end.name}:{end.port} under "
                             f"{end.parent_port!r}, while line {earlier_parent[0]} places it under "
@@ -695,6 +691,7 @@ class CablingImporter(BaseImporter):
         a_count = len({end.signature for end in (read_end(row, "a") for row in rows)})
         b_count = len({end.signature for end in (read_end(row, "b") for row in rows)})
         counts = {"a": a_count, "b": b_count}
+        parent_sides = {side: any(read_end(row, side).has_parent for row in rows) for side in SIDES}
         profile = self._group_value(rows, "cable_profile")
         lines = tuple(row.line for row in rows)
         last = rows[-1].line
@@ -720,6 +717,21 @@ class CablingImporter(BaseImporter):
 
         shape = profile_structure(profile)
         if shape is None:
+            if any(parent_sides.values()):
+                collector.add(
+                    Severity.ERROR,
+                    Code.BREAKOUT_TAG_UNSUPPORTED,
+                    line=rows[0].line,
+                    column="cable_profile",
+                    value=profile,
+                    expected="a profile with 1, 2, 4, or 8 positions per parent connector",
+                    message=(
+                        f"cable_profile {profile!r} is accepted by NetBox, but its position "
+                        f"structure cannot be read, so the required parent breakout tag cannot "
+                        f"be derived. Use a readable profile or leave *_parent blank."
+                    ),
+                )
+                return
             # Requirement 9.19: a value NetBox accepts whose shape this tool cannot read. Warn and
             # let NetBox be the judge, rather than inventing a limit and blocking a legal cable.
             collector.add(
@@ -755,6 +767,27 @@ class CablingImporter(BaseImporter):
                     f"group or choose a profile with more connectors."
                 ),
                 related_line=rows[0].line,
+            )
+
+        for side in SIDES:
+            if not parent_sides[side]:
+                continue
+            factor = shape.positions(side)
+            if factor in {1, *BREAKOUT_TAGS}:
+                continue
+            collector.add(
+                Severity.ERROR,
+                Code.BREAKOUT_TAG_UNSUPPORTED,
+                line=rows[0].line,
+                column="cable_profile",
+                value=profile,
+                expected="1, 2, 4, or 8 positions per parent connector",
+                message=(
+                    f"cable_profile {profile!r} has {factor} positions per {side.upper()}-side "
+                    f"parent connector. This deployment has breakout tags only for 2x, 4x, and "
+                    f"8x; factor 1 needs no tag. No tag was guessed."
+                ),
+                related_line=rows[-1].line if len(rows) > 1 else None,
             )
 
     def _check_group_agrees(self, rows: list[Row], collector: IssueCollector) -> None:
@@ -808,6 +841,27 @@ class CablingImporter(BaseImporter):
 
         self._templates = {}
         self._planned = {}
+        self._breakout_tags = {}
+
+        required_tags: set[str] = set()
+        for row in rows:
+            profile = row.get("cable_profile").strip()
+            shape = profile_structure(profile) if profile else None
+            if shape is None:
+                continue
+            for side in SIDES:
+                if not read_end(row, side).has_parent:
+                    continue
+                slug = BREAKOUT_TAGS.get(shape.positions(side))
+                if slug:
+                    required_tags.add(slug)
+        if required_tags:
+            lookups.prefetch(TAGS, slug=sorted(required_tags))
+            for tag in lookups.all_records(TAGS):
+                slug = fold(tag.get("slug"))
+                if slug in required_tags:
+                    self._breakout_tags.setdefault(slug, []).append(tag)
+
         if not settings.NETBOX_AUTOCREATE_INTERFACES:
             # Not merely a short circuit: with the flag off this importer issues exactly the
             # requests it always did, so the request budget of Requirement 15.2 is unchanged for
@@ -865,6 +919,12 @@ class CablingImporter(BaseImporter):
                 row_plan.outcome = RowOutcome.BLOCKED
             return planned
 
+        tag_actions = self._parent_tag_actions(rows, resolved, planned, state, collector)
+        if tag_actions is None:
+            for row_plan in planned:
+                row_plan.outcome = RowOutcome.BLOCKED
+            return planned
+
         sides = {
             "a": _distinct(ends[0] for ends in resolved),
             "b": _distinct(ends[1] for ends in resolved),
@@ -876,21 +936,163 @@ class CablingImporter(BaseImporter):
             self._report_partly_cabled(rows, planned, occupancy, collector)
             return planned
         interface_actions = self._interface_actions(resolved)
+        preparatory_actions = [*interface_actions, *tag_actions]
         if occupancy.taken:
             self._report_already_cabled(planned, occupancy, lookups, collector)
-            if interface_actions:
+            if preparatory_actions:
                 # The physical cable already exists, but D13 may still need to materialise the
-                # virtual lane inventory. The cable is skipped; only the missing interfaces apply.
-                planned[0].actions.extend(interface_actions)
+                # virtual lane inventory or D15 parent tag. The cable is skipped; only preparation
+                # applies.
+                planned[0].actions.extend(preparatory_actions)
                 for row_plan in planned:
                     row_plan.outcome = RowOutcome.CREATE
             return planned
 
-        planned[0].actions.extend(interface_actions)
+        planned[0].actions.extend(preparatory_actions)
         planned[0].actions.append(self._cable(rows, sides))
         for row_plan in planned:
             row_plan.outcome = RowOutcome.CREATE
         return planned
+
+    def _parent_tag_actions(
+        self,
+        rows: list[Row],
+        resolved: list[tuple[End, End]],
+        planned: list[PlannedRow],
+        state: dict[str, str],
+        collector: IssueCollector,
+    ) -> list[CreateAction] | None:
+        """Derive and plan D15 tags for every distinct physical parent."""
+        profile = self._group_value(rows, "cable_profile")
+        if not profile:
+            return []
+        shape = profile_structure(profile)
+        if shape is None:
+            # S3 already emitted BREAKOUT_TAG_UNSUPPORTED for a parented side.
+            return []
+
+        actions: list[CreateAction] = []
+        failed = False
+        for side_index, side in enumerate(SIDES):
+            occurrences: dict[tuple[int, str], list[tuple[int, End]]] = {}
+            for index, ends in enumerate(resolved):
+                end = ends[side_index]
+                if not end.has_parent or end.device is None:
+                    continue
+                key = (int(end.device["id"]), fold(end.parent_port))
+                occurrences.setdefault(key, []).append((index, end))
+            if not occurrences:
+                continue
+
+            factor = shape.positions(side)
+            slug = BREAKOUT_TAGS.get(factor)
+            if slug is None:
+                if factor == 1:
+                    for group in occurrences.values():
+                        for index, _end in group:
+                            planned[index].resolved[f"{side}_breakout_tag"] = (
+                                "none (profile side has one position per connector)"
+                            )
+                # Unsupported factors were rejected in S3.
+                continue
+
+            matches = self._breakout_tags.get(slug, [])
+            if len(matches) != 1:
+                first_index, first_end = next(iter(occurrences.values()))[0]
+                collector.add(
+                    Severity.ERROR,
+                    Code.BREAKOUT_TAG_NOT_FOUND,
+                    line=rows[first_index].line,
+                    column="cable_profile",
+                    value=profile,
+                    expected=f"exactly one existing NetBox tag with slug {slug!r}",
+                    message=(
+                        f"Profile {profile!r} requires tag slug {slug!r} on the "
+                        f"{side.upper()}-side physical parent, but NetBox returned "
+                        f"{len(matches)} exact match(es). Create that tag once in NetBox before "
+                        f"applying this sheet."
+                    ),
+                    related_object=f"Interface {first_end.name}:{first_end.parent_port}",
+                )
+                failed = True
+                continue
+
+            desired = matches[0]
+            desired_id = int(desired["id"])
+            for group in occurrences.values():
+                indexes = tuple(index for index, _end in group)
+                end = group[0][1]
+                interface = end.termination
+                if end.planned is not None:
+                    held_ids = {
+                        tag_id
+                        for value in (end.planned.payload.get("tags") or [])
+                        if (tag_id := _tag_id(value)) is not None
+                    }
+                    held_ids.add(desired_id)
+                    end.planned.payload["tags"] = sorted(held_ids)
+                    status = f"{slug} (included when parent is created)"
+                    for index in indexes:
+                        planned[index].resolved[f"{side}_breakout_tag"] = status
+                    continue
+
+                if interface is None:
+                    continue
+                held_values = interface.get("tags") or []
+                held_ids = {
+                    tag_id for value in held_values if (tag_id := _tag_id(value)) is not None
+                }
+                held_slugs = {_tag_slug(value) for value in held_values}
+                conflicting = sorted(
+                    held for held in held_slugs & BREAKOUT_TAG_FAMILY if held != slug
+                )
+                if conflicting:
+                    collector.add(
+                        Severity.ERROR,
+                        Code.BREAKOUT_TAG_CONFLICT,
+                        line=rows[indexes[0]].line,
+                        column="cable_profile",
+                        value=profile,
+                        expected=f"parent tag {slug!r}, with no other breakout-factor tag",
+                        message=(
+                            f"Physical parent {end.name}:{end.parent_port} requires {slug!r}, "
+                            f"but already carries conflicting breakout tag(s): "
+                            f"{', '.join(conflicting)}. Correct the parent in NetBox; this "
+                            f"importer never removes a breakout tag."
+                        ),
+                        related_object=f"Interface {end.name}:{end.parent_port}",
+                    )
+                    failed = True
+                    continue
+
+                tag_state = ",".join(str(tag_id) for tag_id in sorted(held_ids)) or "none"
+                state[f"{INTERFACES}:{fold(end.name)}/{fold(end.parent_port)}:tags"] = tag_state
+                if desired_id in held_ids or slug in held_slugs:
+                    status = f"{slug} (already present)"
+                    for index in indexes:
+                        planned[index].resolved[f"{side}_breakout_tag"] = status
+                    continue
+
+                after_ids = sorted({*held_ids, desired_id})
+                lines = tuple(rows[index].line for index in indexes)
+                actions.append(
+                    CreateAction(
+                        endpoint=INTERFACES,
+                        payload={"id": int(interface["id"]), "tags": after_ids},
+                        key=Registry.key(end.name, end.parent_port, "tags"),
+                        label=f"{end.name} {end.parent_port} breakout tag",
+                        line=lines[0],
+                        lines=lines,
+                        object_kind="interface tags",
+                        method="patch",
+                        phase=PARENT_TAG_PHASE,
+                    )
+                )
+                status = f"{slug} (will be added)"
+                for index in indexes:
+                    planned[index].resolved[f"{side}_breakout_tag"] = status
+
+        return None if failed else actions
 
     @staticmethod
     def _interface_actions(resolved: list[tuple[End, End]]) -> list[CreateAction]:
@@ -1153,7 +1355,7 @@ class CablingImporter(BaseImporter):
             device_name=device_name,
             name=end.port,
             type_value=VIRTUAL,
-            source=f"parent mapping {end.parent_value}",
+            source=f"parent mapping {end.parent_port}",
             payload={
                 "device": device_id,
                 "name": end.port,
@@ -1469,7 +1671,7 @@ class CablingImporter(BaseImporter):
                 Code.PORT_ALREADY_CABLED,
                 line=end.line,
                 column=end.parent_column if end.has_parent else end.port_column,
-                value=end.parent_value if end.has_parent else end.port,
+                value=end.parent_port if end.has_parent else end.port,
                 expected="a termination with no cable on it",
                 message=(
                     f"The {end.label}, {end.description}, already carries {held}. "

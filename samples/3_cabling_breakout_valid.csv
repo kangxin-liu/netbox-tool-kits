@@ -1,5 +1,5 @@
 a_end,a_end_kind,a_port,a_parent,a_interface_type,b_end,b_end_kind,b_port,b_port_side,b_parent,b_interface_type,cable_type,cable_profile,cable_group,cable_status,label,length,length_unit
-lab1-dh1-r01-leaf01,device,swp3s0,lab1-dh1-r01-leaf01:swp3,,lab1-dh1-r01-pp02,panel,F5,front,,,mmf-om4,breakout-1c4p-4c1p,brk-01,connected,BRK-0001,5,m
-lab1-dh1-r01-leaf01,device,swp3s1,lab1-dh1-r01-leaf01:swp3,,lab1-dh1-r01-pp02,panel,F6,front,,,,,brk-01,,,,
-lab1-dh1-r01-leaf01,device,swp3s2,lab1-dh1-r01-leaf01:swp3,,lab1-dh1-r01-pp02,panel,F7,front,,,,,brk-01,,,,
-lab1-dh1-r01-leaf01,device,swp3s3,lab1-dh1-r01-leaf01:swp3,,lab1-dh1-r01-pp02,panel,F8,front,,,,,brk-01,,,,
+lab1-dh1-r01-leaf01,device,swp3s0,swp3,,lab1-dh1-r01-pp02,panel,F5,front,,,mmf-om4,breakout-1c4p-4c1p,brk-01,connected,BRK-0001,5,m
+lab1-dh1-r01-leaf01,device,swp3s1,swp3,,lab1-dh1-r01-pp02,panel,F6,front,,,,,brk-01,,,,
+lab1-dh1-r01-leaf01,device,swp3s2,swp3,,lab1-dh1-r01-pp02,panel,F7,front,,,,,brk-01,,,,
+lab1-dh1-r01-leaf01,device,swp3s3,swp3,,lab1-dh1-r01-pp02,panel,F8,front,,,,,brk-01,,,,

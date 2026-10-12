@@ -97,6 +97,7 @@ INTERFACES = "dcim.interfaces"
 INTERFACE_TEMPLATES = "dcim.interface-templates"
 IP_ADDRESSES = "ipam.ip-addresses"
 CABLES = "dcim.cables"
+TAGS = "extras.tags"
 
 # A cable's terminations name their model, not their endpoint (Requirement 9.6).
 TERMINATION_ENDPOINTS: dict[str, str] = {
@@ -125,12 +126,14 @@ class FakeNetBox:
     host: str = "netbox.example.com"
     posts: list[Post] = field(default_factory=list)
     patches: list[Post] = field(default_factory=list)
+    deletes: list[tuple[str, int]] = field(default_factory=list)
     rejections: dict[str, Callable[[list[dict[str, Any]]], Any]] = field(default_factory=dict)
     unavailable_on: dict[str, Exception] = field(default_factory=dict)
     """Endpoint → transport failure raised on *writes*, for mid-apply abort tests."""
     unavailable_on_read: dict[str, Exception] = field(default_factory=dict)
     request_count: int = 0
     _next_id: int = 1000
+    _versions: dict[tuple[str, int], int] = field(default_factory=dict)
     _choices_fetched: set[str] = field(default_factory=set)
 
     # --- test-side helpers ------------------------------------------------------------------
@@ -138,6 +141,7 @@ class FakeNetBox:
     def add(self, endpoint: str, **fields: Any) -> dict[str, Any]:
         record = {"id": self._take_id(), **fields}
         self.objects.setdefault(endpoint, []).append(record)
+        self._versions[(endpoint, int(record["id"]))] = 1
         return record
 
     def reject(self, endpoint: str, decide: Callable[[list[dict[str, Any]]], Any]) -> None:
@@ -173,6 +177,17 @@ class FakeNetBox:
         wanted = {int(value) for value in wanted_ids}
         return [record for record in matched if self._ip_device_id(record) in wanted]
 
+    def get_one(self, endpoint: str, object_id: int) -> dict[str, Any] | None:
+        self.request_count += 1
+        if endpoint in self.unavailable_on_read:
+            raise self.unavailable_on_read[endpoint]
+        for record in self.objects.get(endpoint, []):
+            if int(record.get("id", 0)) == int(object_id):
+                copy = dict(record)
+                copy["last_updated"] = str(self._versions.get((endpoint, int(object_id)), 1))
+                return copy
+        return None
+
     def count(self, endpoint: str, **filters: Any) -> int:
         return len(self.get_all(endpoint, **filters))
 
@@ -203,6 +218,7 @@ class FakeNetBox:
         for item in payloads:
             record = {"id": self._take_id(), **self._expand(item)}
             self.objects.setdefault(endpoint, []).append(record)
+            self._versions[(endpoint, int(record["id"]))] = 1
             if endpoint == CABLES:
                 self._occupy_terminations(record)
             if endpoint == DEVICES:
@@ -226,7 +242,56 @@ class FakeNetBox:
             if verdict is not None:
                 status, body = verdict
                 raise NetBoxWriteRejected(status, body, endpoint)
+        if endpoint == INTERFACES:
+            return [self._apply_interface_tags_patch(item) for item in payloads]
         return [self._apply_primary_patch(item) for item in payloads]
+
+    def restore(self, endpoint: str, object_id: int, fields: dict[str, Any]) -> dict[str, Any]:
+        self.request_count += 1
+        payload = {"id": object_id, **fields}
+        self.patches.append(Post(endpoint=endpoint, payloads=[payload]))
+        if endpoint in self.unavailable_on:
+            raise self.unavailable_on[endpoint]
+        decide = self.rejections.get(f"PATCH:{endpoint}")
+        if decide is not None:
+            verdict = decide([payload])
+            if verdict is not None:
+                status, body = verdict
+                raise NetBoxWriteRejected(status, body, endpoint)
+        for record in self.objects.get(endpoint, []):
+            if int(record.get("id", 0)) == int(object_id):
+                restored = dict(fields)
+                if endpoint == INTERFACES and "tags" in restored:
+                    restored["tags"] = self._tag_briefs(restored["tags"])
+                record.update(restored)
+                self._bump(endpoint, object_id)
+                return self.get_one(endpoint, object_id) or dict(record)
+        return {"id": object_id, **fields}
+
+    def delete(self, endpoint: str, object_id: int) -> None:
+        self.request_count += 1
+        self.deletes.append((endpoint, int(object_id)))
+        if endpoint in self.unavailable_on:
+            raise self.unavailable_on[endpoint]
+        decide = self.rejections.get(f"DELETE:{endpoint}")
+        if decide is not None:
+            verdict = decide([{"id": object_id}])
+            if verdict is not None:
+                status, body = verdict
+                raise NetBoxWriteRejected(status, body, endpoint)
+        records = self.objects.get(endpoint, [])
+        for index, record in enumerate(records):
+            if int(record.get("id", 0)) != int(object_id):
+                continue
+            if endpoint == CABLES:
+                self._release_terminations(record)
+            records.pop(index)
+            self._versions.pop((endpoint, int(object_id)), None)
+            return
+
+    def touch(self, endpoint: str, object_id: int) -> None:
+        """Simulate an unrelated NetBox edit for strict last_updated drift tests."""
+        self._bump(endpoint, object_id)
 
     def _inherit_interfaces(self, device: dict[str, Any]) -> None:
         """What NetBox does on device create: copy the type's interface templates."""
@@ -264,7 +329,29 @@ class FakeNetBox:
         iface_type = record.get("type")
         if isinstance(iface_type, str):
             record["type"] = {"value": iface_type, "label": iface_type}
+        record["tags"] = self._tag_briefs(record.get("tags") or [])
         record.setdefault("cable", None)
+
+    def _tag_briefs(self, values: list[Any]) -> list[dict[str, Any]]:
+        briefs: list[dict[str, Any]] = []
+        for value in values:
+            tag_id = value.get("id") if isinstance(value, dict) else value
+            tag = next(
+                (
+                    item
+                    for item in self.objects.get(TAGS, [])
+                    if int(item.get("id", 0)) == int(tag_id)
+                ),
+                None,
+            )
+            briefs.append(
+                {
+                    "id": int(tag_id),
+                    "name": tag.get("name") if tag else None,
+                    "slug": tag.get("slug") if tag else None,
+                }
+            )
+        return briefs
 
     def _bind_ip(self, record: dict[str, Any]) -> None:
         object_id = record.get("assigned_object_id")
@@ -315,8 +402,23 @@ class FakeNetBox:
                     if ip_record is not None
                     else {"id": ip_id}
                 )
+            self._bump(DEVICES, object_id)
             return record
         return {"id": object_id, **{k: v for k, v in item.items() if k != "id"}}
+
+    def _apply_interface_tags_patch(self, item: dict[str, Any]) -> dict[str, Any]:
+        object_id = int(item["id"])
+        for record in self.objects.get(INTERFACES, []):
+            if int(record.get("id", 0)) != object_id:
+                continue
+            record["tags"] = self._tag_briefs(item.get("tags") or [])
+            self._bump(INTERFACES, object_id)
+            return record
+        return {"id": object_id, "tags": self._tag_briefs(item.get("tags") or [])}
+
+    def _bump(self, endpoint: str, object_id: int) -> None:
+        key = (endpoint, int(object_id))
+        self._versions[key] = self._versions.get(key, 1) + 1
 
     def _occupy_terminations(self, cable: dict[str, Any]) -> None:
         """What NetBox does for you: a cabled port carries the cable's id from then on."""
@@ -328,6 +430,18 @@ class FakeNetBox:
                 for record in self.objects.get(endpoint, []):
                     if record.get("id") == termination.get("object_id"):
                         record["cable"] = {"id": cable["id"]}
+                        self._bump(endpoint, int(record["id"]))
+
+    def _release_terminations(self, cable: dict[str, Any]) -> None:
+        for side in ("a_terminations", "b_terminations"):
+            for termination in cable.get(side) or []:
+                endpoint = TERMINATION_ENDPOINTS.get(termination.get("object_type", ""))
+                if endpoint is None:
+                    continue
+                for record in self.objects.get(endpoint, []):
+                    if record.get("id") == termination.get("object_id"):
+                        record["cable"] = None
+                        self._bump(endpoint, int(record["id"]))
 
     def object_url(self, endpoint: str, object_id: int) -> str:
         app, _, name = endpoint.partition(".")

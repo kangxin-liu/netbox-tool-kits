@@ -89,17 +89,21 @@ sheet may also create virtual child interfaces that record the lane map. Four op
 | --- | --- |
 | `cable_group` | Any tag you like. Every row carrying the same tag is **one cable**. Blank means the row is a cable on its own, which is how every cabling sheet worked before these columns existed |
 | `cable_profile` | How the cable is built inside, which is what lets NetBox trace one lane rather than treating the cable as a single hop. The template's picklist carries the values your NetBox accepts |
-| `a_parent` / `b_parent` | Optional `{device}:{interface}` physical parent. When filled, that side's `*_port` is a virtual child created under the parent, while the cable terminates on the parent |
+| `a_parent` / `b_parent` | Optional physical-parent interface name on that row's `a_end` / `b_end` device. When filled, that side's `*_port` is a virtual child created under the parent, while the cable terminates on the parent |
 | `a_interface_type` / `b_interface_type` | Types a missing physical parent. It never types the child: breakout children are always `virtual` |
+
+Parent and child names are used verbatim; no vendor naming convention is parsed. For example,
+Huawei/H3C may use `a_parent=100GE1/1/1` with `a_port=100GE1/1/1:1`. The parent device is already
+unambiguous from `a_end`, so it is not repeated in `a_parent`.
 
 One row per far end, all of them carrying the same tag:
 
 ```
-a_end,            a_port, a_parent,                  b_end,           b_port, cable_type, cable_profile,      cable_group
-exa1-dh1-spine01, swp1s0, exa1-dh1-spine01:swp1,   exa1-dh1-leaf01, swp31,  mmf-om4,    breakout-1c4p-4c1p, brk-01
-exa1-dh1-spine01, swp1s1, exa1-dh1-spine01:swp1,   exa1-dh1-leaf02, swp31,  ,           ,                   brk-01
-exa1-dh1-spine01, swp1s2, exa1-dh1-spine01:swp1,   exa1-dh1-leaf03, swp31,  ,           ,                   brk-01
-exa1-dh1-spine01, swp1s3, exa1-dh1-spine01:swp1,   exa1-dh1-leaf04, swp31,  ,           ,                   brk-01
+a_end,            a_port, a_parent, b_end,           b_port, cable_type, cable_profile,      cable_group
+exa1-dh1-spine01, swp1s0, swp1,     exa1-dh1-leaf01, swp31,  mmf-om4,    breakout-1c4p-4c1p, brk-01
+exa1-dh1-spine01, swp1s1, swp1,     exa1-dh1-leaf02, swp31,  ,           ,                   brk-01
+exa1-dh1-spine01, swp1s2, swp1,     exa1-dh1-leaf03, swp31,  ,           ,                   brk-01
+exa1-dh1-spine01, swp1s3, swp1,     exa1-dh1-leaf04, swp31,  ,           ,                   brk-01
 ```
 
 Five things worth knowing before you fill one in.
@@ -113,6 +117,18 @@ non-blank values is an error naming both lines, because the tool will not choose
 200G-SR4 links has eight lanes but only two far ends, so it is `breakout-1c2p-2c1p`. A profile may be
 only partly filled: two lanes of a four-lane breakout is a real cable. Naming *more* far ends than the
 profile has connectors is an error that tells you the limit.
+
+**The profile also tags each physical parent.** Before using parented breakout rows, NetBox must
+contain tag slugs `port-breakout-2x`, `port-breakout-4x`, and `port-breakout-8x`. The importer uses
+the number of positions on that profile side per connector: 2, 4, or 8 positions adds the matching
+tag; one position adds none. Row count does not change the factor, so one connected child of a 4x
+breakout still tags the parent `port-breakout-4x`. A 2C4P shuffle tags each A-side parent 4x, not 8x.
+Profiles with 6, 12, or 16 positions block because this deployment has no approved matching tag.
+
+Existing unrelated parent tags are preserved. If the correct breakout tag is already present, no
+update is sent. A different `port-breakout-*` factor blocks the file; correct it in NetBox rather
+than expecting the importer to remove it. The preview says whether the tag is already present,
+included on a new parent, or will be added to an existing parent.
 
 **Row order is lane order.** NetBox assigns the connector numbers itself, from the order the rows
 appear in, and there is no column that overrides it — so the first row of a group is lane 1. Where the
@@ -186,12 +202,12 @@ and position it maps to, and a rear port by a position count — none of which a
 expresses. An unresolved `MPO7` is still an error, and the panel still has to be built in NetBox
 first.
 
-**One thing this changes about applying.** Without the flag, a cabling sheet was a single
-all-or-nothing write. With it, ordinary missing interfaces are written before cables. D13 adds one
-more boundary when both levels are new: physical parents first, then virtual children, then cables.
-A later batch failure leaves earlier interfaces behind. Re-uploading is safe: they are found on the
-second validation and only the remaining objects are written. The run report says which batches
-completed.
+**One thing this changes about applying.** Without interface creation/tagging, a cabling sheet was a
+single all-or-nothing write. The complete order is now: create missing physical parents (including
+their tag), add derived tags to existing parents, create virtual children, then create cables. A
+later failure can leave an earlier interface or tag behind. Re-uploading is safe: existing tags and
+interfaces are detected and only remaining work is sent. The run report and history show each
+completed tag update, and the guarded revert restores its exact prior tag set when no drift occurred.
 
 ## Rack names, and the slug columns
 
@@ -285,8 +301,9 @@ other person created.
 This is the one case that needs a human. The guarantee is precise:
 
 > Each endpoint's creates are submitted as one list and are applied all-or-nothing. The sequence
-> across endpoints is not atomic: an earlier endpoint can succeed and a later one fail. Nothing this
-> tool creates can be rolled back by this tool.
+> across endpoints is not atomic: an earlier endpoint can succeed and a later one fail. Successful
+> writes are journaled and can be reverted later from history after a drift check; that compensation
+> is not an atomic transaction.
 
 So for a hierarchy sheet, the sites can exist while the racks do not. What to do:
 
@@ -295,8 +312,27 @@ So for a hierarchy sheet, the sites can exist while the racks do not. What to do
 2. Decide whether to keep them. Usually you should: they are correct, just incomplete.
 3. Fix whatever the abort reason names, then **re-upload the same sheet**. Everything already created
    is skipped, and only the remainder is created. This is the normal recovery path.
-4. If you would rather start clean, delete the created objects in NetBox by hand using the report's
-   links, then re-upload. This tool will not delete them for you.
+4. If you would rather start clean, use **Preflight revert** on the run. Review the exact reverse-order
+   delete/restore plan, then confirm it. The action deletes only object ids created by that run and
+   restores only fields that run changed.
+
+### Reverting an applied or partly applied run
+
+1. Open **Runs**, then open the applied run.
+2. Review **Applied changes**: created and changed objects are grouped by type and retain their source
+   line numbers.
+3. Choose **Preflight revert**. It performs no write. It checks the target host, every recorded
+   post-apply value, and NetBox's `last_updated` value.
+4. If preflight passes, review the counts and reverse-order item list, then choose **Confirm revert**.
+
+If any object changed after apply, preflight blocks the whole operation. Resolve that later work in
+NetBox rather than trying to bypass the check. If NetBox rejects an inverse operation after earlier
+ones succeeded, the attempt is recorded as partially reverted; run preflight again to retry only the
+items still applied. A missing or ambiguous write outcome must be reconciled from the run page first.
+
+`NETBOX_REVERT_TOKEN` is optional and defaults to `NETBOX_TOKEN`. For shared environments, configure
+a separate token with read/delete and only the required field-scoped PATCH permissions, but no create
+permission.
 
 ### NetBox rejected a row
 
@@ -317,6 +353,6 @@ panel at the top of each page tells you what is missing before you upload anythi
 ## The audit trail
 
 **Runs** in the nav bar lists every validation and every apply, newest first, including the ones that
-were refused. Each run keeps its full issue list, its per-row outcomes, links to everything it
-created, and who ran it. Both the issue list and the result report download as CSV. Nothing in the
-history can be edited or deleted from the UI.
+were refused. Each applied run shows created, changed, reverted, and still-applied counts, followed by
+the object-operation journal and immutable revert attempts. Issue, result, and mutation history
+reports download as CSV. Original apply records cannot be edited or deleted from the UI.

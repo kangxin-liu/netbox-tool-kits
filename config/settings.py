@@ -119,6 +119,9 @@ NETBOX_LOOPBACK_DEV = NETBOX_TARGET.loopback_dev
 # CONFIDENTIAL. Held here only so the client factory can read it; never rendered, logged,
 # persisted, or included in an error message.
 NETBOX_TOKEN = env.require(ENVIRON, "NETBOX_TOKEN")
+# Optional least-privilege credential for D14. Falling back preserves simple local deployments;
+# DELETE remains reachable only through the isolated revert client.
+NETBOX_REVERT_TOKEN = env.optional(ENVIRON, "NETBOX_REVERT_TOKEN") or NETBOX_TOKEN
 NETBOX_VERIFY_SSL = env.flag(ENVIRON, "NETBOX_VERIFY_SSL", default=True)
 NETBOX_TIMEOUT = env.integer(ENVIRON, "NETBOX_TIMEOUT", default=30)
 # Refuse to import outside this range rather than failing mid-run on a renamed field (Req 2.7).
@@ -143,6 +146,7 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = DATA_UPLOAD_MAX_MEMORY_SIZE
 # Uploads are parsed from a temp file that is deleted in a finally block, never from a served path.
 FILE_UPLOAD_TEMP_DIR = env.optional(ENVIRON, "DJANGO_UPLOAD_TEMP_DIR") or None
 PLAN_EXPIRY_MINUTES = env.integer(ENVIRON, "PLAN_EXPIRY_MINUTES", default=30)
+REVERT_PLAN_EXPIRY_MINUTES = env.integer(ENVIRON, "REVERT_PLAN_EXPIRY_MINUTES", default=10)
 MAX_APPLY_ROWS = env.integer(ENVIRON, "MAX_APPLY_ROWS", default=2000)
 MAX_ISSUES_DISPLAYED = env.integer(ENVIRON, "MAX_ISSUES_DISPLAYED", default=500)
 

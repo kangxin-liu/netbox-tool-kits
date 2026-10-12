@@ -21,7 +21,10 @@ SYNTHETIC_ENV = {
     "DJANGO_SERVED_OVER_TLS": "false",
     "NETBOX_URL": "https://netbox.example.com/",
     "NETBOX_TOKEN": "0000000000000000000000000000000000000000",
+    "NETBOX_REVERT_TOKEN": "",
     "NETBOX_VERIFY_SSL": "true",
+    "NETBOX_MIN_VERSION": "4.6",
+    "NETBOX_MAX_VERSION_EXCLUSIVE": "4.7",
     "NETBOX_DEFAULT_DEVICE_ROLE": "unassigned",
     "NETBOX_AUTOCREATE_DEVICE_TYPES": "false",
     # Both autocreate flags default off in the suite, so the default behaviour under test is the

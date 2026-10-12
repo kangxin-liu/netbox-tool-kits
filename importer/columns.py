@@ -44,8 +44,8 @@ INTERFACE_TYPE_HELP = (
 )
 
 PARENT_HELP = (
-    "Optional breakout parent as {device}:{interface}. When filled, *_port is a virtual child and "
-    "the cable terminates on this physical parent"
+    "Optional breakout parent interface on the same *_end device. When filled, *_port is a virtual "
+    "child and the cable terminates on this physical parent"
 )
 
 

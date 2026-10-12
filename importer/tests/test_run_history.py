@@ -11,7 +11,7 @@ import io
 import pytest
 from django.urls import reverse
 
-from importer.models import ImportRun
+from importer.models import ImportRun, MutationOutcome
 from importer.models import Verdict as RunVerdict
 from importer.services import plan_store
 from importer.services.netbox_client import Failure, NetBoxUnavailable
@@ -154,7 +154,7 @@ class TestAppliedRunDetail:
         page, _ = applied
         text = page.content.decode()
         assert "all-or-nothing" in text
-        assert "can be rolled back by this tool" in text
+        assert "can be reverted later from history" in text
 
     def test_the_endpoints_that_completed_are_named(self, applied):
         page, _ = applied
@@ -242,9 +242,10 @@ class TestAbortedRun:
         apply_now(browser)
 
         run = ImportRun.objects.get()
-        assert run.verdict == RunVerdict.ABORTED
+        assert run.verdict == RunVerdict.RECONCILIATION_REQUIRED
         assert run.created_count == 3
         assert "were not rolled back" in run.aborted_reason
+        assert run.mutations.filter(outcome=MutationOutcome.UNKNOWN).count() == 1
 
     def test_a_partly_applied_plan_cannot_be_applied_again(self, browser, netbox):
         """Re-applying would resume mid-sequence without re-validating."""
@@ -286,10 +287,16 @@ class TestNothingLeaks:
         run = ImportRun.objects.get()
         blob = " ".join(
             str(value)
-            for record in [run, *run.results.all(), *run.issues.all()]
+            for record in [
+                run,
+                *run.results.all(),
+                *run.issues.all(),
+                *run.mutations.all(),
+            ]
             for value in record.__dict__.values()
         )
         assert settings.NETBOX_TOKEN not in blob
+        assert settings.NETBOX_REVERT_TOKEN not in blob
 
     def test_the_uploaded_file_itself_is_not_persisted(self, browser, netbox):
         """Requirement 13.3: the audit log records decisions, not a copy of the spreadsheet."""

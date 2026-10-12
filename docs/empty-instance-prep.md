@@ -178,8 +178,9 @@ things. Prepare the type so there is only one:
   Left as physical interfaces they invite a second cable onto a port that is already consumed, and
   NetBox will report `swp1` as free while its children are cabled.
 
-The importer will not fix this for you — it never modifies an object it did not create — so it is prep,
-and it is worth doing before the first breakout sheet rather than after.
+The importer will not re-type or re-parent an existing interface, so this remains preparation. D15
+may add only the profile-derived `port-breakout-*` tag described below; it does not repair physical
+inventory.
 
 ### Adding a template later does not backfill the devices already built from it
 
@@ -205,7 +206,27 @@ If you find yourself on the wrong side of this, there are three ways out:
 None of the three is prep, strictly: they are all repairs. Getting the templates in before sheet 2
 avoids the question.
 
-## 5. Confirm, then import
+## 5. Breakout parent tags
+
+Before uploading a cabling sheet that fills `a_parent` or `b_parent` and supplies a cable profile,
+create these exact tag **slugs** under **Customization → Tags**:
+
+* `port-breakout-2x`
+* `port-breakout-4x`
+* `port-breakout-8x`
+
+Names may be human-friendly, but slugs must match exactly. The importer never creates tags. It derives
+the factor from positions per connector on each profile side and adds the existing tag to the
+physical parent. Missing tags block only a sheet that needs that factor; the readiness panel lists
+all missing slugs in advance. Profiles with 6, 12, or 16 positions cannot be used with parented
+interfaces in this deployment because no approved corresponding tag exists.
+
+If a parent already carries a different `port-breakout-*` factor, correct it deliberately in NetBox
+before re-uploading. The importer preserves unrelated tags and will not remove a conflicting factor.
+The API token used for forward imports therefore needs read permission for tags and field-scoped
+PATCH permission for interface tags.
+
+## 6. Confirm, then import
 
 Load each importer page and read its readiness panel — it is strictly read-only and creates nothing:
 
@@ -213,7 +234,7 @@ Load each importer page and read its readiness panel — it is strictly read-onl
 | --- | --- |
 | Hierarchy | that it needs no prerequisites |
 | Devices | whether the default role resolves, how many roles and device types exist, and how many of those types define a management (`mgmt_only`) and a loopback interface |
-| Cabling | how many devices exist, and how many interfaces and panel ports they have |
+| Cabling | how many devices exist, how many interfaces and panel ports they have, and whether all three breakout tag slugs exist |
 
 Then import in order: **sheet 1 → sheet 2 → sheet 3**, validating each in full before applying it.
 

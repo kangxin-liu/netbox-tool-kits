@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from django.conf import settings
 
+from importer.breakout_tags import BREAKOUT_TAG_FAMILY, TAGS_ENDPOINT
 from importer.services.netbox_client import Failure, NetBoxClient, NetBoxUnavailable
 
 logger = logging.getLogger("importer.netbox")
@@ -293,6 +294,30 @@ def _cabling_readiness(client: NetBoxClient) -> Readiness:
                     "A port name that does not resolve blocks the file. Set "
                     "NETBOX_AUTOCREATE_INTERFACES to let a sheet create the interfaces its device "
                     "types define."
+                )
+            ),
+        )
+    )
+
+    tag_records = client.get_all(TAGS_ENDPOINT)
+    held_tag_slugs = {str(record.get("slug") or "").strip().casefold() for record in tag_records}
+    missing_tags = sorted(BREAKOUT_TAG_FAMILY - held_tag_slugs)
+    facts.append(
+        Fact(
+            label="Breakout parent tags",
+            value=(
+                "all present"
+                if not missing_tags
+                else f"{len(BREAKOUT_TAG_FAMILY) - len(missing_tags)} / "
+                f"{len(BREAKOUT_TAG_FAMILY)} present"
+            ),
+            level="ok" if not missing_tags else "warn",
+            detail=(
+                ""
+                if not missing_tags
+                else (
+                    "Create these tag slugs before importing a parented cable profile that "
+                    f"requires them: {', '.join(missing_tags)}."
                 )
             ),
         )

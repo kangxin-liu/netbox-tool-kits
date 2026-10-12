@@ -14,11 +14,15 @@ from typing import Any
 
 import pytest
 from django.test import override_settings
+from django.utils import timezone
 
+from importer.breakout_tags import BREAKOUT_TAGS, TAGS_ENDPOINT
 from importer.columns import columns_for
 from importer.importers.base import ApplyRefused, RowOutcome
 from importer.importers.cabling import CABLES, DEVICES, CablingImporter, read_end
+from importer.models import ImportRun, MutationAction, MutationOutcome
 from importer.services.lookups import Lookups
+from importer.services.mutations import MutationJournal
 from importer.services.sheets import Row, parse_upload
 from importer.tests import fakes
 from importer.tests.fakes import FakeNetBox
@@ -106,7 +110,10 @@ class Topology:
 
 @pytest.fixture
 def netbox():
-    return FakeNetBox()
+    fake = FakeNetBox()
+    for slug in BREAKOUT_TAGS.values():
+        fake.add(TAGS_ENDPOINT, name=slug, slug=slug)
+    return fake
 
 
 @pytest.fixture
@@ -1877,11 +1884,11 @@ def parented_row(**overrides: str) -> dict[str, str]:
     return row(
         **{
             "a_port": "swp1s0",
-            "a_parent": f"{LEAF}:swp1",
+            "a_parent": "swp1",
             "b_end": SPINE,
             "b_end_kind": "device",
             "b_port": "swp1s0",
-            "b_parent": f"{SPINE}:swp1",
+            "b_parent": "swp1",
             "cable_profile": "single-1c2p",
             "cable_group": "shuffle-01",
             **overrides,
@@ -1903,20 +1910,29 @@ def shuffle_topology(netbox, topology):
 
 
 class TestBreakoutParents:
-    def test_a_parent_must_be_exactly_device_colon_interface(self, importer, netbox, topology):
-        plan = validate(importer, netbox, [row(a_parent="leaf-without-interface")])
-        error = next(i for i in plan.verdict.errors if i.code is Code.BREAKOUT_PARENT_MALFORMED)
-        assert error.column == "a_parent"
-        assert "{device}:{interface}" in error.expected
-
-    def test_a_parent_device_must_match_the_end(self, importer, netbox, topology):
-        plan = validate(importer, netbox, [row(a_parent=f"{SPINE}:swp1")])
-        error = next(i for i in plan.verdict.errors if i.code is Code.BREAKOUT_PARENT_MISMATCH)
-        assert error.column == "a_parent"
-        assert LEAF in error.expected
+    def test_parent_and_child_names_are_opaque_vendor_interface_names(
+        self, importer, netbox, topology
+    ):
+        parent = add_port(netbox, INTERFACES, topology.leaf, "100GE1/1/1")
+        add_port(
+            netbox,
+            INTERFACES,
+            topology.leaf,
+            "100GE1/1/1:1",
+            type={"value": "virtual"},
+            parent={"id": parent["id"], "name": parent["name"]},
+        )
+        plan = validate(
+            importer,
+            netbox,
+            [row(a_port="100GE1/1/1:1", a_parent="100GE1/1/1")],
+        )
+        assert plan.verdict.errors == []
+        cable = next(action for action in plan.rows[0].actions if action.endpoint == CABLES)
+        assert cable.payload["a_terminations"][0]["object_id"] == parent["id"]
 
     def test_a_panel_end_cannot_declare_an_interface_parent(self, importer, netbox, topology):
-        plan = validate(importer, netbox, [row(b_parent=f"{PANEL}:MPO1")])
+        plan = validate(importer, netbox, [row(b_parent="MPO1")])
         assert any(i.code is Code.BREAKOUT_PARENT_MISMATCH for i in plan.verdict.errors)
 
     def test_with_autocreate_off_a_missing_child_blocks(self, importer, netbox, shuffle_topology):
@@ -1941,7 +1957,11 @@ class TestBreakoutChildPlanning:
         assert plan.verdict.errors == []
 
         actions = [action for planned in plan.rows for action in planned.actions]
-        children = [action for action in actions if action.endpoint == INTERFACES]
+        children = [
+            action
+            for action in actions
+            if action.endpoint == INTERFACES and action.phase == "children"
+        ]
         assert len(children) == 4
         assert {action.phase for action in children} == {"children"}
         assert {action.payload["type"] for action in children} == {"virtual"}
@@ -1959,7 +1979,7 @@ class TestBreakoutChildPlanning:
     def test_missing_parent_is_created_before_its_virtual_child(self, importer, netbox, topology):
         values = row(
             a_port="swp99s0",
-            a_parent=f"{LEAF}:swp99",
+            a_parent="swp99",
             a_interface_type="400gbase-x-qsfpdd",
         )
         plan = validate(importer, netbox, [values])
@@ -1995,7 +2015,7 @@ class TestBreakoutChildPlanning:
             [
                 row(
                     a_port="swp1s0",
-                    a_parent=f"{LEAF}:swp1",
+                    a_parent="swp1",
                 )
             ],
         )
@@ -2003,10 +2023,10 @@ class TestBreakoutChildPlanning:
 
     def test_one_child_cannot_be_assigned_to_two_parents(self, importer, netbox, topology):
         rows = [
-            row(a_port="swp1s0", a_parent=f"{LEAF}:swp1", cable_group="g"),
+            row(a_port="swp1s0", a_parent="swp1", cable_group="g"),
             row(
                 a_port="swp1s0",
-                a_parent=f"{LEAF}:swp2",
+                a_parent="swp2",
                 b_port="MPO2",
                 cable_group="g",
             ),
@@ -2014,3 +2034,279 @@ class TestBreakoutChildPlanning:
         plan = validate(importer, netbox, rows)
         conflict = next(i for i in plan.verdict.errors if i.code is Code.CHILD_PARENT_CONFLICT)
         assert (conflict.line, conflict.related_line) == (3, 2)
+
+
+# --- D15: profile-derived tags on physical breakout parents --------------------------------
+
+
+def breakout_tag(netbox: FakeNetBox, factor: int) -> dict[str, Any]:
+    slug = BREAKOUT_TAGS[factor]
+    return next(record for record in netbox.stored(TAGS_ENDPOINT) if record["slug"] == slug)
+
+
+def parent_tag_actions(plan) -> list[Any]:
+    return [
+        action
+        for planned in plan.rows
+        for action in planned.actions
+        if action.endpoint == INTERFACES and action.method == "patch"
+    ]
+
+
+class TestBreakoutParentTags:
+    pytestmark = pytest.mark.usefixtures("autocreate")
+
+    def test_existing_parent_preserves_unrelated_tags_and_adds_profile_factor(
+        self, importer, netbox, topology
+    ):
+        unrelated = netbox.add(TAGS_ENDPOINT, name="uplink", slug="uplink")
+        topology.interfaces["swp1"]["tags"] = [
+            {"id": unrelated["id"], "name": "uplink", "slug": "uplink"}
+        ]
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent="swp1",
+                    cable_group="g",
+                    cable_profile=BREAKOUT,
+                )
+            ],
+        )
+        assert plan.verdict.errors == []
+        actions = parent_tag_actions(plan)
+        assert len(actions) == 1
+        assert actions[0].payload == {
+            "id": topology.interfaces["swp1"]["id"],
+            "tags": sorted([unrelated["id"], breakout_tag(netbox, 4)["id"]]),
+        }
+        assert plan.rows[0].resolved["a_breakout_tag"] == ("port-breakout-4x (will be added)")
+
+    def test_new_parent_carries_tag_in_create_without_patch(self, importer, netbox, topology):
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp99s0",
+                    a_parent="swp99",
+                    a_interface_type="400gbase-x-qsfpdd",
+                    cable_profile="breakout-1c2p-2c1p",
+                    cable_group="g",
+                )
+            ],
+        )
+        assert plan.verdict.errors == []
+        parent = next(
+            action
+            for action in plan.rows[0].actions
+            if action.endpoint == INTERFACES and action.phase == "interfaces"
+        )
+        assert parent.payload["tags"] == [breakout_tag(netbox, 2)["id"]]
+        assert parent_tag_actions(plan) == []
+
+    def test_already_held_tag_is_idempotent(self, importer, netbox, topology):
+        desired = breakout_tag(netbox, 4)
+        topology.interfaces["swp1"]["tags"] = [
+            {"id": desired["id"], "name": desired["name"], "slug": desired["slug"]}
+        ]
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent="swp1",
+                    cable_profile=BREAKOUT,
+                    cable_group="g",
+                )
+            ],
+        )
+        assert plan.verdict.errors == []
+        assert parent_tag_actions(plan) == []
+        assert plan.rows[0].resolved["a_breakout_tag"] == ("port-breakout-4x (already present)")
+
+    def test_conflicting_factor_tag_blocks_without_removing_it(self, importer, netbox, topology):
+        held = breakout_tag(netbox, 2)
+        topology.interfaces["swp1"]["tags"] = [
+            {"id": held["id"], "name": held["name"], "slug": held["slug"]}
+        ]
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent="swp1",
+                    cable_profile=BREAKOUT,
+                    cable_group="g",
+                )
+            ],
+        )
+        conflict = next(
+            issue for issue in plan.verdict.errors if issue.code is Code.BREAKOUT_TAG_CONFLICT
+        )
+        assert "port-breakout-2x" in conflict.message
+        assert "port-breakout-4x" in conflict.expected
+        assert netbox.patches == []
+
+    def test_missing_required_tag_blocks(self, importer, netbox, topology):
+        wanted = breakout_tag(netbox, 4)
+        netbox.objects[TAGS_ENDPOINT].remove(wanted)
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent="swp1",
+                    cable_profile=BREAKOUT,
+                    cable_group="g",
+                )
+            ],
+        )
+        error = next(
+            issue for issue in plan.verdict.errors if issue.code is Code.BREAKOUT_TAG_NOT_FOUND
+        )
+        assert "port-breakout-4x" in error.expected
+
+    def test_six_position_parent_profile_is_unsupported(self, importer, netbox, topology):
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent="swp1",
+                    cable_profile="breakout-1c6p-6c1p",
+                    cable_group="g",
+                )
+            ],
+        )
+        error = next(
+            issue for issue in plan.verdict.errors if issue.code is Code.BREAKOUT_TAG_UNSUPPORTED
+        )
+        assert "6 positions" in error.message
+
+    def test_shuffle_uses_positions_per_side_not_total_connectors(
+        self, importer, netbox, shuffle_topology
+    ):
+        plan = validate(
+            importer,
+            netbox,
+            [
+                parented_row(
+                    cable_profile="breakout-2c4p-8c1p-shuffle",
+                )
+            ],
+        )
+        assert plan.verdict.errors == []
+        actions = parent_tag_actions(plan)
+        assert len(actions) == 1
+        assert actions[0].payload["tags"] == [breakout_tag(netbox, 4)["id"]]
+        assert plan.rows[0].resolved["a_breakout_tag"].startswith("port-breakout-4x")
+        assert plan.rows[0].resolved["b_breakout_tag"].startswith("none")
+
+    def test_apply_patches_parent_tags_before_creating_the_cable(self, importer, netbox, topology):
+        parent = topology.interfaces["swp1"]
+        add_port(
+            netbox,
+            INTERFACES,
+            topology.leaf,
+            "swp1s0",
+            type={"value": "virtual"},
+            parent={"id": parent["id"], "name": parent["name"]},
+        )
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent="swp1",
+                    cable_profile=BREAKOUT,
+                    cable_group="g",
+                )
+            ],
+        )
+        report = apply_plan(importer, netbox, plan)
+        assert report.aborted is False
+        assert netbox.patches[0].endpoint == INTERFACES
+        assert netbox.patches[0].payloads == [
+            {"id": parent["id"], "tags": [breakout_tag(netbox, 4)["id"]]}
+        ]
+        assert [value["slug"] for value in parent["tags"]] == ["port-breakout-4x"]
+        assert [post.endpoint for post in netbox.posts] == [CABLES]
+        assert report.changed_count == 1
+        assert report.created_count == 1
+
+    @pytest.mark.django_db
+    def test_tag_patch_is_journalled_as_a_minimal_reversible_update(
+        self, importer, netbox, topology, operator
+    ):
+        parent = topology.interfaces["swp1"]
+        add_port(
+            netbox,
+            INTERFACES,
+            topology.leaf,
+            "swp1s0",
+            type={"value": "virtual"},
+            parent={"id": parent["id"], "name": parent["name"]},
+        )
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent="swp1",
+                    cable_profile=BREAKOUT,
+                    cable_group="g",
+                )
+            ],
+        )
+        run = ImportRun.objects.create(
+            importer="cabling",
+            user=operator,
+            filename="breakout.csv",
+            netbox_host=netbox.host,
+            netbox_version=netbox.version,
+            validated_at=timezone.now(),
+            verdict="ready",
+        )
+        journal = MutationJournal(run)
+        report = importer.apply(plan, Lookups(client=netbox), journal=journal)
+        journal.refresh_post_state(netbox)
+        assert report.aborted is False
+
+        update = run.mutations.get(action=MutationAction.UPDATE)
+        assert update.endpoint == INTERFACES
+        assert update.before_values == {"tags": []}
+        assert update.after_values == {"tags": [breakout_tag(netbox, 4)["id"]]}
+        assert update.outcome == MutationOutcome.APPLIED
+
+    def test_tag_drift_aborts_before_any_write(self, importer, netbox, topology):
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    a_port="swp1s0",
+                    a_parent="swp1",
+                    cable_profile=BREAKOUT,
+                    cable_group="g",
+                )
+            ],
+        )
+        plan.verdict.acknowledge()
+        concurrent = netbox.add(TAGS_ENDPOINT, name="concurrent", slug="concurrent")
+        topology.interfaces["swp1"]["tags"] = [
+            {"id": concurrent["id"], "name": concurrent["name"], "slug": concurrent["slug"]}
+        ]
+        report = apply_plan(importer, netbox, plan)
+        assert report.aborted is True
+        assert "changed after this file was validated" in report.abort_reason
+        assert netbox.posts == []
+        assert netbox.patches == []

@@ -51,6 +51,7 @@ def netbox(monkeypatch) -> FakeNetBox:
     """
     fake = FakeNetBox()
     monkeypatch.setattr(netbox_client, "build_client", lambda: fake)
+    monkeypatch.setattr(netbox_client, "build_revert_client", lambda: fake)
     return fake
 
 

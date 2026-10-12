@@ -37,6 +37,7 @@ NATURAL_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
     "dcim.interfaces": (("device", "name"),),
     "ipam.ip-addresses": (("address",),),
     "tenancy.tenants": (("slug",), ("name",)),
+    "extras.tags": (("slug",), ("name",)),
 }
 
 TerminationKind = Literal["interface", "frontport", "rearport"]

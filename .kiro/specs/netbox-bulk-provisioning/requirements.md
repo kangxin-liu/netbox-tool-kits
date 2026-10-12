@@ -1,4 +1,4 @@
-# Requirements — NetBox bulk provisioning (iteration 1: create only)
+# Requirements — NetBox bulk provisioning (create-first, field-scoped forward updates)
 
 ## Introduction
 
@@ -10,8 +10,12 @@ configuration, and exposes three importer pages reachable from a shared nav bar:
 2. **Devices** — placed into racks by face and rack unit
 3. **Cabling** — device and patch-panel terminations
 
-Iteration 1 **creates** objects only. It never updates or deletes anything in NetBox. An object
-that already exists is reported as skipped, which is what makes re-running a sheet safe.
+Forward imports **create** objects wherever possible. Two field-scoped PATCH exceptions are explicit:
+the primary-IP fields of Requirement 8.19, and adding a profile-derived breakout tag to an existing
+parent interface under Requirement 9.49. An object that already exists is otherwise reported as
+skipped, which is what makes re-running a sheet safe. A separate, explicitly confirmed history action
+may compensate for a recorded apply by deleting only objects that apply created and restoring only
+fields that apply changed (Requirement 18).
 
 Data classification: uploaded sheets and NetBox contents are **INTERNAL**; the NetBox API token
 is **CONFIDENTIAL**. See `design.md` for the threat model and trust boundaries.
@@ -66,10 +70,13 @@ its reachability shown to me, so that I know I am writing to the right instance 
 
 ### Acceptance Criteria
 
-1. The system SHALL read `NETBOX_URL` and `NETBOX_TOKEN` from environment variables and SHALL
- NOT accept either as user input in the web UI.
-2. IF `NETBOX_URL` or `NETBOX_TOKEN` is missing or empty at startup, THEN the system SHALL fail
- to start with a message naming the missing variable and no partial functionality.
+1. The system SHALL read `NETBOX_URL`, `NETBOX_TOKEN`, and optional `NETBOX_REVERT_TOKEN` from
+ environment variables and SHALL NOT accept any of them as user input in the web UI.
+ `NETBOX_REVERT_TOKEN` SHALL default to `NETBOX_TOKEN` when it is missing or empty. A separately
+ supplied revert token is preferred because it can be limited to the inverse permissions used by
+ Requirement 18.
+2. IF `NETBOX_URL` or `NETBOX_TOKEN` is missing or empty at startup, THEN the system SHALL fail to
+ start with a message naming the missing variable and no partial functionality.
 3. The system SHALL verify TLS certificates by default; IF `NETBOX_VERIFY_SSL` is false, THEN
  the system SHALL log a warning at startup and display a persistent banner in the UI.
 3a. The system SHALL require an `https://` scheme for `NETBOX_URL` and SHALL refuse to start on
@@ -80,7 +87,7 @@ its reachability shown to me, so that I know I am writing to the right instance 
  and SHALL say that plaintext to a remote NetBox is not permitted, so that the exception cannot be
  stretched to a shared or production instance.
 4. WHEN any page renders, THEN the system SHALL display the target NetBox hostname and the
- connection status, and SHALL NOT display the token or any part of it.
+ connection status, and SHALL NOT display either token or any part of one.
 5. WHEN the app cannot reach NetBox, THEN the system SHALL disable the apply action and show a
  diagnostic that states the host and the failure category (DNS, TLS, timeout, auth) without
  including credentials.
@@ -347,9 +354,9 @@ primary IP.
 19. NetBox cannot accept a primary IP at device-create time because the address does not exist yet.
  After the address creates of 8.17 return, the system MAY PATCH the device with only `primary_ip4`
  and/or `primary_ip6` pointing at the IPs selected by 8.18, and SHALL send no other field on that
- PATCH. This is the sole exception to Requirement 11.3 in this iteration. The system SHALL NOT PATCH
- a primary IP that is already set to a different address — that is the consequential conflict of
- 11.5.
+ PATCH. This is the first of Requirement 11.3's two field-scoped forward-PATCH exceptions; D15 adds
+ only the parent-interface `tags` exception of 9.49. The system SHALL NOT PATCH a primary IP that is
+ already set to a different address — that is the consequential conflict of 11.5.
 20. Applying a device row SHALL be ordered: create the device (or skip it per 8.10), then create the
  addresses against its interfaces, then PATCH the primary IP fields. A re-upload whose device
  already exists therefore still creates missing addresses and still sets an unset primary, which is
@@ -426,8 +433,9 @@ completes that convention rather than reversing it: the cable still terminates o
 but the tool now *creates* the children, as `virtual` interfaces whose `parent` is that cage, so a
 port that is fully consumed no longer reads as free and nobody is tempted to cable a lane twice. The
 new fact a child needs — which physical port it hangs off — is what `a_parent` / `b_parent` carry, in
-the form `{device}:{interface}`. Crucially this is a *separate* fact from `cable_group`: a first draft
-overloaded `cable_group` itself to `{device}:{interface}`, but one tag can name only one parent, and a
+the form of the parent interface name on that row's already-declared `a_end` / `b_end` device.
+Crucially this is a *separate* fact from `cable_group`: a first draft derived the group from one
+parent, but one tag can name only one parent, and a
 **shuffle** — where `swp1`'s lanes fan out to children on several devices whose own ports are children
 of parents fanning out elsewhere — has several parents on each side of one harness. Decoupling the two
 (grouping stays the free-text tag of 9.15; the parent moves to its own columns) is what lets a shuffle
@@ -583,16 +591,18 @@ row that names it.
 
 Criteria 9.34–9.43 are decision **D13** — breakout child sub-interfaces and shuffle harnesses.
 
-34. The system SHALL accept optional `a_parent` and `b_parent` columns, each either blank or of the
- form `{device}:{interface}`. WHEN the cell is blank, that end SHALL behave exactly as Criteria
+34. The system SHALL accept optional `a_parent` and `b_parent` columns, each either blank or holding
+ the physical parent interface name on that row's `a_end` / `b_end` device. WHEN the cell is blank,
+ that end SHALL behave exactly as Criteria
  9.1–9.33 describe — an ordinary device or panel port — so every sheet written before this column
  existed is unchanged, and the common single-port cable is untouched.
-35. WHERE `a_parent` / `b_parent` is non-blank, the system SHALL validate its shape as exactly one
- `{device}:{interface}` pair and SHALL reject a cell that is not. The `{device}` part SHALL name the
- same device as that end's `a_end` / `b_end`; IF it names a different device, THEN the system SHALL
- reject the row naming both, because a child cannot hang off a parent on another device. The
- `{interface}` part names the physical **parent** interface, and the end's `*_port` cell SHALL be read
- as the name of a **child sub-interface** of that parent rather than as an independent port.
+35. WHERE `a_parent` / `b_parent` is non-blank, the system SHALL use the trimmed value verbatim as
+ the physical **parent** interface name and SHALL resolve it on the same device that `a_end` /
+ `b_end` already names. The system SHALL NOT split or otherwise interpret the interface name, so
+ vendor names containing `/`, `:`, `.`, or other NetBox-accepted characters remain valid — for
+ example parent `100GE1/1/1` with child `100GE1/1/1:1`. The end's `*_port` cell SHALL be read as the
+ name of a **child sub-interface** of that parent rather than as an independent port. A panel end
+ SHALL reject a non-blank parent because D13 creates device interfaces only (9.29).
 36. WHERE an end declares a parent, the breakout **cable SHALL terminate on the parent physical
  interface**, never on the child. The child SHALL be created as a `dcim.Interface` of `type = virtual`
  with `parent` set to the resolved parent interface, and SHALL NOT itself be cabled — a virtual
@@ -636,6 +646,56 @@ Criteria 9.34–9.43 are decision **D13** — breakout child sub-interfaces and 
  though the NetBox cable terminates on the parents — so an operator reading the preview sees both the
  physical cable that will be written and the lane map it stands for. The run report SHALL record each
  created parent and child as an object of its own (Requirements 10.18, 12.1).
+
+Criteria 9.44–9.54 are decision **D15** — profile-derived breakout tags on D13 parent interfaces.
+
+44. WHERE a row declares `a_parent` / `b_parent` and its cable group supplies a non-blank
+ `cable_profile`, the system SHALL derive the breakout factor independently for that cable side from
+ the profile's **positions per connector**, not from the group's row count or the profile's total
+ connector count. For example, `breakout-1c4p-4c1p` derives factor 4 for an A-side parent and factor 1
+ for a B-side parent; `breakout-2c4p-8c1p-shuffle` likewise derives factor 4 for each A-side parent,
+ not factor 8. This keeps partly populated cables and shuffle profiles truthful.
+45. The system SHALL map factor 2 to tag slug `port-breakout-2x`, factor 4 to
+ `port-breakout-4x`, and factor 8 to `port-breakout-8x`. Factor 1 SHALL require no breakout tag and
+ SHALL make no tag write on that side. A blank `cable_profile` retains 9.20's warning behavior and
+ SHALL make no tag write because there is no profile from which to derive a factor.
+46. IF a parented side's non-blank profile has an unreadable structure, or has a positions-per-
+ connector factor other than 1, 2, 4, or 8 — including the supported 6-, 12-, and 16-position
+ profiles — THEN the system SHALL reject the group with `BREAKOUT_TAG_UNSUPPORTED`, naming the
+ profile, side, and factor where known. It SHALL NOT guess a tag, silently omit the promised tag, or
+ invent `port-breakout-6x` / `12x` / `16x`.
+47. `port-breakout-2x`, `port-breakout-4x`, and `port-breakout-8x` are pre-existing NetBox tag
+ **slugs**. The importer SHALL look up only the slug required by the validated sheet and SHALL NOT
+ create, rename, or otherwise modify a tag object. IF the required slug does not resolve to exactly
+ one tag, THEN validation SHALL block with `BREAKOUT_TAG_NOT_FOUND`, naming the required slug and
+ requiring an administrator to prepare it in NetBox.
+48. The derived tag SHALL be applied once to every distinct D13 physical parent interface on that
+ profile side, regardless of how many child rows name the parent. It SHALL never be applied to the
+ virtual child interfaces or to an ordinary unparented `*_port`.
+49. WHERE a physical parent is created in this run, its create payload SHALL include the derived tag.
+ WHERE the parent already exists and does not carry the derived tag, the system SHALL PATCH only its
+ `tags` field with the complete existing tag-id set plus the derived tag id, preserving every
+ unrelated tag. This is the second and only other forward-update exception to Requirement 11.3,
+ alongside the device primary-IP PATCH of 8.19.
+50. WHERE the parent already carries the derived tag and no conflicting breakout tag, the system
+ SHALL plan no tag PATCH and SHALL report the tag as already present. Re-uploading the same sheet
+ therefore produces neither a duplicate tag nor a redundant interface update.
+51. IF the parent carries any *different* member of `{port-breakout-2x, port-breakout-4x,
+ port-breakout-8x}`, whether or not it also carries the desired member, THEN the system SHALL block
+ with `BREAKOUT_TAG_CONFLICT`, naming the held and desired slugs. The forward importer SHALL NOT
+ remove a stale breakout tag or leave contradictory factors attached to one interface.
+52. The pre-apply state check of Requirement 10.14 SHALL include each affected parent's complete,
+ ordered-insensitive tag-id set. A tag added or removed after validation SHALL abort before the first
+ write rather than let the full-list `tags` PATCH overwrite concurrent work.
+53. Apply ordering SHALL be: create missing physical parents (with their tags in the POST), PATCH
+ tags on existing parents, create missing virtual children, then create cables. A failure after a tag
+ PATCH may leave the tag without the child/cable; the run report SHALL identify that completed
+ mutation, and re-upload SHALL safely continue because 9.50 makes it idempotent.
+54. The plan preview SHALL name the derived tag and whether each parent already holds it, will
+ receive it in its create, or will be PATCHed. Each PATCH SHALL be journalled as one D14 `UPDATE`
+ mutation with only `tags` in `before_values` / `after_values`; compensating revert SHALL restore the
+ exact prior tag set only after D14's target, checkpoint, and drift checks. The verdict and run report
+ SHALL count a distinct parent tag PATCH as one changed object, however many group rows name it.
 
 ## Requirement 10: Validation gate — nothing is written until validation is clean
 
@@ -701,18 +761,22 @@ can finish a partial import without creating duplicates.
  Requirement 7.10, so a sheet that states a slug is looked up by the slug it states.
 2. WHEN a matching object exists, THEN the system SHALL skip it, record it as already present,
  and continue with the row's remaining work.
-3. The system SHALL NOT update, rename, re-parent, or delete any existing NetBox object in this
- iteration, even when sheet values differ from what NetBox holds. Every write this iteration
- performs is the creation of a new object, with one exception: the primary-IP PATCH of Requirement
- 8.19, which sends only `primary_ip4` / `primary_ip6` and only to set them to an address this run
- assigned (or found already assigned) on that device. A primary IP already set to a *different*
- address is not patched — it is the consequential conflict of 11.5.
+3. A forward apply SHALL NOT update, rename, re-parent, or delete any existing NetBox object, even
+ when sheet values differ from what NetBox holds. Every forward-apply write is the creation of a new
+ object, with two field-scoped exceptions: the primary-IP PATCH of Requirement 8.19, which sends only
+ `primary_ip4` / `primary_ip6` and only to set them to an address this run assigned (or found already
+ assigned) on that device. A primary IP already set to a *different* address is not patched — it is
+ the consequential conflict of 11.5; and Requirement 9.49's parent-interface PATCH, which sends only
+ the complete existing `tags` set plus one profile-derived, pre-existing breakout tag. Requirement
+ 18's explicit revert flow is the only path allowed to delete one of those recorded creates or
+ restore one of those recorded fields.
 3a. Creating a child object against a device that already exists — an `ipam.IPAddress` under 8.17, a
  `dcim.Interface` under 8.23 or 9.25 — is a create and not an update, so 11.3 permits it. What 11.3
  forbids is changing a field of an object this run did not write, and none of those paths does: no
  existing interface is re-typed or renamed (9.8), and no existing cable gains a termination (9.22).
- The distinction is what keeps the invariant checkable — `PATCH`, `PUT`, and `DELETE` appear in
- exactly one place in the codebase, the primary-IP call of 8.19.
+ The distinction keeps the forward-import invariant checkable: outside the isolated revert service,
+ `PATCH` appears only in the primary-IP call of 8.19 and the parent-tag call of 9.49, and
+ forward-import code contains no `PUT` or `DELETE`.
 4. WHEN an object already exists in NetBox and every value the sheet supplies for it matches, THEN
  the system SHALL classify the row as INFO / skip-already-exists, which does not block apply.
 5. IF an object already exists but a **consequential** value the sheet supplies differs from what
@@ -755,7 +819,7 @@ sheet or unwind a partial import without guessing.
 ### Acceptance Criteria
 
 1. WHEN an apply finishes, THEN the system SHALL show per-row outcomes with row numbers matching
- the uploaded file, including the created object's name and a link to it in NetBox.
+ the uploaded file, including each created or changed object's name and a link to it in NetBox.
 2. WHEN NetBox rejects a create, THEN the system SHALL surface NetBox's own field-level error
  text against the offending row and column. IF NetBox returns a single error that is not aligned to
  a specific item in the submitted batch, THEN the system SHALL replay the batch one row at a time to
@@ -764,12 +828,14 @@ sheet or unwind a partial import without guessing.
  (per D7 the batch rolled back), SHALL NOT proceed to the next endpoint, and SHALL abort the run on
  connection loss or authentication failure.
 4. IF a run aborts partway, THEN the system SHALL report which endpoints completed before the abort,
- and the rows they created, so the operator can unwind manually.
+ and every object they created or changed, so the operator can inspect or revert the applied subset.
 5. The system SHALL state plainly what its guarantee is and is not: each endpoint's creates are
- applied all-or-nothing, the sequence across endpoints is not, and no applied create can be rolled
- back by this tool.
+ applied all-or-nothing, the sequence across endpoints is not, and reversion is a later compensating
+ operation rather than a transaction rollback.
 6. The system SHALL offer the result report as a CSV download.
 7. Error messages SHALL never include the API token, request headers, or a stack trace.
+8. The result report SHALL distinguish created, changed, skipped, failed, and not-attempted items;
+ for a changed item it SHALL name only the fields changed by the apply.
 
 ## Requirement 13: Import run audit log
 
@@ -779,19 +845,34 @@ change can be traced to who ran it and what it touched.
 ### Acceptance Criteria
 
 1. WHEN an apply runs, THEN the system SHALL persist a run record with the user, timestamps,
- importer type, uploaded filename, target NetBox host, NetBox version, and outcome counts.
-2. The system SHALL persist, for each row that resulted in a create, the NetBox object type, its
- returned id, and its name.
+ importer type, uploaded filename, target NetBox host, NetBox version, apply status, and outcome
+ counts, including whether it was fully or partially applied.
+2. Before issuing a write request, the system SHALL append an operation intent for every planned
+ create or field change. After NetBox responds, it SHALL record the outcome, endpoint, global apply
+ sequence, NetBox object type, returned id, name, URL, source line or lines, and action
+ (`CREATE` or `UPDATE`).
+2a. For a create, the operation SHALL retain the canonical post-apply values and post-write
+ `last_updated` value needed to detect later drift. For an update, it SHALL retain that post-write
+ value plus the before and after values of only the fields changed by the apply, so the change can be
+ safely reversed without snapshotting the whole object.
+2b. IF a request times out or the process stops after an intent is stored but before its outcome is
+ known, THEN the run SHALL remain visibly `reconciliation_required`. The system SHALL reconcile the
+ intent against NetBox by object id or natural key before declaring the run finished or offering a
+ revert; it SHALL NOT silently treat an unknown outcome as not applied.
 3. The system SHALL NOT persist the API token, the uploaded file itself, or any credential.
-4. The system SHALL expose a read-only history view listing past runs, most recent first.
-5. The system SHALL NOT allow run records to be edited or deleted through the web UI.
+4. The system SHALL expose a history view listing all validation and apply runs, most recent first.
+ Every run with one or more successful writes SHALL remain listed whether it was fully applied,
+ partially applied, aborted, or later reverted.
+5. The system SHALL NOT allow run records or operation records to be edited or deleted through the
+ web UI. Revert attempts SHALL be appended and linked to the original run; they SHALL never rewrite
+ or erase its audit record.
 
 ## Requirement 14: Security and data handling
 
 ### Acceptance Criteria
 
-1. The system SHALL keep the NetBox token out of source, templates, logs, error pages, audit
- records, and commit history, and SHALL load it only from the environment.
+1. The system SHALL keep both NetBox tokens out of source, templates, logs, error pages, audit
+ records, and commit history, and SHALL load them only from the environment.
 2. The system SHALL run with `DEBUG` false and an explicit `ALLOWED_HOSTS` outside local
  development.
 3. All state-changing requests SHALL require a valid CSRF token and use POST.
@@ -802,8 +883,8 @@ change can be traced to who ran it and what it touched.
  apply to a remote host.
 6. Test fixtures SHALL contain only synthetic data — no production site names, serials, customer
  identifiers, or real credentials.
-7. The system SHALL log security-relevant events — login success and failure, and every apply —
- with actor and timestamp.
+7. The system SHALL log security-relevant events — login success and failure, every apply, every
+ revert preflight, and every revert attempt — with actor and timestamp.
 
 ## Requirement 15: Scale and performance limits
 
@@ -871,13 +952,14 @@ rather than to appear broken.
  types exist, and how many of those types define a `mgmt_only` interface and a `loopback`-typed
  interface; for cabling, whether any devices with front or rear ports exist, and whether
  `NETBOX_AUTOCREATE_INTERFACES` is on, since that flag changes what an unknown port name does
- (9.24).
+ (9.24), plus whether tag slugs `port-breakout-2x`, `port-breakout-4x`, and
+ `port-breakout-8x` exist for D15.
 3. IF `NETBOX_DEFAULT_DEVICE_ROLE` does not resolve to an existing role, THEN the system SHALL warn
  prominently on the devices page at page load, not merely at validation time.
 4. The readiness summary SHALL be strictly read-only and SHALL create nothing.
-5. The system SHALL NOT create device roles, tenants, or patch panels in this iteration; device types
- only under the opt-in flag of Requirement 8.7, and device interfaces only under the opt-in flag of
- Requirement 9.24.
+5. The system SHALL NOT create device roles, tenants, patch panels, or tags in this iteration; device
+ types only under the opt-in flag of Requirement 8.7, and device interfaces only under the opt-in
+ flag of Requirement 9.24.
 6. The documentation SHALL include a runbook for preparing an empty instance: creating the device
  roles in use, importing device types, marking exactly one `mgmt_only` interface and exactly one
  `loopback`-typed interface on each network device type (community templates often type a loopback
@@ -886,6 +968,66 @@ rather than to appear broken.
 7. WHEN the hierarchy importer runs against a completely empty instance, THEN it SHALL succeed
  without prerequisites, since it creates its own parents — so a new instance is always usable for
  sheet 1 first.
+8. The empty-instance runbook SHALL require administrators to create the three D15 tag slugs before
+ a parented cable profile using the corresponding factor is uploaded. A missing unused factor tag
+ MAY appear as a readiness warning but SHALL block validation only when the sheet actually requires
+ it (9.47).
+
+## Requirement 18: Applied-change history and safe reversion
+
+**User Story:** As an engineer, I want the history page to show exactly what a fully or partially
+applied run changed and to safely revert those changes, so that I can recover from a mistaken apply
+without guessing or deleting unrelated NetBox data.
+
+### Acceptance Criteria
+
+1. Each history row SHALL show the run's apply status and counts of objects created, changed, skipped,
+ failed, reverted, and still applied. Runs with no successful writes SHALL show that they have nothing
+ to revert.
+2. Opening a run SHALL show a summary grouped by action and NetBox object type, followed by an
+ ordered item list. Each item SHALL show its source line or lines, endpoint, action, object type,
+ object id, object name, NetBox link, and current revert state.
+3. For an `UPDATE`, the detail SHALL show the before and after value of each field changed by that
+ operation. For a `CREATE`, it SHALL show the fields needed to identify the created object and detect
+ drift. The page SHALL NOT expose unrelated fields from a whole-object snapshot.
+4. A fully applied or partially applied run with at least one successful, unreverted mutation SHALL
+ offer a revert action. A blocked run, a run with no writes, a run awaiting reconciliation, or a run
+ whose mutations are all reverted SHALL not offer it and SHALL state why.
+5. Revert SHALL use a two-step flow: a POST-only preflight that reads current NetBox state and renders
+ the exact delete/restore plan, followed by a separate POST-only confirmation. Both requests SHALL be
+ CSRF-protected and restricted to the same superuser access as apply.
+6. The confirmation page SHALL state that reversion is compensating work, not an atomic transaction;
+ SHALL count deletes and field restorations separately; and SHALL require explicit confirmation.
+7. Reverting a `CREATE` SHALL delete only the object id returned for that operation. Reverting an
+ `UPDATE` SHALL PATCH only the recorded changed fields back to their before values. The system SHALL
+ never delete a pre-existing object, infer an unrecorded change, or replace an entire object from a
+ snapshot.
+8. The system SHALL execute revert operations in reverse successful-apply sequence, so dependants
+ such as cables, IP addresses, child interfaces, devices, racks, and their parents are unwound in the
+ opposite order from their creation.
+9. Before performing any revert write, the preflight SHALL verify that the configured target is the
+ same NetBox host as the original run, every target object still exists, every recorded field still
+ matches that operation's post-apply value, and its `last_updated` value still matches the post-write
+ value. IF any item has disappeared or drifted, THEN the whole revert SHALL be blocked before any
+ write and SHALL identify each conflicting item.
+10. The confirmed revert SHALL be bound to a short-lived fingerprint of the preflight plan and
+ current object states. Immediately before its first write, the system SHALL repeat the drift check;
+ IF it differs, THEN it SHALL abort with zero revert writes and require a new preflight.
+11. IF NetBox rejects a delete because a later object depends on it, or any revert request fails
+ after earlier revert operations succeeded, THEN the system SHALL stop, preserve the successful
+ revert outcomes, mark the attempt partially reverted, and show the failed and not-attempted items.
+ No cross-request atomicity SHALL be claimed.
+12. Retrying a partial revert SHALL preflight and execute only mutations that remain applied. It
+ SHALL never repeat a successful delete or field restoration, and repeated confirmation of a fully
+ reverted run SHALL perform no writes.
+13. Every revert attempt SHALL be an immutable audit record linked to the original run, containing
+ actor, timestamps, target host, status, per-item outcomes, and failure reason where applicable. The
+ original apply record and its result report SHALL remain unchanged.
+14. The history detail SHALL offer a formula-escaped CSV of the mutation and revert history without
+ credentials, request headers, uploaded-file contents, or unrelated NetBox fields.
+15. Runs created before the mutation journal exists SHALL remain visible. IF their stored data is
+ insufficient to prove a safe inverse, THEN they SHALL be labelled `revert unavailable — legacy
+ record` rather than being guessed at or backfilled from current NetBox state.
 
 ## Assumptions
 
@@ -896,9 +1038,14 @@ rather than to appear broken.
  arrived in the same 4.5 release, so the supported range guarantees them and the `cable_profile`
  column of Requirement 9.13 needs no version condition of its own — 9.14 covers only their
  disappearance in some later version.
-2. The supplied API token has write permission for DCIM objects — including `dcim.Interface`, which
- Requirements 8.23 and 9.25 create — write permission for `ipam.IPAddress` (Requirement 8.17), and
- read permission for choices. It does not need permission to create prefixes, VRFs, or VLANs.
+2. `NETBOX_TOKEN` has create/read permission for every DCIM and IPAM object the tool can create —
+ including `dcim.Interface` and `ipam.IPAddress` — read permission for `extras.Tag`, PATCH permission
+ for the primary-IP fields of Requirement 8.19 and the interface `tags` field of Requirement 9.49,
+ and read permission for choices. The effective revert credential is
+ `NETBOX_REVERT_TOKEN` when supplied and `NETBOX_TOKEN` otherwise; it must have read, delete, and the
+ field-scoped PATCH permissions needed to invert those writes. A separately supplied revert token
+ should have no create permission. Neither credential needs permission to create prefixes, VRFs, or
+ VLANs.
 3. A single operator uses the tool at a time; no concurrent-apply coordination is required.
 4. Device roles and tenants referenced by sheets already exist in NetBox; iteration 1 does not
  create them. On an unprepared instance this is surfaced by Requirement 17 rather than assumed away.
@@ -933,7 +1080,8 @@ rather than to appear broken.
  would have been a validation cross-check masquerading as a record of the installed optic.
  Iteration 2 should choose between a `dcim.InventoryItem` bound to the interface or a module in a
  module bay — both can actually hold a part number — rather than reviving the interface-type route.
- Dropping it also restores the create-only rule to having no exceptions at all.
+ Dropping it also restored the create-only rule at that stage; D11 and D15 later introduced their
+ explicit field-scoped exceptions.
 - **D4 — Autocreate device types. DECIDED:** off by default, opt-in by environment variable, since
  typos would otherwise pollute a shared NetBox with junk device types.
 - **D5 — Apply concurrency. DECIDED:** apply runs inline in the request with a bounded maximum row
@@ -1087,7 +1235,8 @@ rather than to appear broken.
 
 - **D13 — Breakout child sub-interfaces and shuffle harnesses. DECIDED, built; live probe
  outstanding.** The cabling
- sheet gains two optional columns, `a_parent` and `b_parent`, each `{device}:{interface}`. Where an end
+ sheet gains two optional columns, `a_parent` and `b_parent`, each naming a physical parent interface
+ on the device already named by that end. Where an end
  names a parent, its `*_port` is read as a child sub-interface to be created under that parent as a
  `virtual` interface, the cable terminates on the physical parent, and `*_interface_type` types the
  parent rather than the port.
@@ -1099,8 +1248,8 @@ rather than to appear broken.
  and its connector counts (9.19) are unchanged — and closes the hole by creating the children as
  `virtual` with `parent` set, which is both the record of the lanes and the thing that makes them
  un-cable-capable.
- **Why the parent is a new column and not `cable_group`.** The first sketch made `cable_group` itself
- `{device}:{interface}`, which reads well for a one-sided breakout because grouping and parent coincide
+ **Why the parent is a new column and not `cable_group`.** The first sketch derived `cable_group`
+ directly from one parent, which reads well for a one-sided breakout because grouping and parent coincide
  there. A **shuffle** breaks that coincidence: one harness carries lanes from several parents on each
  side to several parents on the other, so the grouping tag must stay free text (one harness, many
  parents) while the parent becomes a per-end fact. Decoupling them is the only shape that lets a shuffle
@@ -1120,10 +1269,59 @@ rather than to appear broken.
  the preview's lane-pairing line, and the sample/template generation. `BaseImporter` needs nothing new —
  the `Ref`/`Registry` id hand-off D12 added already carries a created parent's id into the child payload
  and the child's into nothing, since children are not cabled.
- The two remaining alternatives were decided before implementation: cables terminate on physical
- parents, never children (9.36), and the explicit `{device}:{interface}` form stays even though the
- device repeats `*_end`, because the redundant half catches a lane pasted under the wrong device
- (9.35).
+ The remaining alternatives were decided before implementation and then refined in operation:
+ cables terminate on physical parents, never children (9.36), while the parent cell carries only the
+ interface name. Repeating the device from `*_end` made every value longer without adding scope —
+ resolution already occurs inside that end's device — and made interface names containing `:`
+ unnecessarily ambiguous. Criterion 9.35 therefore treats the value as an opaque NetBox interface
+ name and never parses it.
+
+- **D14 — Operation journal and compensating revert. DECIDED and built.** Every planned write gets
+ an append-only intent before the NetBox request and an outcome afterwards. History is therefore
+ object-operation based rather than inferred from row results: one hierarchy row may create four
+ objects, while four breakout rows may create one cable. A revert reads that journal in reverse,
+ deleting recorded creates and restoring only recorded changed fields after a current-state drift
+ check.
+ **Why this is compensation rather than rollback.** NetBox has no transaction spanning endpoints,
+ and the local audit database cannot share a transaction with NetBox. Calling the feature rollback
+ would promise atomicity it cannot provide. A failed revert is retained as a partial attempt and can
+ resume from the mutations that remain applied.
+ **Why current-state equality is mandatory.** An object created by this tool may later be edited or
+ become a dependency of work done elsewhere. Deleting or overwriting it from an old history row would
+ destroy that later work. Revert therefore refuses before its first write if a recorded object no
+ longer matches its post-apply state; a human must resolve that drift in NetBox.
+ **Why a separate mutation journal.** `ImportRowResult` is a presentation record, not a reversible
+ ledger: a row may map to several writes and a grouped write may map to several rows. Reconstructing
+ operations from it would be ambiguous exactly in the partial-failure cases where history matters.
+ **Cost if reversed:** the operation-intent model and apply instrumentation, history summaries, the
+ revert planner/executor and its API permissions, append-only revert-attempt records, and the
+ partial/reconciliation test matrix.
+
+- **D15 — Profile-derived breakout tags on parent interfaces. DECIDED and built; live probe
+ outstanding.** A D13
+ physical parent receives the existing tag `port-breakout-2x`, `port-breakout-4x`, or
+ `port-breakout-8x`, derived from that cable side's positions per connector. A newly created parent
+ carries it in the POST; an existing parent receives a tags-only PATCH preserving unrelated tags.
+ **Why positions per connector, not row count or total connectors.** A partly populated 1C4P side is
+ still a four-way breakout with one connected lane, while the 2C4P side of the shuffle profile has
+ eight connectors in total but each physical parent carries four positions. Row count would change
+ the tag as lanes are added; total connectors would mis-tag each shuffle parent as 8x. The profile's
+ per-connector positions are the stable physical fact.
+ **Why only 2x, 4x, and 8x.** Those are the existing operational tag slugs requested for this
+ deployment. Profiles with 6, 12, or 16 positions are valid NetBox profiles but cannot satisfy this
+ tagging contract, so a D13 parent using one blocks rather than acquiring an invented or silently
+ omitted tag.
+ **Why conflicting tags block rather than being replaced.** Removing an existing breakout tag is a
+ destructive reconciliation decision and could erase a fact another workflow owns. Leaving both
+ factors is worse. The create-first importer therefore names the conflict and asks the operator to
+ correct NetBox; it only adds a missing tag when no other breakout-factor tag is present.
+ **Why this is a forward PATCH exception.** NetBox tags are attached to an existing interface by
+ updating its `tags` field. The payload is limited to the drift-checked existing set plus one derived
+ tag, journalled as a D14 UPDATE and reversible to the exact prior set. That bounded behavior is
+ safer and more auditable than pretending tagging can be implemented as a create.
+ **Cost if reversed:** tag prefetch/validation, profile-side factor derivation, a parent-tag planning
+ phase, tags-only interface PATCH support and drift signatures, D14 UPDATE journal/revert coverage,
+ readiness checks for the three tag slugs, and cabling tests/docs.
 
 D1–D9 are settled; D3 and D6 are deferred to iteration 2 by choice, not left undecided. **D10, D11,
 D12 are the open decisions.** Inside D10: whether grouped rows must repeat the cable's
@@ -1131,3 +1329,7 @@ attributes or inherit them from the first row (9.18 proposes inherit), and wheth
 left as row order (9.21) or needs explicit connector columns. Inside D11: `oob_ip` versus primary-only.
 Inside D12: whether the flag covers the template-backed create as well as the column-driven one, and
 whether Requirement 8.23 shares it. D13 is decided and built; only its live 4.6.8 probe remains.
+D14 is decided, built, and covered by the Phase 12 regression suite; the destructive flow still
+requires the Security Design Authority review named in `design.md` before merge or deployment. D15 is
+decided, built, and covered by the Phase 13 regression suite; its live interface-tag PATCH probe and
+production security gates remain.

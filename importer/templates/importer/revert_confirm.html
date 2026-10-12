@@ -1,0 +1,47 @@
+{% extends "importer/base.html" %}
+{% comment %}Classification: INTERNAL. AI-assisted (Cursor) — review before merge.{% endcomment %}
+{% block title %}Confirm revert for run {{ run.pk }} — netbox-tool-kits{% endblock %}
+
+{% block content %}
+<h1>Confirm revert for run {{ run.pk }}</h1>
+<p class="blurb">
+  Preflight passed against <code>{{ run.netbox_host }}</code>. This is compensating work, not an
+  atomic rollback: NetBox can accept an earlier inverse operation and reject a later one.
+</p>
+
+<section class="panel">
+  <h2>Inverse plan</h2>
+  <p>
+    <strong>{{ delete_count }}</strong> created object{{ delete_count|pluralize }} will be deleted
+    and <strong>{{ restore_count }}</strong> changed object{{ restore_count|pluralize }} will have
+    only its recorded fields restored.
+  </p>
+  <table class="results">
+    <thead><tr><th>Order</th><th>Inverse</th><th>Object</th><th>Source</th></tr></thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td>{{ item.reverse_sequence }}</td>
+        <td>{% if item.mutation.action == "create" %}delete{% else %}restore fields{% endif %}</td>
+        <td>
+          {{ item.mutation.object_type }} — {{ item.mutation.object_name }}
+          <span class="muted">#{{ item.mutation.object_id }}</span>
+        </td>
+        <td>line{{ item.mutation.source_lines|length|pluralize }}
+          {{ item.mutation.source_lines|join:", " }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="banner banner-warn inline-banner">
+    Confirmation repeats the drift check before the first write. Execution then stops at the first
+    failure and records reverted, failed, and not-attempted items.
+  </p>
+  <form method="post"
+        action="{% url 'importer:revert_confirm' run.pk attempt.pk %}">
+    {% csrf_token %}
+    <button type="submit" class="button">Confirm revert</button>
+    <a class="button secondary" href="{% url 'importer:run_detail' run.pk %}">Cancel</a>
+  </form>
+</section>
+{% endblock %}

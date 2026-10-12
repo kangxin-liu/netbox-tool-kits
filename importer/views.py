@@ -19,15 +19,31 @@ from typing import Any
 from django.conf import settings
 from django.contrib import messages
 from django.http import Http404, HttpRequest, HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import get_object_or_404, redirect, render
 from django.views import View
 from django.views.generic import TemplateView
 
 from importer import columns, reports
 from importer.access import SuperuserRequiredMixin
 from importer.importers.base import GUARANTEE, RowOutcome
-from importer.models import ImportRun
-from importer.services import netbox_client, plan_store, readiness, runs, sheets
+from importer.models import (
+    ImportRun,
+    MutationAction,
+    MutationOutcome,
+    RevertAttempt,
+    RevertItemOutcome,
+    RevertItemResult,
+    RevertStatus,
+)
+from importer.services import (
+    mutations,
+    netbox_client,
+    plan_store,
+    readiness,
+    revert,
+    runs,
+    sheets,
+)
 
 logger = logging.getLogger("importer.audit")
 
@@ -288,7 +304,19 @@ class RunListView(SuperuserRequiredMixin, TemplateView):
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
-        context["runs"] = ImportRun.objects.select_related("user")[:200]
+        history = list(ImportRun.objects.select_related("user").prefetch_related("mutations")[:200])
+        reverted_by_run: dict[int, set[int]] = {}
+        for run_id, mutation_id in RevertItemResult.objects.filter(
+            mutation__run_id__in=[run.pk for run in history],
+            outcome=RevertItemOutcome.REVERTED,
+        ).values_list("mutation__run_id", "mutation_id"):
+            reverted_by_run.setdefault(run_id, set()).add(mutation_id)
+        for run in history:
+            run.has_mutation_journal = bool(list(run.mutations.all()))
+            run.mutation_summary = revert.mutation_summary(
+                run, reverted_ids=reverted_by_run.get(run.pk, set())
+            )
+        context["runs"] = history
         return context
 
 
@@ -297,8 +325,28 @@ class RunDetailView(SuperuserRequiredMixin, TemplateView):
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
-        run = get_object_or_404(ImportRun, pk=kwargs["pk"])
+        run = get_object_or_404(
+            ImportRun.objects.select_related("user").prefetch_related(
+                "mutations__revert_results__attempt",
+                "revert_attempts__items__mutation",
+            ),
+            pk=kwargs["pk"],
+        )
         issues = list(run.issues.all())
+        mutation_list = list(run.mutations.all())
+        for mutation in mutation_list:
+            outcomes = list(mutation.revert_results.all())
+            mutation.revert_state = outcomes[-1].outcome if outcomes else ""
+            mutation.is_reverted = any(
+                outcome.outcome == RevertItemOutcome.REVERTED for outcome in outcomes
+            )
+            mutation.field_changes = [
+                (field, before, mutation.after_values.get(field))
+                for field, before in mutation.before_values.items()
+            ]
+        groups: dict[tuple[str, str], list[Any]] = {}
+        for mutation in mutation_list:
+            groups.setdefault((mutation.action, mutation.object_type), []).append(mutation)
         context["run"] = run
         context["results"] = list(run.results.all())
         context["created"] = [
@@ -309,6 +357,17 @@ class RunDetailView(SuperuserRequiredMixin, TemplateView):
         context["endpoints_completed"] = [
             endpoint for endpoint in run.endpoints_completed.split(",") if endpoint
         ]
+        context["mutation_summary"] = revert.mutation_summary(run)
+        context["mutation_groups"] = [
+            {"action": action, "object_type": object_type, "items": items}
+            for (action, object_type), items in groups.items()
+        ]
+        context["revert_eligibility"] = revert.eligibility(run)
+        context["revert_attempts"] = list(run.revert_attempts.all())
+        context["needs_reconciliation"] = any(
+            item.outcome in (MutationOutcome.INTENT, MutationOutcome.UNKNOWN)
+            for item in mutation_list
+        )
         return context
 
 
@@ -330,3 +389,79 @@ class RunResultsCsvView(SuperuserRequiredMixin, View):
             raise Http404("this run applied nothing, so it has no result report")
         payload = reports.results_csv(run.results.all())
         return _download(payload, f"run-{run.pk}-results.csv", CONTENT_TYPES[sheets.CSV_SUFFIX])
+
+
+class RunMutationsCsvView(SuperuserRequiredMixin, View):
+    def get(self, request: HttpRequest, pk: int, *args: Any, **kwargs: Any) -> HttpResponse:
+        run = get_object_or_404(ImportRun, pk=pk)
+        if not run.mutations.exists():
+            raise Http404("this run has no mutation journal")
+        payload = reports.mutations_csv(run.mutations.prefetch_related("revert_results__attempt"))
+        return _download(
+            payload,
+            f"run-{run.pk}-mutations.csv",
+            CONTENT_TYPES[sheets.CSV_SUFFIX],
+        )
+
+
+class ReconcileRunView(SuperuserRequiredMixin, View):
+    def post(self, request: HttpRequest, pk: int, *args: Any, **kwargs: Any) -> HttpResponse:
+        run = get_object_or_404(ImportRun, pk=pk)
+        client = netbox_client.build_client()
+        unresolved = mutations.reconcile_unknown(run, client)
+        if unresolved:
+            messages.error(
+                request,
+                f"{len(unresolved)} operation(s) are still ambiguous; revert remains unavailable.",
+            )
+        else:
+            applied = run.mutations.filter(outcome=MutationOutcome.APPLIED)
+            run.created_count = applied.filter(action=MutationAction.CREATE).count()
+            run.changed_count = applied.filter(action=MutationAction.UPDATE).count()
+            run.verdict = "aborted" if applied.exists() else "stale"
+            run.save(update_fields=["created_count", "changed_count", "verdict"])
+            messages.success(request, "Unknown write outcomes were reconciled against NetBox.")
+        return redirect("importer:run_detail", pk=run.pk)
+
+
+class RevertPreflightView(SuperuserRequiredMixin, View):
+    def post(self, request: HttpRequest, pk: int, *args: Any, **kwargs: Any) -> HttpResponse:
+        run = get_object_or_404(ImportRun, pk=pk)
+        client = netbox_client.build_revert_client()
+        attempt = revert.preflight(run=run, user=request.user, client=client)
+        if attempt.status != RevertStatus.READY:
+            messages.error(request, attempt.failure_reason)
+            return redirect("importer:run_detail", pk=run.pk)
+        return render(
+            request,
+            "importer/revert_confirm.html",
+            {
+                "run": run,
+                "attempt": attempt,
+                "items": attempt.items.select_related("mutation"),
+                "delete_count": attempt.items.filter(
+                    mutation__action=MutationAction.CREATE
+                ).count(),
+                "restore_count": attempt.items.filter(
+                    mutation__action=MutationAction.UPDATE
+                ).count(),
+            },
+        )
+
+
+class RevertConfirmView(SuperuserRequiredMixin, View):
+    def post(
+        self, request: HttpRequest, pk: int, attempt_pk: int, *args: Any, **kwargs: Any
+    ) -> HttpResponse:
+        attempt = get_object_or_404(
+            RevertAttempt,
+            pk=attempt_pk,
+            original_run_id=pk,
+        )
+        client = netbox_client.build_revert_client()
+        revert.execute(attempt=attempt, user=request.user, client=client)
+        if attempt.status == RevertStatus.REVERTED:
+            messages.success(request, "The recorded changes were reverted.")
+        else:
+            messages.error(request, attempt.failure_reason or attempt.get_status_display())
+        return redirect("importer:run_detail", pk=pk)

@@ -25,9 +25,15 @@ from django.utils import timezone
 
 from importer.importers import importer_for
 from importer.importers.base import Plan, RowOutcome, RunReport
-from importer.models import ImportRowResult, ImportRun, ValidationIssueRecord
+from importer.models import (
+    ImportRowResult,
+    ImportRun,
+    MutationOutcome,
+    ValidationIssueRecord,
+)
 from importer.models import Verdict as RunVerdict
 from importer.services.lookups import Lookups
+from importer.services.mutations import MutationJournal
 from importer.services.netbox_client import NetBoxUnavailable
 from importer.services.sheets import SheetRejected, parse_upload
 from importer.validation import STAGES, Code, Severity, ValidationIssue, Verdict
@@ -246,9 +252,15 @@ def apply_plan(*, run: ImportRun, plan: Plan, user: Any, client: Any) -> RunRepo
     """Apply a held plan and record the outcome. The gate itself lives in `Verdict`."""
     importer = importer_for(run.importer)
     username = getattr(user, "username", "")
+    journal = MutationJournal(run)
 
     try:
-        report = importer.apply(plan, Lookups(client=client), username=username)
+        report = importer.apply(
+            plan,
+            Lookups(client=client),
+            username=username,
+            journal=journal,
+        )
     except NetBoxUnavailable as unavailable:
         # Raised before the pipeline had a report to write into — the status probe, for instance.
         # Nothing was written, and saying so is more useful than a 500 page.
@@ -267,6 +279,13 @@ def apply_plan(*, run: ImportRun, plan: Plan, user: Any, client: Any) -> RunRepo
             ),
         )
 
+    try:
+        journal.refresh_post_state(client)
+    except NetBoxUnavailable:
+        # Existing operation records remain conservative. A later preflight will block if a
+        # NetBox-side side effect changed one of their strict drift tokens.
+        logger.warning("mutation post-state refresh unavailable run=%s", run.pk)
+
     _record_apply(run, report)
 
     if not report.aborted:
@@ -280,7 +299,10 @@ def apply_plan(*, run: ImportRun, plan: Plan, user: Any, client: Any) -> RunRepo
 
 
 def _record_apply(run: ImportRun, report: RunReport) -> None:
-    if report.aborted:
+    has_unknown = run.mutations.filter(outcome=MutationOutcome.UNKNOWN).exists()
+    if has_unknown:
+        state = RunVerdict.RECONCILIATION_REQUIRED
+    elif report.aborted:
         state = RunVerdict.STALE if not report.write_count else RunVerdict.ABORTED
     else:
         state = RunVerdict.APPLIED
@@ -288,9 +310,12 @@ def _record_apply(run: ImportRun, report: RunReport) -> None:
     run.verdict = state
     # An apply that had nothing to create still ran: every row was already present, and "applied,
     # created nothing" is a different fact from "never applied".
-    run.applied_at = report.finished_at if not report.aborted or report.write_count else None
+    run.applied_at = (
+        report.finished_at if not report.aborted or report.write_count or has_unknown else None
+    )
     run.finished_at = report.finished_at or timezone.now()
     run.created_count = report.created_count
+    run.changed_count = report.changed_count
     run.skipped_count = report.skipped_count
     run.blocked_count = report.blocked_count
     run.aborted_reason = report.abort_reason[:500]

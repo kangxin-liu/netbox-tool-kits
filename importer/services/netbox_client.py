@@ -24,12 +24,11 @@ from pynetbox.core.query import RequestError
 
 logger = logging.getLogger("importer.netbox")
 
-# Reads are GET/OPTIONS; creation is POST. PATCH is permitted only for the device primary-IP
-# exception of Requirement 8.19 / 11.3 — the `patch` method below refuses any other field or
-# endpoint. PUT and DELETE are still refused at the session.
-PERMITTED_METHODS = frozenset({"GET", "OPTIONS", "HEAD", "POST", "PATCH"})
+FORWARD_METHODS = frozenset({"GET", "OPTIONS", "HEAD", "POST", "PATCH"})
+REVERT_METHODS = frozenset({"GET", "OPTIONS", "HEAD", "PATCH", "DELETE"})
 
 PRIMARY_IP_PATCH_FIELDS = frozenset({"id", "primary_ip4", "primary_ip6"})
+INTERFACE_TAG_PATCH_FIELDS = frozenset({"id", "tags"})
 
 
 class Failure(StrEnum):
@@ -65,7 +64,7 @@ class NetBoxUnavailable(Exception):
 
 
 class NetBoxWriteRejected(Exception):
-    """NetBox refused a create. Carries the parsed body so a row can be blamed (Req 12.2).
+    """NetBox refused a write. Carries the parsed body so a row can be blamed (Req 12.2).
 
     The body is somebody else's text, and it ends up in the run report and the audit rows verbatim.
     A server or proxy that echoes the request's headers back in its error body would otherwise
@@ -73,7 +72,7 @@ class NetBoxWriteRejected(Exception):
     """
 
     def __init__(self, status_code: int, body: Any, endpoint: str) -> None:
-        super().__init__(f"NetBox rejected a create on {endpoint} with HTTP {status_code}")
+        super().__init__(f"NetBox rejected a write on {endpoint} with HTTP {status_code}")
         self.status_code = status_code
         self.body = redact_deeply(body)
         self.endpoint = endpoint
@@ -97,8 +96,13 @@ def redact(text: str) -> str:
     The token should never reach here — nothing formats it into a message — so this is the second
     line of defence rather than the first (Requirement 14.1).
     """
-    token = getattr(settings, "NETBOX_TOKEN", "")
-    cleaned = text.replace(token, "[redacted]") if token else text
+    cleaned = text
+    for token in {
+        getattr(settings, "NETBOX_TOKEN", ""),
+        getattr(settings, "NETBOX_REVERT_TOKEN", ""),
+    }:
+        if token:
+            cleaned = cleaned.replace(token, "[redacted]")
     for marker in ("Authorization", "Token "):
         if marker in cleaned:
             cleaned = cleaned.replace(marker, "[redacted]")
@@ -119,20 +123,17 @@ def redact_deeply(value: Any) -> Any:
 class _TimeoutSession(requests.Session):
     """Applies `NETBOX_TIMEOUT` to every request, which `pynetbox` does not expose directly."""
 
-    def __init__(self, timeout: int, verify: bool) -> None:
+    def __init__(self, timeout: int, verify: bool, permitted_methods: frozenset[str]) -> None:
         super().__init__()
         self.timeout = timeout
         self.verify = verify
+        self.permitted_methods = permitted_methods
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         kwargs.setdefault("timeout", self.timeout)
-        if method.upper() not in PERMITTED_METHODS:
-            # Belt and braces for Requirement 11.3: PUT/DELETE reaching here is a bug. PATCH is
-            # allowed only through `NetBoxClient.patch`, which scopes it to primary IP.
-            raise RuntimeError(
-                f"{method} is not permitted: this tool only creates objects in NetBox, "
-                f"except a field-scoped PATCH of a device's primary IP."
-            )
+        if method.upper() not in self.permitted_methods:
+            # Belt and braces: callers only get the explicit methods exposed by their client class.
+            raise RuntimeError(f"{method} is not permitted by the NetBox transport.")
         return super().request(method, url, **kwargs)
 
 
@@ -246,12 +247,25 @@ def _looks_like_dns(exception: Exception, text: str) -> bool:
 
 
 class NetBoxClient:
-    """Reads and creates, plus the field-scoped primary-IP PATCH of Requirement 8.19."""
+    """Reads/creates plus the field-scoped D11 primary-IP and D15 interface-tag PATCHes."""
 
-    def __init__(self, url: str, token: str, *, verify_ssl: bool, timeout: int, host: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        *,
+        verify_ssl: bool,
+        timeout: int,
+        host: str,
+        permitted_methods: frozenset[str] = FORWARD_METHODS,
+    ) -> None:
         self.host = host
         self._api = pynetbox.api(url, token=token)
-        self._api.http_session = _TimeoutSession(timeout=timeout, verify=verify_ssl)
+        self._api.http_session = _TimeoutSession(
+            timeout=timeout,
+            verify=verify_ssl,
+            permitted_methods=permitted_methods,
+        )
         self._status: NetBoxStatus | None = None
         self._choices: dict[str, dict[str, frozenset[str]]] = {}
         self.request_count = 0
@@ -292,6 +306,19 @@ class NetBoxClient:
             )
             return [dict(record) for record in records]
         except RequestError as exception:
+            raise classify(exception, self.host) from None
+        except Exception as exception:
+            raise classify(exception, self.host) from None
+
+    def get_one(self, endpoint: str, object_id: int) -> dict[str, Any] | None:
+        """Read one object by id for mutation finalisation and revert drift checks."""
+        try:
+            self.request_count += 1
+            record = self._endpoint(endpoint).get(int(object_id))
+            return dict(record) if record is not None else None
+        except RequestError as exception:
+            if getattr(exception.req, "status_code", 0) == 404:
+                return None
             raise classify(exception, self.host) from None
         except Exception as exception:
             raise classify(exception, self.host) from None
@@ -346,28 +373,39 @@ class NetBoxClient:
         return [dict(created)]
 
     def patch(self, endpoint: str, payload: dict | list[dict]) -> list[dict[str, Any]]:
-        """The D11 exception: PATCH `dcim.devices` with only `primary_ip4` / `primary_ip6`.
+        """The bounded forward PATCH exceptions from D11 and D15.
 
         Any other endpoint or field is refused here, so a caller cannot accidentally reopen
-        update-in-general (Requirement 8.19, 11.3).
+        update-in-general (Requirements 8.19, 9.49, 11.3).
         """
-        if endpoint != "dcim.devices":
+        allowed = {
+            "dcim.devices": PRIMARY_IP_PATCH_FIELDS,
+            "dcim.interfaces": INTERFACE_TAG_PATCH_FIELDS,
+        }
+        permitted_fields = allowed.get(endpoint)
+        if permitted_fields is None:
             raise RuntimeError(
-                f"PATCH of {endpoint} is not permitted: this tool only PATCHes a device's "
-                f"primary IP."
+                f"PATCH of {endpoint} is not permitted: forward apply only PATCHes device "
+                f"primary IPs and interface tags."
             )
         payloads = payload if isinstance(payload, list) else [payload]
         for item in payloads:
-            extra = set(item) - PRIMARY_IP_PATCH_FIELDS
+            extra = set(item) - permitted_fields
             if extra:
                 raise RuntimeError(
-                    "device PATCH may only set primary_ip4 / primary_ip6, not "
-                    + ", ".join(sorted(extra))
+                    f"{endpoint} PATCH contains forbidden field(s): " + ", ".join(sorted(extra))
                 )
             if "id" not in item:
-                raise RuntimeError("device PATCH needs the device id.")
-            if "primary_ip4" not in item and "primary_ip6" not in item:
+                raise RuntimeError(f"{endpoint} PATCH needs the object id.")
+            if endpoint == "dcim.devices" and not ("primary_ip4" in item or "primary_ip6" in item):
                 raise RuntimeError("device PATCH needs primary_ip4 and/or primary_ip6.")
+            if endpoint == "dcim.interfaces":
+                if set(item) != INTERFACE_TAG_PATCH_FIELDS:
+                    raise RuntimeError("interface PATCH must contain exactly id and tags.")
+                if not isinstance(item["tags"], list) or not all(
+                    isinstance(tag_id, int) for tag_id in item["tags"]
+                ):
+                    raise RuntimeError("interface PATCH tags must be a list of integer tag ids.")
 
         updated: list[dict[str, Any]] = []
         try:
@@ -400,6 +438,61 @@ class NetBoxClient:
         base = str(self._api.base_url).removesuffix("/api")
         return f"{base}/{app}/{name.replace('_', '-')}/{object_id}/"
 
+    def _object_api_url(self, endpoint: str, object_id: int) -> str:
+        app, _, name = endpoint.partition(".")
+        return (
+            f"{str(self._api.base_url).rstrip('/')}/{app}/"
+            f"{name.replace('_', '-')}/{int(object_id)}/"
+        )
+
+
+class RevertNetBoxClient(NetBoxClient):
+    """The only client surface that can issue inverse PATCH and DELETE requests (D14)."""
+
+    def __init__(self, url: str, token: str, *, verify_ssl: bool, timeout: int, host: str) -> None:
+        super().__init__(
+            url,
+            token,
+            verify_ssl=verify_ssl,
+            timeout=timeout,
+            host=host,
+            permitted_methods=REVERT_METHODS,
+        )
+
+    def restore(self, endpoint: str, object_id: int, fields: dict[str, Any]) -> dict[str, Any]:
+        if not fields:
+            raise RuntimeError("A revert PATCH needs at least one recorded field.")
+        url = self._object_api_url(endpoint, object_id)
+        try:
+            self.request_count += 1
+            response = self._api.http_session.patch(url, json=fields)
+            if not response.ok:
+                raise RequestError(response)
+            payload = response.json() if response.content else {"id": object_id, **fields}
+            return dict(payload)
+        except RequestError as exception:
+            status = getattr(exception.req, "status_code", 0)
+            if status in {401, 403}:
+                raise classify(exception, self.host) from None
+            raise NetBoxWriteRejected(status, _body_of(exception), endpoint) from None
+        except Exception as exception:
+            raise classify(exception, self.host) from None
+
+    def delete(self, endpoint: str, object_id: int) -> None:
+        url = self._object_api_url(endpoint, object_id)
+        try:
+            self.request_count += 1
+            response = self._api.http_session.delete(url)
+            if not response.ok and response.status_code != 404:
+                raise RequestError(response)
+        except RequestError as exception:
+            status = getattr(exception.req, "status_code", 0)
+            if status in {401, 403}:
+                raise classify(exception, self.host) from None
+            raise NetBoxWriteRejected(status, _body_of(exception), endpoint) from None
+        except Exception as exception:
+            raise classify(exception, self.host) from None
+
 
 def _body_of(exception: RequestError) -> Any:
     try:
@@ -413,6 +506,17 @@ def build_client() -> NetBoxClient:
     return NetBoxClient(
         settings.NETBOX_URL,
         settings.NETBOX_TOKEN,
+        verify_ssl=settings.NETBOX_VERIFY_SSL,
+        timeout=settings.NETBOX_TIMEOUT,
+        host=settings.NETBOX_HOST,
+    )
+
+
+def build_revert_client() -> RevertNetBoxClient:
+    """Build the isolated inverse-capable client, falling back to NETBOX_TOKEN by configuration."""
+    return RevertNetBoxClient(
+        settings.NETBOX_URL,
+        settings.NETBOX_REVERT_TOKEN,
         verify_ssl=settings.NETBOX_VERIFY_SSL,
         timeout=settings.NETBOX_TIMEOUT,
         host=settings.NETBOX_HOST,

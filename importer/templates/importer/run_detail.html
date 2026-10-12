@@ -22,6 +22,7 @@ they created are listed, because that list is what a manual unwind works from (R
     <ul class="verdict-counts">
       <li><strong>{{ run.row_count }}</strong> data row{{ run.row_count|pluralize }}</li>
       <li><strong>{{ run.created_count }}</strong> created</li>
+      <li><strong>{{ run.changed_count }}</strong> changed</li>
       <li><strong>{{ run.skipped_count }}</strong> already present</li>
       <li><strong>{{ run.blocked_count }}</strong> blocked</li>
       <li><strong>{{ run.error_count }}</strong> error{{ run.error_count|pluralize }}</li>
@@ -49,6 +50,102 @@ they created are listed, because that list is what a manual unwind works from (R
     individually rather than as one all-or-nothing list.
   </p>
   {% endif %}
+  {% endif %}
+</section>
+
+{% if mutation_groups %}
+<section class="panel">
+  <h2>Applied changes</h2>
+  <ul class="verdict-counts">
+    <li><strong>{{ mutation_summary.created }}</strong> created</li>
+    <li><strong>{{ mutation_summary.changed }}</strong> changed</li>
+    <li><strong>{{ mutation_summary.reverted }}</strong> reverted</li>
+    <li><strong>{{ mutation_summary.still_applied }}</strong> still applied</li>
+    <li><strong>{{ mutation_summary.failed }}</strong> failed</li>
+    <li><strong>{{ mutation_summary.unknown }}</strong> uncertain</li>
+  </ul>
+  <p class="actions">
+    <a class="button secondary" href="{% url 'importer:run_mutations' run.pk %}">
+      Download change history (.csv)
+    </a>
+  </p>
+  {% for group in mutation_groups %}
+  <h3>{{ group.action|title }} — {{ group.object_type }}</h3>
+  <table class="results">
+    <thead>
+      <tr><th>#</th><th>Source</th><th>Object</th><th>Change</th><th>Revert state</th></tr>
+    </thead>
+    <tbody>
+      {% for mutation in group.items %}
+      <tr>
+        <td class="line">{{ mutation.sequence }}</td>
+        <td>line{{ mutation.source_lines|length|pluralize }} {{ mutation.source_lines|join:", " }}</td>
+        <td>
+          {% if mutation.url %}
+          <a href="{{ mutation.url }}" rel="noreferrer noopener">{{ mutation.object_name }}</a>
+          {% else %}{{ mutation.object_name|default:"—" }}{% endif %}
+          <span class="muted">#{{ mutation.object_id|default:"—" }} · {{ mutation.endpoint }}</span>
+        </td>
+        <td>
+          {% if mutation.action == "update" %}
+            {% for field, before, after in mutation.field_changes %}
+            <div><code>{{ field }}</code>: {{ before|default_if_none:"null" }} →
+              {{ after|default_if_none:"null" }}</div>
+            {% endfor %}
+          {% else %}
+            Created with {{ mutation.after_values|length }} recorded field{{ mutation.after_values|length|pluralize }}.
+          {% endif %}
+        </td>
+        <td>
+          {% if mutation.is_reverted %}<span class="pill">reverted</span>
+          {% elif mutation.revert_state %}<span class="pill">{{ mutation.revert_state }}</span>
+          {% else %}<span class="pill">applied</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="panel">
+  <h2>Revert</h2>
+  {% if needs_reconciliation %}
+  <p>One or more write outcomes are uncertain. Reconcile them before attempting a revert.</p>
+  <form method="post" action="{% url 'importer:run_reconcile' run.pk %}">
+    {% csrf_token %}
+    <button type="submit" class="button secondary">Reconcile with NetBox</button>
+  </form>
+  {% elif revert_eligibility.allowed %}
+  <p>
+    Preflight reads every affected object and refuses the whole revert if its recorded fields or
+    <code>last_updated</code> value changed after apply.
+  </p>
+  <form method="post" action="{% url 'importer:revert_validate' run.pk %}">
+    {% csrf_token %}
+    <button type="submit" class="button">Preflight revert</button>
+  </form>
+  {% else %}
+  <p class="muted">{{ revert_eligibility.reason }}</p>
+  {% endif %}
+
+  {% if revert_attempts %}
+  <h3>Revert attempts</h3>
+  <table class="results">
+    <thead><tr><th>Attempt</th><th>Started</th><th>By</th><th>Status</th><th>Detail</th></tr></thead>
+    <tbody>
+      {% for attempt in revert_attempts %}
+      <tr>
+        <td>#{{ attempt.pk }}</td>
+        <td>{{ attempt.started_at|date:"Y-m-d H:i:s" }}</td>
+        <td>{{ attempt.user.get_username }}</td>
+        <td><span class="pill">{{ attempt.get_status_display }}</span></td>
+        <td>{{ attempt.failure_reason|default:"—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   {% endif %}
 </section>
 

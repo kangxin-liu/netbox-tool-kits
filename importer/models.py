@@ -31,6 +31,10 @@ class Verdict(models.TextChoices):
     STALE = "stale", "Refused — NetBox moved after validation"
     EXPIRED = "expired", "Refused — the plan expired"
     UNAVAILABLE = "unavailable", "Refused — NetBox could not be reached"
+    RECONCILIATION_REQUIRED = (
+        "reconciliation_required",
+        "Outcome uncertain — reconciliation required",
+    )
 
 
 class ImportRun(models.Model):
@@ -53,9 +57,10 @@ class ImportRun(models.Model):
     blocked_count = models.PositiveIntegerField(default=0)
     error_count = models.PositiveIntegerField(default=0)
     warning_count = models.PositiveIntegerField(default=0)
+    changed_count = models.PositiveIntegerField(default=0)
     row_count = models.PositiveIntegerField(default=0)
 
-    verdict = models.CharField(max_length=16, choices=Verdict.choices)
+    verdict = models.CharField(max_length=32, choices=Verdict.choices)
     file_fingerprint = models.CharField(max_length=64, blank=True)
     """sha256 of the upload, which is what binds a plan to its file (Requirement 10.13)."""
 
@@ -128,3 +133,111 @@ class ValidationIssueRecord(models.Model):
 
     def __str__(self) -> str:
         return f"{self.severity} {self.code} line {self.line}"
+
+
+class MutationAction(models.TextChoices):
+    CREATE = "create", "Created"
+    UPDATE = "update", "Changed"
+
+
+class MutationOutcome(models.TextChoices):
+    INTENT = "intent", "Intent recorded"
+    APPLIED = "applied", "Applied"
+    FAILED = "failed", "Not applied"
+    UNKNOWN = "unknown", "Outcome unknown"
+
+
+class ImportMutation(models.Model):
+    """One NetBox object write, independent of spreadsheet-row cardinality (D14)."""
+
+    run = models.ForeignKey(ImportRun, related_name="mutations", on_delete=models.PROTECT)
+    sequence = models.PositiveIntegerField()
+    action = models.CharField(max_length=8, choices=MutationAction.choices)
+    endpoint = models.CharField(max_length=96)
+    source_lines = models.JSONField(default=list)
+    natural_key = models.JSONField(default=list)
+    object_type = models.CharField(max_length=64)
+    object_id = models.PositiveIntegerField(null=True, blank=True)
+    object_name = models.CharField(max_length=255, blank=True)
+    url = models.URLField(max_length=500, blank=True)
+    before_values = models.JSONField(default=dict)
+    after_values = models.JSONField(default=dict)
+    post_last_updated = models.CharField(max_length=64, blank=True)
+    outcome = models.CharField(
+        max_length=8, choices=MutationOutcome.choices, default=MutationOutcome.INTENT
+    )
+    applied_at = models.DateTimeField(null=True, blank=True)
+    error = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ("sequence", "id")
+        constraints = (
+            models.UniqueConstraint(
+                fields=("run", "sequence"), name="importer_unique_mutation_sequence"
+            ),
+        )
+
+    def __str__(self) -> str:
+        return f"{self.run_id}:{self.sequence} {self.action} {self.endpoint}"
+
+
+class RevertStatus(models.TextChoices):
+    PREFLIGHT_BLOCKED = "preflight_blocked", "Preflight blocked"
+    READY = "ready", "Ready for confirmation"
+    REVERTED = "reverted", "Reverted"
+    PARTIALLY_REVERTED = "partially_reverted", "Partially reverted"
+    ABORTED = "aborted", "Aborted"
+
+
+class RevertAttempt(models.Model):
+    """One immutable-after-completion preflight or revert attempt."""
+
+    original_run = models.ForeignKey(
+        ImportRun, related_name="revert_attempts", on_delete=models.PROTECT
+    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    netbox_host = models.CharField(max_length=255)
+    plan_fingerprint = models.CharField(max_length=64, blank=True)
+    status = models.CharField(max_length=24, choices=RevertStatus.choices)
+    started_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    failure_reason = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ("-started_at", "-id")
+
+    def __str__(self) -> str:
+        return f"revert {self.pk} for run {self.original_run_id}: {self.status}"
+
+
+class RevertItemOutcome(models.TextChoices):
+    PLANNED = "planned", "Planned"
+    REVERTED = "reverted", "Reverted"
+    FAILED = "failed", "Failed"
+    UNKNOWN = "unknown", "Outcome unknown"
+    NOT_ATTEMPTED = "not_attempted", "Not attempted"
+    DRIFTED = "drifted", "Drifted"
+
+
+class RevertItemResult(models.Model):
+    attempt = models.ForeignKey(RevertAttempt, related_name="items", on_delete=models.PROTECT)
+    mutation = models.ForeignKey(
+        ImportMutation, related_name="revert_results", on_delete=models.PROTECT
+    )
+    reverse_sequence = models.PositiveIntegerField()
+    outcome = models.CharField(max_length=16, choices=RevertItemOutcome.choices)
+    message = models.TextField(blank=True)
+    checkpoint_values = models.JSONField(default=dict)
+    checkpoint_last_updated = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        ordering = ("reverse_sequence", "id")
+        constraints = (
+            models.UniqueConstraint(
+                fields=("attempt", "mutation"), name="importer_unique_revert_attempt_item"
+            ),
+        )
+
+    def __str__(self) -> str:
+        return f"revert {self.attempt_id} mutation {self.mutation_id}: {self.outcome}"

@@ -11,6 +11,7 @@ import responses
 from django.test import override_settings
 from django.urls import reverse
 
+from importer.breakout_tags import BREAKOUT_TAGS
 from importer.services import netbox_client, readiness
 
 BASE = "https://netbox.example.com"
@@ -41,11 +42,26 @@ def stub_count(path, count, **_):
 
 
 def stub_ports(devices=12, interfaces=400, front=32, rear=8):
-    """The four counts the cabling panel reads, in the order it reads them."""
+    """The port counts and tags the cabling panel reads."""
     stub_count("dcim/devices", devices)
     stub_count("dcim/interfaces", interfaces)
     stub_count("dcim/front-ports", front)
     stub_count("dcim/rear-ports", rear)
+    stub_breakout_tags()
+
+
+def stub_breakout_tags(*, missing: set[str] | None = None):
+    missing = missing or set()
+    records = [
+        {"id": index, "name": slug, "slug": slug}
+        for index, slug in enumerate(BREAKOUT_TAGS.values(), start=1)
+        if slug not in missing
+    ]
+    responses.add(
+        responses.GET,
+        f"{BASE}/api/extras/tags/",
+        json={"count": len(records), "next": None, "previous": None, "results": records},
+    )
 
 
 def no_writes_were_issued():
@@ -167,6 +183,7 @@ class TestCablingReadiness:
         stub_count("dcim/interfaces", 0)
         stub_count("dcim/front-ports", 0)
         stub_count("dcim/rear-ports", 0)
+        stub_breakout_tags()
         summary = readiness.readiness_for("cabling", netbox)
         assert summary.ready is False
         assert any("no devices" in blocker for blocker in summary.blockers)
@@ -178,6 +195,7 @@ class TestCablingReadiness:
         stub_count("dcim/interfaces", 0)
         stub_count("dcim/front-ports", 0)
         stub_count("dcim/rear-ports", 0)
+        stub_breakout_tags()
         summary = readiness.readiness_for("cabling", netbox)
         assert summary.ready is False
         assert any("no ports at all" in blocker for blocker in summary.blockers)
@@ -189,6 +207,7 @@ class TestCablingReadiness:
         stub_count("dcim/interfaces", 400)
         stub_count("dcim/front-ports", 32)
         stub_count("dcim/rear-ports", 8)
+        stub_breakout_tags()
         summary = readiness.readiness_for("cabling", netbox)
         assert summary.ready is True
         panel = next(fact for fact in summary.facts if "Patch-panel" in fact.label)
@@ -212,6 +231,19 @@ class TestCablingReadiness:
         flag = next(fact for fact in summary.facts if fact.label == "Create missing interfaces")
         assert flag.value == "on"
         assert flag.level == "warn"
+        assert summary.ready is True
+
+    @responses.activate
+    def test_missing_breakout_tags_are_named_as_a_readiness_warning(self, netbox):
+        stub_count("dcim/devices", 12)
+        stub_count("dcim/interfaces", 400)
+        stub_count("dcim/front-ports", 32)
+        stub_count("dcim/rear-ports", 8)
+        stub_breakout_tags(missing={"port-breakout-8x"})
+        summary = readiness.readiness_for("cabling", netbox)
+        tags = next(fact for fact in summary.facts if fact.label == "Breakout parent tags")
+        assert tags.level == "warn"
+        assert "port-breakout-8x" in tags.detail
         assert summary.ready is True
 
     @responses.activate

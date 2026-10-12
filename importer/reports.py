@@ -16,6 +16,7 @@ severity then line, counts per code, and caps what the browser shows while the C
 
 import csv
 import io
+import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,6 +54,24 @@ RESULT_HEADERS = (
     "url",
     "column",
     "detail",
+)
+
+MUTATION_HEADERS = (
+    "sequence",
+    "action",
+    "outcome",
+    "endpoint",
+    "source_lines",
+    "object_type",
+    "object_name",
+    "netbox_id",
+    "url",
+    "before_values",
+    "after_values",
+    "applied_at",
+    "revert_attempt",
+    "revert_outcome",
+    "revert_detail",
 )
 
 
@@ -126,6 +145,36 @@ def results_csv(results: Iterable[Any]) -> bytes:
             for result in results
         ),
     )
+
+
+def mutations_csv(mutations: Iterable[Any]) -> bytes:
+    """Applied-operation and linked revert history (Requirement 18.14)."""
+    rows: list[tuple[Any, ...]] = []
+    for mutation in mutations:
+        revert_results = list(mutation.revert_results.all())
+        if not revert_results:
+            revert_results = [None]
+        for reverted in revert_results:
+            rows.append(
+                (
+                    mutation.sequence,
+                    mutation.action,
+                    mutation.outcome,
+                    mutation.endpoint,
+                    ",".join(str(line) for line in mutation.source_lines),
+                    mutation.object_type,
+                    mutation.object_name,
+                    mutation.object_id or "",
+                    mutation.url,
+                    json.dumps(mutation.before_values, sort_keys=True),
+                    json.dumps(mutation.after_values, sort_keys=True),
+                    mutation.applied_at.isoformat() if mutation.applied_at else "",
+                    reverted.attempt_id if reverted is not None else "",
+                    reverted.outcome if reverted is not None else "",
+                    reverted.message if reverted is not None else "",
+                )
+            )
+    return write_csv(MUTATION_HEADERS, rows)
 
 
 # --- grouping for the screen ----------------------------------------------------------------

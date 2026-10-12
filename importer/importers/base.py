@@ -21,8 +21,9 @@ Apply issues **one bulk POST per endpoint** because a NetBox list POST is transa
 D7, measured). Two consequences worth being explicit about:
 
 * The half-applied window is between batches, not between rows. For the hierarchy importer those
-  batches follow endpoints. Cabling gained interfaces-before-cables with D12, and D13 may split the
-  interface endpoint into physical-parent then virtual-child batches before the cable batch.
+  batches follow endpoints. Cabling gained interfaces-before-cables with D12; D13/D15 may split the
+  interface endpoint into physical-parent create, parent-tag PATCH, and virtual-child create batches
+  before the cable batch.
   Cabling had no boundary at all before D12, which is worth remembering as something that was given
   up rather than something that was never there.
 * When NetBox rejects a batch with an error that is *not* aligned to a submitted item, the offending
@@ -45,6 +46,7 @@ from django.utils import timezone
 from importer import columns as columns_module
 from importer.columns import ColumnSpec
 from importer.services.lookups import Lookups, fold
+from importer.services.mutations import MutationJournal
 from importer.services.netbox_client import NetBoxUnavailable, NetBoxWriteRejected
 from importer.services.sheets import ParsedSheet, Row
 from importer.validation import (
@@ -70,6 +72,7 @@ class RowOutcome(StrEnum):
     """
 
     CREATE = "create"
+    UPDATE = "changed"
     SKIP_EXISTS = "skip-already-exists"
     BLOCKED = "blocked"
 
@@ -120,7 +123,7 @@ class CreateAction:
     line: int
     object_kind: str = ""
     method: str = "post"
-    """`post` creates; `patch` is the device primary-IP exception of Requirement 8.19."""
+    """`post` creates; `patch` is a field-scoped D11 or D15 update."""
 
     phase: str = ""
     """Optional sub-phase for dependencies between objects on the same endpoint.
@@ -244,8 +247,8 @@ class RowResult:
 GUARANTEE = (
     "Each endpoint's creates are submitted as one list and are applied all-or-nothing. The "
     "sequence across endpoints is not atomic: an earlier endpoint can succeed and a later one "
-    "fail. Nothing this tool creates can be rolled back by this tool — re-running the same sheet "
-    "is safe, because everything that exists is skipped."
+    "fail. Successfully journaled writes can be reverted later from history after a drift check; "
+    "that compensation is not an atomic transaction."
 )
 
 
@@ -286,6 +289,16 @@ class RunReport:
         return len([result for result in self.created if result.sequence])
 
     @property
+    def changed_count(self) -> int:
+        return len(
+            [
+                result
+                for result in self.results
+                if result.outcome == RowOutcome.UPDATE and result.sequence
+            ]
+        )
+
+    @property
     def skipped_count(self) -> int:
         return len([r for r in self.results if r.outcome == RowOutcome.SKIP_EXISTS])
 
@@ -297,10 +310,14 @@ class RunReport:
     def headline(self) -> str:
         if self.aborted:
             return (
-                f"Aborted — {self.created_count} object(s) created before the abort. "
+                f"Aborted — {self.created_count} object(s) created and "
+                f"{self.changed_count} changed before the abort. "
                 f"{self.abort_reason}"
             )
-        return f"Applied — {self.created_count} created, {self.skipped_count} already present."
+        return (
+            f"Applied — {self.created_count} created, {self.changed_count} changed, "
+            f"{self.skipped_count} already present."
+        )
 
     def to_csv(self) -> bytes:
         """Requirement 12.6: the report downloads as a csv, formula-escaped by `reports`."""
@@ -317,11 +334,11 @@ class BaseImporter(ABC):
     apply_phases: tuple[tuple[str, str] | tuple[str, str, str], ...] | None = None
     """(endpoint, method[, action phase]) entries.
 
-    Defaults to one POST per `endpoint_order` entry. The optional action phase permits two
-    dependency-ordered batches against one endpoint, which D13 needs for physical parent
-    interfaces followed by their virtual children.
+    Defaults to one POST per `endpoint_order` entry. The optional action phase permits
+    dependency-ordered operations against one endpoint, which D13/D15 need for physical parents,
+    their tag PATCHes, and virtual children.
 
-    The device importer inserts a PATCH of `dcim.devices` after the IP creates (Requirement 8.19).
+    Devices insert a primary-IP PATCH; cabling inserts a parent-interface tags PATCH.
     """
 
     choice_sources: ClassVar[dict[str, tuple[str, str]]] = {}
@@ -559,7 +576,14 @@ class BaseImporter(ABC):
 
     # --- apply ------------------------------------------------------------------------------
 
-    def apply(self, plan: Plan, lookups: Lookups, *, username: str = "") -> RunReport:
+    def apply(
+        self,
+        plan: Plan,
+        lookups: Lookups,
+        *,
+        username: str = "",
+        journal: MutationJournal | None = None,
+    ) -> RunReport:
         """Write the plan, or refuse. Nothing here decides *what* to write — the plan did that."""
         reason = plan.verdict.refusal_reason()
         if reason is not None:
@@ -626,9 +650,13 @@ class BaseImporter(ABC):
             report.endpoints_attempted.append(endpoint)
             try:
                 if method == "patch":
-                    self._apply_patches(endpoint, actions, plan.registry, report, client)
+                    self._apply_patches(
+                        endpoint, actions, plan.registry, report, client, journal=journal
+                    )
                 else:
-                    self._apply_endpoint(endpoint, actions, plan.registry, report, client)
+                    self._apply_endpoint(
+                        endpoint, actions, plan.registry, report, client, journal=journal
+                    )
             except NetBoxUnavailable as unavailable:
                 # Requirement 12.3: connection loss or auth failure aborts the run.
                 report.aborted = True
@@ -666,19 +694,39 @@ class BaseImporter(ABC):
         registry: Registry,
         report: RunReport,
         client: Any,
+        *,
+        journal: MutationJournal | None = None,
     ) -> None:
         """One bulk POST for this endpoint (decision D7)."""
         batch = self._dedupe(actions, registry)
         if not batch:
             return
         payloads = [action.resolved_payload(registry) for action in batch]
+        intents = journal.intend_creates(endpoint, batch, payloads) if journal else []
 
         try:
             created = client.create(endpoint, payloads)
         except NetBoxWriteRejected as rejected:
-            self._attribute_rejection(endpoint, batch, payloads, rejected, registry, report, client)
+            if journal:
+                journal.failed(intents, self._rejection_detail(rejected))
+            self._attribute_rejection(
+                endpoint,
+                batch,
+                payloads,
+                rejected,
+                registry,
+                report,
+                client,
+                journal=journal,
+            )
             raise BatchRejected(self._rejection_detail(rejected)) from None
+        except NetBoxUnavailable as unavailable:
+            if journal:
+                journal.unknown(intents, unavailable.operator_message)
+            raise
 
+        if journal:
+            journal.applied(intents, created, client)
         self._record_created(endpoint, batch, created, registry, report, client)
 
     def _apply_patches(
@@ -688,29 +736,53 @@ class BaseImporter(ABC):
         registry: Registry,
         report: RunReport,
         client: Any,
+        *,
+        journal: MutationJournal | None = None,
     ) -> None:
-        """Field-scoped PATCH. One request per action; not a list POST (Requirement 8.19)."""
+        """Field-scoped PATCH. One request per action; not a list POST (D11, D15)."""
         batch = self._dedupe(actions, registry)
         if not batch:
             return
         payloads = [action.resolved_payload(registry) for action in batch]
-        try:
-            updated = client.patch(endpoint, payloads)
-        except NetBoxWriteRejected as rejected:
-            detail = self._rejection_detail(rejected)
-            for action in batch:
+        for index, (action, payload) in enumerate(zip(batch, payloads, strict=False)):
+            intents = (
+                journal.intend_updates(endpoint, [action], [payload], client) if journal else []
+            )
+            try:
+                updated = client.patch(endpoint, payload)
+            except NetBoxWriteRejected as rejected:
+                detail = self._rejection_detail(rejected)
+                patch_label = action.object_kind or "object"
+                if journal:
+                    journal.failed(intents, detail)
                 report.results.append(
                     RowResult(
                         line=action.line,
                         outcome=RowOutcome.BLOCKED,
-                        object_kind=action.object_kind or "device primary IP",
+                        object_kind=patch_label,
                         object_name=action.label,
-                        message=f"NetBox rejected this primary-IP PATCH: {detail}",
+                        message=f"NetBox rejected this {patch_label} PATCH: {detail}",
                     )
                 )
-            raise BatchRejected(detail) from None
+                for remaining in batch[index + 1 :]:
+                    report.results.append(
+                        RowResult(
+                            line=remaining.line,
+                            outcome=RowOutcome.BLOCKED,
+                            object_kind=remaining.object_kind or "object",
+                            object_name=remaining.label,
+                            message="Not attempted: the run stopped at the rejected PATCH above.",
+                        )
+                    )
+                raise BatchRejected(detail) from None
+            except NetBoxUnavailable as unavailable:
+                if journal:
+                    journal.unknown(intents, unavailable.operator_message)
+                raise
 
-        for action, record in zip(batch, updated, strict=False):
+            if journal:
+                journal.applied(intents, updated, client)
+            record = updated[0] if updated else {}
             object_id = record.get("id") or action.payload.get("id")
             if isinstance(object_id, Ref):
                 object_id = registry.id_for(object_id.endpoint, object_id.key)
@@ -719,12 +791,16 @@ class BaseImporter(ABC):
             report.results.append(
                 RowResult(
                     line=action.line,
-                    outcome=RowOutcome.CREATE,
-                    object_kind=action.object_kind or "device primary IP",
+                    outcome=RowOutcome.UPDATE,
+                    object_kind=action.object_kind or "object",
                     object_name=action.label,
                     object_id=int(object_id) if object_id else None,
                     url=url,
-                    message="Primary IP set.",
+                    message=(
+                        "Breakout tag added."
+                        if action.object_kind == "interface tags"
+                        else "Primary IP set."
+                    ),
                     sequence=report.write_count,
                 )
             )
@@ -753,6 +829,8 @@ class BaseImporter(ABC):
         registry: Registry,
         report: RunReport,
         client: Any,
+        *,
+        journal: MutationJournal | None = None,
     ) -> None:
         for action, record in zip(batch, created, strict=False):
             object_id = record.get("id")
@@ -789,6 +867,8 @@ class BaseImporter(ABC):
         registry: Registry,
         report: RunReport,
         client: Any,
+        *,
+        journal: MutationJournal | None = None,
     ) -> None:
         """Blame the right row for a rejected batch (Requirement 12.2)."""
         per_item = rejected.per_item
@@ -821,7 +901,16 @@ class BaseImporter(ABC):
                 )
             return
 
-        self._replay(endpoint, batch, payloads, rejected, registry, report, client)
+        self._replay(
+            endpoint,
+            batch,
+            payloads,
+            rejected,
+            registry,
+            report,
+            client,
+            journal=journal,
+        )
 
     def _replay(
         self,
@@ -832,6 +921,8 @@ class BaseImporter(ABC):
         registry: Registry,
         report: RunReport,
         client: Any,
+        *,
+        journal: MutationJournal | None = None,
     ) -> None:
         """Re-submit the rolled-back batch one row at a time to find the offender (Req 12.2).
 
@@ -849,9 +940,12 @@ class BaseImporter(ABC):
             len(batch),
         )
         for index, (action, payload) in enumerate(zip(batch, payloads, strict=False)):
+            intents = journal.intend_creates(endpoint, [action], [payload]) if journal else []
             try:
                 created = client.create(endpoint, payload)
             except NetBoxWriteRejected as single:
+                if journal:
+                    journal.failed(intents, self._rejection_detail(single))
                 column, text = _first_field_error(single.body)
                 report.results.append(
                     RowResult(
@@ -874,6 +968,12 @@ class BaseImporter(ABC):
                         )
                     )
                 return
+            except NetBoxUnavailable as unavailable:
+                if journal:
+                    journal.unknown(intents, unavailable.operator_message)
+                raise
+            if journal:
+                journal.applied(intents, created, client)
             self._record_created(endpoint, [action], created, registry, report, client)
 
         # Every row succeeded individually, so the batch failure was about the list as a whole.

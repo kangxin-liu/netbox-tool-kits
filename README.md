@@ -130,11 +130,15 @@ instance.
 All configuration comes from the environment — see `.env.example` for the full list. Required:
 `NETBOX_URL`, `NETBOX_TOKEN`, `DJANGO_SECRET_KEY`.
 
+`NETBOX_REVERT_TOKEN` is optional and defaults to `NETBOX_TOKEN`. A shared deployment should supply a
+separate token with read/delete and only the field-scoped PATCH permissions required for reversion,
+but no create permission.
+
 ## Secrets
 
 `.env` is git-ignored and must stay that way. Never put a real token in source, a template, a log,
 a commit message, or a spec file. If a token has been shared or pasted anywhere, rotate it in
-NetBox. The token this app uses should be scoped to the DCIM write permissions it actually needs.
+NetBox. Tokens should be scoped to the forward or revert permissions they actually need.
 
 ## Development
 

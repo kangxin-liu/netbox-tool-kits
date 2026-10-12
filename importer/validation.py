@@ -69,9 +69,6 @@ class Code(StrEnum):
     SLUG_INVALID = "SLUG_INVALID"
     """Outside NetBox's own slug charset (decision D9)."""
 
-    BREAKOUT_PARENT_MALFORMED = "BREAKOUT_PARENT_MALFORMED"
-    """A D13 `*_parent` cell is not exactly `{device}:{interface}` (Requirement 9.35)."""
-
     SLUG_CONTAINS_DELIMITER = "SLUG_CONTAINS_DELIMITER"
     """Inside NetBox's charset but unusable in a rack name, which is split on that character.
 
@@ -91,7 +88,7 @@ class Code(StrEnum):
     """Two rows of one cable group describe the same cable differently (Requirement 9.18)."""
 
     BREAKOUT_PARENT_MISMATCH = "BREAKOUT_PARENT_MISMATCH"
-    """The parent names another device, or a panel end declares an interface parent (9.35)."""
+    """A panel end declares an interface parent even though only device ends support one (9.35)."""
 
     CHILD_PARENT_CONFLICT = "CHILD_PARENT_CONFLICT"
     """One child interface is assigned to two different parents in the same sheet (9.39)."""
@@ -108,6 +105,9 @@ class Code(StrEnum):
 
     CABLE_GROUP_WITHOUT_PROFILE = "CABLE_GROUP_WITHOUT_PROFILE"
     """Several terminations on a side and no profile, so NetBox cannot trace lanes (Req 9.20)."""
+
+    BREAKOUT_TAG_UNSUPPORTED = "BREAKOUT_TAG_UNSUPPORTED"
+    """A parented profile side cannot map to an approved 2x/4x/8x tag (Requirement 9.46)."""
     SLUG_INCONSISTENT_IN_FILE = "SLUG_INCONSISTENT_IN_FILE"
     """One name given two different slugs by two rows. One object cannot hold both (Req 7.12)."""
 
@@ -158,6 +158,12 @@ class Code(StrEnum):
 
     CHILD_INTERFACE_CONFLICT = "CHILD_INTERFACE_CONFLICT"
     """An existing D13 child has the wrong parent or is not virtual (Requirement 9.36)."""
+
+    BREAKOUT_TAG_NOT_FOUND = "BREAKOUT_TAG_NOT_FOUND"
+    """The required pre-existing breakout tag slug is absent or ambiguous (Requirement 9.47)."""
+
+    BREAKOUT_TAG_CONFLICT = "BREAKOUT_TAG_CONFLICT"
+    """A parent holds a different breakout-factor tag from the profile-derived tag (9.51)."""
 
     SLUG_COLLISION = "SLUG_COLLISION"
     UNIQUE_FIELD_TAKEN = "UNIQUE_FIELD_TAKEN"
