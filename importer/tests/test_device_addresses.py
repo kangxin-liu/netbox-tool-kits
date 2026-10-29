@@ -93,6 +93,7 @@ def addressed(**overrides: str) -> dict[str, str]:
     return row(
         management_ip4=MGMT_V4,
         loopback_ip4=LOOP_V4,
+        primary_address_v4=MGMT_V4,
         **overrides,
     )
 
@@ -131,6 +132,12 @@ class TestAddressCells:
         plan = validate(importer, netbox, [row(management_ip4=LOOP_V6)])
         error = next(i for i in plan.verdict.errors if i.code is Code.DEVICE_IP_FAMILY_MISMATCH)
         assert error.column == "management_ip4"
+
+    def test_v6_in_primary_address_v4_is_a_family_mismatch(self, importer, netbox):
+        seed(netbox)
+        plan = validate(importer, netbox, [row(primary_address_v4=LOOP_V6)])
+        error = next(i for i in plan.verdict.errors if i.code is Code.DEVICE_IP_FAMILY_MISMATCH)
+        assert error.column == "primary_address_v4"
 
     def test_the_same_address_in_two_rows_blocks(self, importer, netbox):
         seed(netbox)
@@ -307,14 +314,21 @@ class TestAddressApply:
         assert "leaf09" in error.message
         assert plan.verdict.is_applyable() is False
 
-    def test_management_v6_and_loopback_v4_set_primary_per_family(self, importer, netbox):
-        """Requirement 8.18: displayed primary is IPv4 (loopback); primary_ip6 is management."""
+    def test_explicit_v6_and_v4_references_set_primary_per_family(self, importer, netbox):
+        """Requirement 8.18: both explicit family references are applied."""
         seeded = seed(netbox)
         add_templates(netbox, seeded.device_type)
         plan = validate(
             importer,
             netbox,
-            [row(management_ip6=MGMT_V6, loopback_ip4=LOOP_V4)],
+            [
+                row(
+                    management_ip6=MGMT_V6,
+                    loopback_ip4=LOOP_V4,
+                    primary_address_v4=LOOP_V4,
+                    primary_address_v6=MGMT_V6,
+                )
+            ],
         )
         assert plan.rows[0].resolved["primary_ip4"] == LOOP_V4
         assert plan.rows[0].resolved["primary_ip6"] == MGMT_V6
@@ -326,7 +340,11 @@ class TestAddressApply:
     def test_a_v6_only_row_sets_only_primary_ip6(self, importer, netbox):
         seeded = seed(netbox)
         add_templates(netbox, seeded.device_type)
-        plan = validate(importer, netbox, [row(management_ip6=MGMT_V6)])
+        plan = validate(
+            importer,
+            netbox,
+            [row(management_ip6=MGMT_V6, primary_address_v6=MGMT_V6)],
+        )
         assert "primary_ip4" not in plan.rows[0].resolved
         assert plan.rows[0].resolved["displayed_primary"] == "primary_ip6"
         apply_plan(importer, netbox, plan)
@@ -342,3 +360,85 @@ class TestAddressApply:
         for action in patches:
             assert action.endpoint == DEVICES
             assert set(action.payload) <= {"id", "primary_ip4", "primary_ip6"}
+
+    def test_blank_primary_columns_do_not_infer_a_primary(self, importer, netbox):
+        seeded = seed(netbox)
+        add_templates(netbox, seeded.device_type)
+
+        plan = validate(
+            importer,
+            netbox,
+            [row(management_ip4=MGMT_V4, loopback_ip4=LOOP_V4)],
+        )
+
+        assert plan.verdict.is_applyable()
+        assert not [action for action in plan.create_actions if action.method == "patch"]
+        apply_plan(importer, netbox, plan)
+        assert netbox.patches == []
+        assert not netbox.stored(DEVICES)[0].get("primary_ip4")
+
+    def test_existing_device_can_select_an_ip_on_any_existing_interface(self, importer, netbox):
+        seeded = seed(netbox)
+        add_templates(netbox, seeded.device_type)
+        device = mounted(netbox, seeded)
+        add_ifaces(netbox, device)
+        uplink = netbox.add(
+            INTERFACES,
+            device={"id": device["id"], "name": device["name"]},
+            name="swp1",
+            type={"value": "1000base-t"},
+            mgmt_only=False,
+        )
+        existing_cidr = "198.51.100.10/24"
+        existing_ip = netbox.add(
+            IPS,
+            address=existing_cidr,
+            assigned_object_type="dcim.interface",
+            assigned_object_id=uplink["id"],
+            assigned_object={
+                "id": uplink["id"],
+                "name": "swp1",
+                "device": {"id": device["id"], "name": device["name"]},
+            },
+        )
+
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    management_ip4=MGMT_V4,
+                    primary_address_v4=existing_cidr,
+                )
+            ],
+        )
+
+        assert plan.verdict.is_applyable()
+        assert "existing on device" in plan.rows[0].resolved["primary_address_v4"]
+        apply_plan(importer, netbox, plan)
+        assert netbox.patches[0].payloads[0]["primary_ip4"] == existing_ip["id"]
+
+    def test_primary_reference_not_assigned_to_device_blocks(self, importer, netbox):
+        seeded = seed(netbox)
+        add_templates(netbox, seeded.device_type)
+        device = mounted(netbox, seeded)
+        add_ifaces(netbox, device)
+
+        plan = validate(
+            importer,
+            netbox,
+            [
+                row(
+                    management_ip4=MGMT_V4,
+                    primary_address_v4="198.51.100.99/24",
+                )
+            ],
+        )
+
+        error = next(
+            issue
+            for issue in plan.verdict.errors
+            if issue.code is Code.PRIMARY_IP_NOT_ON_DEVICE
+        )
+        assert error.column == "primary_address_v4"
+        assert plan.verdict.is_applyable() is False

@@ -81,8 +81,8 @@ class RowOutcome(StrEnum):
 class Ref:
     """A pointer to an object created earlier in the same run.
 
-    A location cannot carry its site's id at plan time when the site does not exist yet, so the
-    payload carries a `Ref` and apply resolves it once the parent endpoint has been posted.
+    A child object cannot carry a newly planned parent's id at plan time, so the payload carries a
+    `Ref` and apply resolves it once the parent endpoint has been posted.
     """
 
     endpoint: str

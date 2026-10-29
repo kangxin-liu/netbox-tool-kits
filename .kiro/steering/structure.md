@@ -21,10 +21,10 @@ netbox-tool-kits/
 │   ├── models.py                  # ImportRun, ImportRowResult (audit only)
 │   ├── urls.py
 │   ├── views.py                   # thin: parse → service → render
-│   ├── naming.py                  # rack-name convention parse/build/validate
+│   ├── naming.py                  # opaque rack-name and NetBox slug validation
 │   ├── importers/
 │   │   ├── base.py                # shared validate → plan → apply pipeline
-│   │   ├── hierarchy.py           # region / site / datahall / rack
+│   │   ├── hierarchy.py           # prepared site/parent → child location / rack
 │   │   ├── devices.py             # devices into racks
 │   │   └── cabling.py             # cables, incl. patch panels
 │   ├── services/

@@ -67,13 +67,15 @@ All configuration comes from environment variables, loaded via `.env` in local d
 - **Cables**: always POST to `/api/dcim/cables/` with `a_terminations` / `b_terminations` arrays
  of `{"object_type": "dcim.interface", "object_id": <id>}`. The
  `/api/dcim/cable-terminations/` endpoint is read-only in current NetBox and must not be used.
-- **Device addresses (D11):** four optional sheet columns (`loopback_ip4`, `loopback_ip6`,
- `management_ip4`, `management_ip6`). POST `/api/ipam/ip-addresses/` with `assigned_object_type` /
+- **Device addresses (D11):** four optional assignment columns (`loopback_ip4`, `loopback_ip6`,
+ `management_ip4`, `management_ip6`) plus optional `primary address v4` / `primary address v6`
+ references. POST assignments to `/api/ipam/ip-addresses/` with `assigned_object_type` /
  `assigned_object_id` pointing at the inherited interface (both families of one role share it).
- Then PATCH the device with only `primary_ip4` / `primary_ip6`: IPv4 preferred unless the row has
- none, then management over loopback within the family. Do not send interface names from the sheet;
- resolve management as the unique `mgmt_only` interface and loopback as the unique type
- `loopback`. This PATCH is the only non-create write in iteration 1.
+ Resolve each non-blank primary reference against an address assigned to any interface on the
+ device, whether from the same row or already in NetBox, then PATCH only the selected `primary_ip4`
+ / `primary_ip6` fields. Blank primary cells cause no primary write. Do not send interface names
+ from the sheet; resolve management as the unique `mgmt_only` interface and loopback as the unique
+ type `loopback`.
 - Choice fields (`cable.type`, `rack.width`, `device.face`, statuses) are validated against
  values fetched from the API rather than hardcoded lists, and cached per process.
 - Look objects up by natural key (`name` + parent scope, or `slug`) to keep imports idempotent.

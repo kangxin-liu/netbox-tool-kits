@@ -1,10 +1,11 @@
 # Classification: INTERNAL
 # AI-assisted (Cursor) — review before merge.
-"""Loopback and management addresses on the device sheet (Requirement 8.13–8.26, D11).
+"""Interface-address assignments and explicit primary references (Requirement 8.13–8.26, D11).
 
 The sheet never names an interface. Management is the unique `mgmt_only` interface (template, or
 the device's own once it exists); loopback is the unique interface whose type is `loopback`. Both
-families of one role land on that same interface. A covering prefix is not required.
+families of one role land on that same interface. Primary references may select an address on any
+interface of the device. A covering prefix is not required.
 """
 
 from __future__ import annotations
@@ -22,6 +23,11 @@ ADDRESS_COLUMNS: tuple[str, ...] = (
     "management_ip6",
 )
 
+PRIMARY_ADDRESS_COLUMNS: tuple[str, ...] = (
+    "primary_address_v4",
+    "primary_address_v6",
+)
+
 ROLE_FOR: dict[str, str] = {
     "loopback_ip4": "loopback",
     "loopback_ip6": "loopback",
@@ -34,6 +40,8 @@ FAMILY_FOR: dict[str, int] = {
     "loopback_ip6": 6,
     "management_ip4": 4,
     "management_ip6": 6,
+    "primary_address_v4": 4,
+    "primary_address_v6": 6,
 }
 
 # Last-resort names when the discriminator is absent on a community device type that still has
@@ -48,6 +56,17 @@ LOOPBACK_NAMES = frozenset({"lo", "lo0", "loopback0", "loopback1"})
 class ParsedAddress:
     column: str
     role: str
+    family: int
+    interface: ipaddress.IPv4Interface | ipaddress.IPv6Interface
+
+    @property
+    def cidr(self) -> str:
+        return str(self.interface)
+
+
+@dataclass(frozen=True)
+class ParsedPrimaryAddress:
+    column: str
     family: int
     interface: ipaddress.IPv4Interface | ipaddress.IPv6Interface
 
@@ -81,6 +100,21 @@ class RoleMatch:
 
 def parse_device_ip(column: str, raw: str) -> ParsedAddress:
     """S2: a CIDR host with an explicit prefix, of the family the column names (8.13)."""
+    parsed, family = _parse_ip(column, raw)
+    return ParsedAddress(
+        column=column, role=ROLE_FOR[column], family=family, interface=parsed
+    )
+
+
+def parse_primary_ip(column: str, raw: str) -> ParsedPrimaryAddress:
+    """An explicit primary-IP reference, with the same CIDR rules as an assigned address."""
+    parsed, family = _parse_ip(column, raw)
+    return ParsedPrimaryAddress(column=column, family=family, interface=parsed)
+
+
+def _parse_ip(
+    column: str, raw: str
+) -> tuple[ipaddress.IPv4Interface | ipaddress.IPv6Interface, int]:
     text = str(raw).strip()
     family = FAMILY_FOR[column]
     if "/" not in text:
@@ -117,9 +151,7 @@ def parse_device_ip(column: str, raw: str) -> ParsedAddress:
                 f"Put it in the matching column rather than swapping families silently."
             ),
         )
-    return ParsedAddress(
-        column=column, role=ROLE_FOR[column], family=family, interface=parsed
-    )
+    return parsed, family
 
 
 def parse_row_addresses(row_get) -> list[ParsedAddress]:
@@ -133,38 +165,20 @@ def parse_row_addresses(row_get) -> list[ParsedAddress]:
     return found
 
 
+def parse_row_primary_addresses(row_get) -> list[ParsedPrimaryAddress]:
+    """Every explicit primary reference on one row; blank means no request for that family."""
+    found: list[ParsedPrimaryAddress] = []
+    for column in PRIMARY_ADDRESS_COLUMNS:
+        raw = row_get(column)
+        if not str(raw).strip():
+            continue
+        found.append(parse_primary_ip(column, raw))
+    return found
+
+
 def canonical(value: Any) -> str:
     """Structured comparison so compressed and expanded IPv6 are the same address (8.24)."""
     return str(ipaddress.ip_interface(str(value).strip()))
-
-
-def primary_columns(addresses: list[ParsedAddress]) -> tuple[str | None, str | None]:
-    """Requirement 8.18: family first, then management over loopback within the family."""
-    present = {item.column for item in addresses}
-    ip4 = (
-        "management_ip4"
-        if "management_ip4" in present
-        else "loopback_ip4"
-        if "loopback_ip4" in present
-        else None
-    )
-    ip6 = (
-        "management_ip6"
-        if "management_ip6" in present
-        else "loopback_ip6"
-        if "loopback_ip6" in present
-        else None
-    )
-    return ip4, ip6
-
-
-def displayed_primary(ip4_column: str | None, ip6_column: str | None) -> str:
-    """The address NetBox shows on the device: IPv4 when set, otherwise IPv6."""
-    if ip4_column:
-        return "primary_ip4"
-    if ip6_column:
-        return "primary_ip6"
-    return ""
 
 
 def choice_value(raw: Any) -> str:

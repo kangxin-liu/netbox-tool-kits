@@ -1,5 +1,5 @@
-location,datacenter,datacenter_slug,datahall,datahall_slug,rack,rack_u_height,rack_width,rack_status,rack_form_factor,tenant,description
-Lab Region,LAB1,,DH1,,LAB1-DH1-R01,45,19,active,4-post-cabinet,,compute row
-Lab Region,LAB1,,DH1,,LAB1-DH1-R02,45,19,active,4-post-cabinet,,"second rack, same datahall"
-Lab Region,LAB1,,DH2,,LAB1-DH2-R01,45,19,active,4-post-cabinet,,new datahall under LAB1
-Lab Region,Lab Two,lab2,Data Hall One,dh1,LAB2-DH1-R01,42,19,planned,4-post-cabinet,,"new site, multi-word names with supplied slugs"
+site_slug,parent_location_slug,datahall,datahall_slug,rack,rack_u_height,rack_width,rack_status,rack_form_factor,tenant,description
+lab,lab1,LAB1-DH1,lab1-dh1,LAB1-DH1-R01,45,19,active,4-post-cabinet,,compute row
+lab,lab1,LAB1-DH1,lab1-dh1,LAB1-DH1-R02,45,19,active,4-post-cabinet,,"second rack, same datahall"
+lab,lab1,LAB1-DH2,lab1_dh2,LAB1-DH2-R01,45,19,active,4-post-cabinet,,new datahall under LAB1
+lab,lab2,LAB2-DH1,lab2-dh1,LAB2-DH1-R01,42,19,planned,4-post-cabinet,,new child under a second prepared parent

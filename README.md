@@ -1,22 +1,22 @@
 # netbox-tool-kits
 
-An internal Django web app for populating NetBox from spreadsheets. Iteration 1 **creates** DCIM
-objects only — it never updates or deletes anything in NetBox, except the device importer's
-field-scoped PATCH of a new device's primary IP after the matching address is created.
+An internal Django web app for populating NetBox from spreadsheets. Iteration 1 primarily
+**creates** NetBox objects and never deletes them. Updates are limited to field-scoped PATCHes:
+the device importer may set an unset primary IP on a new or existing device after assigning the
+matching address, and the cabling importer may update parent-interface tags for breakout metadata.
 
 Three importer pages, one per nav-bar entry:
 
 | Page | Creates | Sheet key |
 | --- | --- | --- |
-| Hierarchy | Location (region), datacenter (site), datahall (location), racks | one row per rack |
+| Hierarchy | Direct child locations and racks under prepared parent locations | one row per rack |
 | Devices | Devices mounted in racks by face and rack unit, plus loopback and management addresses | `rack` name |
 | Cabling | Cables between devices and patch panels | end names + port names |
 
-Rack names follow `<datacenter_slug>-<datahall_slug>-<rack>`, e.g. `SYD1-DH1-R01`. That convention
-is the join key between all three sheets. The first two segments are the datacenter's and datahall's
-**slugs**, which the hierarchy sheet supplies in its optional `datacenter_slug` and `datahall_slug`
-columns — so a site can be called "Sydney One" and still sit in a rack named `SYD1-DH1-R01`. Leave a
-slug cell blank and it is derived from the name, which is all a single-token name like `SYD1` needs.
+Rack names are opaque, case-insensitive join keys between sheets. Hyphens and underscores have no
+hierarchy meaning. The hierarchy sheet resolves an existing site and parent location by slug, then
+creates or reuses only the direct child location and rack. NetBox relationships—not text prefixes—
+enforce ancestry.
 
 Two runbooks, for the two people who will read this:
 
@@ -62,10 +62,10 @@ built:
   renders no apply button and a direct POST is answered with 409 and the reason. Every attempt —
   including a refused one — is recorded in a read-only run history with a per-row report and CSV
   downloads.
-- **Sheet-supplied slugs (18a).** The hierarchy sheet's optional `datacenter_slug` and `datahall_slug`
-  columns, and rack names built from those slugs rather than from the two display names, so a site can
-  be called "Sydney One" without lengthening every rack name under it. A blank slug cell still derives
-  one from the name, which is why sheets written before this change keep validating unchanged.
+- **Prepared-parent hierarchy (D16).** The hierarchy sheet requires `site_slug`,
+  `parent_location_slug`, `datahall`, `datahall_slug`, `rack`, and `rack_u_height`. Sites and parent
+  locations must already exist; the importer creates only direct child locations and racks. Existing
+  objects are never re-parented, and old hierarchy templates intentionally fail structure validation.
 
 - **Hardening and handover (19–22).** The row-count bound stated on every page and enforced as a
   validation error, so a file too large to finish in one request is refused rather than timed out; an
@@ -73,7 +73,7 @@ built:
   attempts wrote nothing; a security regression sweep over every page, log record, audit row, and
   error path; and the two runbooks above.
 
-The suite is 757 tests and runs in about twenty seconds, with no live NetBox and no sockets.
+The test suite runs hermetically with no live NetBox and no sockets.
 
 The design lives in `.kiro/`:
 

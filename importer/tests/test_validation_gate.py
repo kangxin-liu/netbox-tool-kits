@@ -206,8 +206,8 @@ class TestConflictClassification:
         assert compare_to_existing(HIERARCHY["rack_status"], "   ", "planned") is None
 
     def test_an_identity_column_cannot_conflict(self):
-        """A different datacenter is a different site, not a site with a wrong name."""
-        assert compare_to_existing(HIERARCHY["datacenter"], "EXA1", "EXA9") is None
+        """A different prerequisite slug denotes a different site, not a field update."""
+        assert compare_to_existing(HIERARCHY["site_slug"], "exa1", "exa9") is None
 
     def test_matching_values_produce_nothing(self):
         assert compare_to_existing(HIERARCHY["rack_u_height"], "45", 45) is None

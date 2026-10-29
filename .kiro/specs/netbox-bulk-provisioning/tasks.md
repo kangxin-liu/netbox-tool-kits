@@ -3,7 +3,7 @@
 Dependency-ordered. Each task is small enough to review on its own and ends in a verifiable state.
 Tests are written with the task they cover, not batched at the end. No task contacts a live NetBox
 instance; HTTP is stubbed, except the explicitly named disposable-instance probes 23a, 27a, 31a,
-35a, and 40a.
+35a, 40a, and 43a.
 
 Phases 1–7 are iteration 1 and are complete. **Phase 8 is an addition on top of it** — cable profiles
 and breakout, decision D10 — and is gated on that decision being accepted at review. Task 23 is the one
@@ -20,6 +20,9 @@ compensating revert**, decision D14. It journals every object mutation independe
 and depends on the existing apply/reporting path, not on the outstanding live probes. **Phase 13
 adds profile-derived breakout tags**, decision D15; it depends on D10's parsed profile structure,
 D13's physical-parent resolution, and D14's update journal/revert path.
+**Phase 14 replaces the hierarchy contract**, decision D16: site and parent location become
+prerequisites, the importer creates only direct child locations and racks, and rack names become
+opaque natural keys. It supersedes the hierarchy portions of tasks 5, 10, 13, and 18a.
 
 ## Phase 1 — Scaffold and configuration
 
@@ -40,6 +43,8 @@ D13's physical-parent resolution, and D14's update journal/revert path.
     `DJANGO_SECRET_KEY` is missing; log a warning when SSL verification is disabled. Phase 12 adds
     optional `NETBOX_REVERT_TOKEN`, falling back to `NETBOX_TOKEN`
   - Test: missing variable raises at import; no default secret key exists in source
+  - **To be amended by task 43b (D16):** remove `RACK_NAME_DELIMITER`; opaque rack names have no
+    configurable parser delimiter
   - Also brought forward from task 9a, because leaving plaintext-to-remote accepted in the interim
     would be a live hole: `config/env.py` validates the `NETBOX_URL` scheme at startup, permitting
     `http://` only to a loopback host and refusing it to any remote one
@@ -81,9 +86,11 @@ D13's physical-parent resolution, and D14's update journal/revert path.
   - `Conflict` enum (`CONSEQUENTIAL` / `DESCRIPTIVE` / `IDENTITY`) as a required field on every spec,
     populated from the D8 table in `design.md`
   - Choice tuples drive the xlsx picklists and the example rows only; validation still asks the API,
-    so a choice list going stale cannot silently reject a value NetBox accepts (Requirement 7.7)
+    so a choice list going stale cannot silently reject a value NetBox accepts (Requirement 7.12)
   - Synthetic example values only — the example region is `Example Region`, the site `EXA1`
   - **Extended by task 18a (D9):** the hierarchy sheet gains `datacenter_slug` and `datahall_slug`
+  - **Superseded for hierarchy by task 43b (D16):** replace the old location/site columns with
+    `site_slug`, `parent_location_slug`, required `datahall` + `datahall_slug`, and opaque `rack`
   - **To be extended by tasks 24–25 (D10, proposed):** the cabling sheet gains `cable_profile` and
     `cable_group`
   - **Extended by task 35b (D13):** the cabling sheet gains `a_parent` / `b_parent` interface names,
@@ -189,6 +196,8 @@ D13's physical-parent resolution, and D14's update journal/revert path.
   - **Superseded in part by task 18a (D9):** the sheet does now ask for two of the slugs, the rack
     name's first two segments became slugs rather than names, and this module gained the slug
     validation rules that go with that
+  - **Superseded by task 43b (D16):** remove segment parsing/building and validate only opaque,
+    non-empty rack names plus the complete NetBox slug charset
   - _Requirements: 6.1, 6.2, 6.4, 6.5_
 
 ## Phase 5 — Validation framework and importer pipeline
@@ -277,6 +286,8 @@ D13's physical-parent resolution, and D14's update journal/revert path.
   - **Superseded in part by task 18a (D9):** slugs for the datacenter and datahall now come from the
     sheet when supplied, the rack-name agreement check compares slugs rather than names, and the two
     slug columns are `CONSEQUENTIAL` where the three name columns remain `IDENTITY`
+  - **Superseded by Phase 14 (D16):** the implementation described here remains historical; the
+    replacement does not create region/site/parent-location objects
   - _Requirements: 7.1–7.9, 6.3, 11.4, 11.5, 11.5a_
 
 - [x] 14. Device importer — **done**
@@ -395,6 +406,8 @@ D13's physical-parent resolution, and D14's update journal/revert path.
   - _Requirements: 12.1, 12.2, 12.5, 12.6, 13.1–13.5_
 
 - [x] 18a. Sheet-supplied slugs, and rack names built from them (D9) — **done**
+  - **Historical; superseded by Phase 14 (D16).** D16 keeps explicit child slugs but removes the
+    delimiter ban, derived fallback, and rack-name segment agreement.
   - Revises tasks 5, 10, and 13. The rack name's first two segments become the datacenter and datahall
     **slugs** rather than their names, and the hierarchy sheet gains optional `datacenter_slug` and
     `datahall_slug` columns to supply them. Until now the slug was derived from the name, which forced
@@ -406,18 +419,19 @@ D13's physical-parent resolution, and D14's update journal/revert path.
   - `naming.py`: `validate_slug` and `effective_slug`; `RackName.agrees_with` takes slugs; `PATTERN`
     becomes `<datacenter_slug>-<datahall_slug>-<rack>`. Two separate checks, not one regex — outside
     NetBox's charset and containing-the-delimiter are different mistakes with different fixes, and the
-    delimiter check reads `RACK_NAME_DELIMITER` rather than matching a literal `-` so Requirement 6.5
-    survives
+    delimiter check reads `RACK_NAME_DELIMITER` rather than matching a literal `-` so the former
+    single-module rule survived
   - `validation.py`: `SLUG_INVALID`, `SLUG_CONTAINS_DELIMITER`, and `SLUG_INCONSISTENT_IN_FILE`
     (one name given two slugs). `SLUG_COLLISION` and `SLUG_NOT_DERIVABLE` keep their current meanings
   - `importers/hierarchy.py`, five places: `extra_cell_checks` validates the effective slug per level;
     `check_consistency` compares the rack name against slugs and gains both directions of the slug/name
-    consistency check, with datahall slugs keyed by site per Requirement 7.9; `prefetch` loads by
+    consistency check, with datahall slugs keyed by site under the former hierarchy contract; `prefetch` loads by
     effective rather than derived slug; the three level resolvers put the effective slug in both the
     lookup and the payload; and `_slug_matches` splits into "this slug belongs to another object"
     (existing) and "this object's slug is not the one you asserted" (new, blocking)
   - The supplied-versus-derived distinction is the crux and belongs in one place: a **supplied** slug
-    that disagrees with an existing object blocks (7.13), a **derived** one does not (7.14). Applying
+    that disagrees with an existing object blocks (former 7.13), a **derived** one does not (former
+    7.14). Applying
     the blocking rule to the fallback would make every pre-existing object whose slug this tool did not
     derive start rejecting rows that pass today
   - A derived slug containing the delimiter — `derive_slug("Data Hall 1")` is `data-hall-1` — is
@@ -432,7 +446,8 @@ D13's physical-parent resolution, and D14's update journal/revert path.
     slug, the same datahall slug legal under a second datacenter, supplied disagreement blocks, derived
     disagreement does not). A regression test that a pre-D9 single-token sheet still validates unchanged
     is the one that proves the fallback works
-  - _Requirements: 6.3, 6.4, 6.6, 6.7, 7.3, 7.10–7.14, 11.1, 11.5, D9_
+  - _Former requirements superseded by D16: 6.3, 6.4, 6.6, 6.7, 7.3, 7.10–7.14; retained context:
+    11.1, 11.5, D9_
 
   **How it came out.**
   - The **region deliberately gained nothing**. Its slug is still derived and still only has to exist,
@@ -445,7 +460,7 @@ D13's physical-parent resolution, and D14's update journal/revert path.
     message twice, in two places that could then disagree
   - `row_slug` and `blame_column` are module-level in `importers/hierarchy.py` rather than methods,
     because S2, S3, S4, and `prefetch` all need the same answer. Computing the effective slug once per
-    level in `plan_row` and passing it down is what makes Requirement 7.10 structural: the lookup, the
+    level in `plan_row` and passing it down is what made the former D9 contract structural: the lookup, the
     payload, and the rack-name check cannot be handed different values, because there is only one
   - `_supplied_slug_matches` is a wrapper around `compare_to_existing`, not a new comparison. That is
     what makes the supplied-versus-derived distinction free: `compare_to_existing` already returns
@@ -453,8 +468,8 @@ D13's physical-parent resolution, and D14's update journal/revert path.
     classification is what turns a real disagreement into a blocking error
   - The datahall gained the collision guard it never had. Looking a location up by `(site, slug)` and
     finding a *differently named* room used to be treated as a match, which would have attached the
-    row's rack to the wrong datahall; it now blocks, scoped to the site per Requirement 7.9
-  - Slugs compare case-insensitively, following Requirement 6.4 rather than the design's "slugs match
+    row's rack to the wrong datahall; it now blocks, scoped to the site under the former contract
+  - Slugs compare case-insensitively, following the case rule retained in Requirement 6.2 rather than the design's "slugs match
     exactly": `EXA1-DH1-R01` has to agree with the slugs `exa1` and `dh1`, and a comparison that folded
     for the rack name but not for the slug behind it would contradict itself. What is *created* still
     carries the casing the sheet gave (assumption 8)
@@ -561,6 +576,7 @@ D13's physical-parent resolution, and D14's update journal/revert path.
   - Tests: 23 new in `test_security.py`
 
 - [x] 22. README and operator runbook
+  - **Hierarchy guidance in this completed task is superseded by task 46 (D16).**
   - Setup, environment variables, creating the admin user, running the server
   - The rack naming convention, the three sheet formats, and where to get templates
   - The slug columns of D9: what they are for, that `-` is not allowed inside one, and that a
@@ -572,7 +588,7 @@ D13's physical-parent resolution, and D14's update journal/revert path.
     creating the device roles in use, importing device types from `netbox-community/devicetype-library`,
     and building one patch panel with front-to-rear mappings in the 4.5+ `rear_ports` format — plus
     the note that sheet 1 works on an empty instance while sheets 2 and 3 need this prep first
-  - _Requirements: 12.5, 6.1, 16.1, 17.6, 17.7_
+  - _Requirements at completion: 12.5, former 6.1, 16.1, 17.6, former 17.7_
 
   **How it came out.**
   - Split by **audience, not by topic**: `README.md` stays the engineer's entry point (setup,
@@ -781,9 +797,9 @@ over the API, so it cannot be checked against a harness specification from here.
 ## Phase 9 — Device loopback and management addresses (D11)
 
 Gated on D11 being accepted at review, including the remaining operator question: whether a
-management address should also be written to `oob_ip`. Dual-stack is decided: four columns, IPv4
-preferred as primary unless the row supplies none. Do not start 27b until 27a has recorded the
-probe results in `design.md`.
+management address should also be written to `oob_ip`. Dual-stack interface assignment and explicit
+per-family primary selection are decided. Do not start 27b until 27a has recorded the probe results
+in `design.md`.
 
 - [ ] 27a. Probe IPAM assignment and interface discriminators against 4.6.8
   - Read-only `OPTIONS` / `GET` on `/api/dcim/interface-templates/` (`mgmt_only`), the interface
@@ -798,15 +814,21 @@ probe results in `design.md`.
 - [ ] 27b. Dual-stack address columns
   - Four `ColumnSpec`s in `DEVICE_COLUMNS`: `loopback_ip4`, `loopback_ip6`, `management_ip4`,
     `management_ip6` — optional, `Conflict.CONSEQUENTIAL`, CIDR examples, no interface-name column
+  - Two more optional, consequential `ColumnSpec`s with generated Excel headers
+    `primary address v4` and `primary address v6`, normalised internally to
+    `primary_address_v4` and `primary_address_v6`
   - S2: a non-blank cell must be an `ipaddress.ip_interface` with an explicit prefix; a host with
-    no mask is rejected, not defaulted; an `*_ip4` cell that is IPv6 (or the reverse) is
-    `DEVICE_IP_FAMILY_MISMATCH`
+    no mask is rejected, not defaulted; an IPv4-labelled cell that is IPv6 (or the reverse) is
+    `DEVICE_IP_FAMILY_MISMATCH`, including both primary-address columns
   - S3: the same address in two cells — two rows, or two columns of one row — is
-    `DUPLICATE_IP_IN_FILE` naming both locations
+    `DUPLICATE_IP_IN_FILE` naming both locations, except that a primary-address cell is a reference
+    and may repeat one same-row interface-address declaration
   - Template guidance states at-least-one of four on a type that defines the interfaces, and all
-    blank on a type that does not
+    blank on a type that does not; primary-address cells are optional and blank means no primary
+    request for that family
   - Tests: valid v4 in ip4 / v6 in ip6 accepted; `10.0.0.1` without a mask rejected; v6 in
-    `management_ip4` rejected; duplicate in-file and same-row two-column duplicate blocked
+    `management_ip4` or `primary address v4` rejected; duplicate declarations blocked; a primary
+    reference matching a same-row declaration accepted
   - _Requirements: 8.13, 8.22, 8.24, 8.25, 4.2, 11.5c_
 
 - [ ] 28. Resolve interfaces from the device type, not from the sheet
@@ -820,8 +842,8 @@ probe results in `design.md`.
     the template, by the same rule as 9.25 — **8.23 as amended by D12**, which reverses what this
     bullet used to say. A type that defines no such template is still `DEVICE_INTERFACE_MISSING`,
     because the device sheet has no name or type column to create one from
-  - Plan preview names the resolved interface, each address, `primary_ip4`, `primary_ip6`, and
-    which of those NetBox will show as primary (8.26)
+  - Plan preview names the resolved interface and each assigned address; task 29 adds the explicit
+    primary-reference source and displayed-primary detail (8.26)
   - Devices readiness panel counts types that define each role (17.2)
   - Tests: Arista-named `Management1` and Cumulus-named `eth0` both resolve as management from
     `mgmt_only` alone; two `mgmt_only` templates block; a patch panel with no such templates and
@@ -831,9 +853,12 @@ probe results in `design.md`.
 
 - [ ] 29. Create addresses and PATCH the primary IP
   - Apply order per row: create or skip the device, POST each supplied `ipam.ip-addresses`
-    assigned to the resolved interface (up to four), PATCH the device with only `primary_ip4` /
-    `primary_ip6` per 8.18 — family first (IPv4 unless the row has none), then management over
-    loopback within the family
+    assigned to the resolved interface (up to four), resolve each non-blank `primary address v4` /
+    `primary address v6` against those new addresses and addresses already assigned to any interface
+    on the device, then PATCH only the selected `primary_ip4` / `primary_ip6` fields
+  - A primary-address value is a reference, not an address create. Missing, unassigned,
+    other-device, or wrong-family references block. Blank means no primary write for that family;
+    do not infer management-over-loopback
   - `CreateAction` (or a sibling) must be able to express that PATCH; cabling still issues none
   - Idempotency: address already on the intended interface is skipped; address held elsewhere or
     unassigned is `IP_ALREADY_ASSIGNED`; primary already set to a different address is
@@ -841,22 +866,24 @@ probe results in `design.md`.
   - An existing device still has its remaining address work done (8.10, 8.20) — this is the
     behaviour change from "skip the row and resolve nothing further"
   - `oob_ip` is not written unless D11's review says otherwise
-  - Tests: new device gets IPs then primary; re-upload creates nothing; device-exists-IPs-missing
-    creates the IPs and sets primary; IP held by another device blocks with zero writes; a row
-    with `management_ip6` and `loopback_ip4` sets `primary_ip4` to the loopback and `primary_ip6`
-    to the management address; a v6-only row sets only `primary_ip6`; grep for `PATCH` finds only
-    this call, and the payload has no other keys
+  - Tests: a new device selects a same-row address; an existing device selects an address already on
+    any of its interfaces; blank primary columns issue no device PATCH; an absent, unassigned,
+    other-device, and family-mismatched reference each block with zero writes; both references set
+    both family fields and NetBox displays IPv4; re-upload creates and changes nothing; grep for
+    `PATCH` finds only this call, and the payload has no other keys
   - _Requirements: 8.17–8.21, 11.3, 11.6, 11.7_
 
 - [ ] 30. Documentation and samples for device addresses
   - `docs/operator-runbook.md`: at-least-one of four, CIDR with a mask, names are on the type,
-    IPv4 preferred as primary, patch panels leave all four blank
+    primary selection is explicit and may reference a same-row or pre-existing interface address,
+    blank primary columns request no change, and patch panels leave the four assignment cells blank
   - `docs/empty-instance-prep.md`: mark exactly one `mgmt_only` and exactly one type-`loopback`
     interface on each network device type; community YAML that types `Loopback0` as `virtual` must
     be corrected before sheet 2 will accept a loopback address
-  - Samples: switch rows in `2_devices_valid.csv` gain CIDR values (at least one family); panel
-    rows stay blank; the invalid sheet gains an all-blank switch, a panel with an address, a
-    mask-less host, a v6 value in an ip4 column, and a duplicate address
+  - Samples: switch rows in `2_devices_valid.csv` gain CIDR values (at least one family) and examples
+    of both same-row and existing-device primary references; panel rows stay blank; the invalid
+    sheet gains an all-blank switch, a panel with an address, a mask-less host, a v6 value in an
+    IPv4 column, a duplicate declaration, and a primary reference not assigned to the device
   - `scripts/seed_netbox.py`: add `mgmt_only` and `loopback` templates for the switch types it
     already seeds, named for the `--naming` scheme
   - _Requirements: 8.13–8.26, 17.6_
@@ -1196,6 +1223,94 @@ bounded-update security tests rather than adding an ad-hoc interface update.
   - Run full tests, ruff, deploy checks, SAST/SCA, secret/config scans, and Security Design Authority
     review because D15 expands forward mutation of pre-existing objects
   - _Requirements: 9.49, 9.52–9.54, 11.3, 13.2a–13.2b, 14, 18_
+
+## Phase 14 — Prepared parent locations and opaque rack names (D16)
+
+D16 deliberately replaces, rather than extends, the original hierarchy template. Region, site, and
+parent location are prepared inventory. The importer resolves them read-only, creates or reuses only
+their direct child datahall, then creates the rack. Old hierarchy sheets fail S1 with the new required
+columns so their meaning cannot change silently.
+
+- [ ] 43a. Probe location parent fields and filters against disposable NetBox 4.6.8
+  - Read-only first: inspect `OPTIONS /api/dcim/locations/` for writable `site`, `parent`, `name`, and
+    `slug`; inspect location/rack filtering by site, parent, slug, and name
+  - Confirm an existing site-scoped parent and its direct children are represented with nested ids in
+    GET responses, and confirm the site is present on both parent and child
+  - On approved synthetic fixtures only, bulk-create a child with `{name, slug, site, parent}` and a
+    rack with `{name, site, location, u_height}`, verify read-back relationships, then remove only
+    those fixtures
+  - Record whether server filters are exact or merely hints; local verification remains mandatory
+    regardless, because NetBox ignores unknown filters
+  - Add no real site, location, or rack values to tests or committed probe output
+  - _Requirements: 7.2–7.6, 7.9–7.10, 14.1, D16_
+
+- [x] 43b. Replace the hierarchy sheet and naming contract
+  - Replace hierarchy columns with required `site_slug`, `parent_location_slug`, `datahall`,
+    `datahall_slug`, `rack`, `rack_u_height`; retain the existing optional rack fields
+  - Mark prerequisite slugs, `datahall`, and `rack` as identity; mark `datahall_slug`
+    consequential because a name-matched child can disagree; keep rack physical/descriptive
+    classifications from D8
+  - Replace `RackName` segment parsing/building with one opaque-name validator and case-folded key;
+    remove `RACK_NAME_DELIMITER` from settings, `.env.example`, requirements, and template guidance
+  - Validate all three supplied slugs against NetBox's complete `[-a-zA-Z0-9_]`, 100-character
+    contract; accept both hyphen and underscore and derive no hierarchy slug
+  - Make device-sheet rack validation use the same opaque-name helper; cabling needs no rack parser
+    because it resolves existing devices by their own opaque names
+  - Tests cover arbitrary segment counts, embedded hyphens/underscores, empty rack names, exact
+    create casing, case-insensitive lookup, and full slug validation
+  - _Requirements: 4.2–4.4, 6, 7.1, 7.6, D16_
+
+- [x] 44. Parent-aware lookups and hierarchy readiness
+  - Index locations under `(site, parent, name)` and `(site, parent, slug)`; retain a dedicated
+    `(site, slug)` prerequisite lookup that detects ambiguity rather than choosing the first record
+  - Prefetch sites by supplied slug, then locations by resolved site/parent in bounded batches; verify
+    every returned record locally against all key fields
+  - Hierarchy readiness reports site and parent-location counts and states that both are prerequisites;
+    an empty instance is not ready and readiness issues no writes
+  - Add issue codes for missing/ambiguous site, missing/ambiguous/wrong-site parent location, and
+    child site/parent/name/slug conflict, each with related-object links where available
+  - Add site, parent id, child id/slug, and rack location to the pre-apply state signature so any
+    relationship change aborts before the first write
+  - _Requirements: 7.2–7.8, 10.14, 11.1–11.5, 17.2, 17.4, 17.7_
+
+- [x] 45. Rebuild hierarchy planning and apply around child locations
+  - Resolve the existing site and parent location first; neither may produce a `CreateAction`
+  - Resolve a child by `(site, parent, name)` and `(site, parent, slug)`; create it once with exact
+    site and parent refs only when neither key matches
+  - Block any existing child whose site, parent, name, or slug disagrees; never rename or re-parent
+  - Resolve/create the rack by opaque name and block an existing rack in another site or child
+    location; preserve all existing rack field conflict behavior
+  - Set `endpoint_order` to child locations then racks. Plans, mutation journals, run counts, and
+    revert order contain no region/site/parent-location create
+  - Deduplicate one child shared by many rack rows and preserve all-or-nothing validation, stale
+    detection, endpoint-batch atomicity, partial-run reporting, and idempotent re-upload
+  - _Requirements: 7.4–7.15, 10, 11, 12, 13, 18, D16_
+
+- [x] 46. Replace hierarchy templates, samples, and operator guidance
+  - Regenerate CSV/XLSX examples with synthetic prepared site/parent slugs, child names/slugs, and
+    opaque rack names; old columns are not accepted as aliases
+  - Update README, operator runbook, empty-instance prep, upload panel, readiness text, and sample
+    generator: administrators create region/site/parent location first; hierarchy creates child
+    locations and racks only
+  - Explain that slug/name prefixes are optional organisational conventions, not ancestry checks;
+    show both `_` and `-` as valid slug characters and a rack name whose punctuation differs
+  - Document old-template migration and partial apply recovery for the two-endpoint
+    child-location→rack sequence
+  - _Requirements: 4, 6, 7, 12.1, 17.6–17.7, D16_
+
+- [ ] 47. D16 regression, security, and release gates
+  - Replace obsolete D9 hierarchy tests while retaining historical tests only where another importer
+    still depends on the behavior
+  - Add end-to-end cases for existing child/new rack, new child/new rack, missing prerequisites,
+    wrong parent, duplicate/ambiguous keys, stale parent movement, endpoint-two failure, re-upload,
+    and guarded revert of only objects the run created
+  - Assert a blocked hierarchy file makes zero writes; a valid run never POSTs regions/sites or the
+    resolved parent location and never PATCHes/re-parents any location or rack
+  - Run full hermetic tests, ruff, deploy checks, SAST/SCA, secret/config scans, and update the SBOM
+    if production dependencies change
+  - Before deployment, link the change record with risk assessment, validation plan, rollback plan,
+    review approval, and Security Design Authority review of the revised trust assumptions
+  - _Requirements: 7, 10, 11.3, 14, 17.7, 18, D16_
 
 ## Deferred to iteration 2 (do not build now)
 

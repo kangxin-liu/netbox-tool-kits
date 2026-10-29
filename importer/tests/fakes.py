@@ -216,7 +216,7 @@ class FakeNetBox:
 
         created: list[dict[str, Any]] = []
         for item in payloads:
-            record = {"id": self._take_id(), **self._expand(item)}
+            record = {"id": self._take_id(), **self._expand(endpoint, item)}
             self.objects.setdefault(endpoint, []).append(record)
             self._versions[(endpoint, int(record["id"]))] = 1
             if endpoint == CABLES:
@@ -480,7 +480,7 @@ class FakeNetBox:
             # response comes back unfiltered rather than as an error.
         return True
 
-    def _expand(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _expand(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Turn submitted ids into the nested briefs NetBox returns, so reads look realistic."""
         expanded: dict[str, Any] = {}
         for name, value in payload.items():
@@ -495,15 +495,15 @@ class FakeNetBox:
                 "role",
                 "parent",
             }:
-                expanded[name] = self._brief(name, value)
+                expanded[name] = self._brief(endpoint, name, value)
             else:
                 expanded[name] = value
         return expanded
 
-    def _brief(self, name: str, value: Any) -> Any:
+    def _brief(self, owner_endpoint: str, name: str, value: Any) -> Any:
         if not isinstance(value, int):
             return value
-        endpoint = {
+        related_endpoint = {
             "site": "dcim.sites",
             "region": "dcim.regions",
             "location": "dcim.locations",
@@ -512,9 +512,11 @@ class FakeNetBox:
             "device": "dcim.devices",
             "device_type": "dcim.device-types",
             "role": "dcim.device-roles",
-            "parent": "dcim.interfaces",
+            "parent": (
+                "dcim.locations" if owner_endpoint == "dcim.locations" else "dcim.interfaces"
+            ),
         }[name]
-        for record in self.objects.get(endpoint, []):
+        for record in self.objects.get(related_endpoint, []):
             if record.get("id") == value:
                 return {
                     "id": value,

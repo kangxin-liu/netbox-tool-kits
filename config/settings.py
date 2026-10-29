@@ -134,7 +134,6 @@ NETBOX_MAX_VERSION_EXCLUSIVE = env.version_tuple(
 )
 
 # --- Import behaviour ---------------------------------------------------------------------
-RACK_NAME_DELIMITER = env.optional(ENVIRON, "RACK_NAME_DELIMITER") or "-"
 NETBOX_DEFAULT_DEVICE_ROLE = env.optional(ENVIRON, "NETBOX_DEFAULT_DEVICE_ROLE")
 NETBOX_AUTOCREATE_DEVICE_TYPES = env.flag(ENVIRON, "NETBOX_AUTOCREATE_DEVICE_TYPES", default=False)
 # Off by default for D4's reason applied to a smaller object: the cabling sheet names two ports per

@@ -28,19 +28,23 @@ from importer.services.sheets import parse_upload
 from importer.tests.conftest import upload_of
 from importer.validation import Code
 
-pytestmark = pytest.mark.django_db
+pytestmark = [
+    pytest.mark.django_db,
+    pytest.mark.usefixtures("hierarchy_prerequisites"),
+]
 
 BASE_ROW = {
-    "location": "Example Region",
-    "datacenter": "EXA1",
-    "datahall": "DH1",
+    "site_slug": "syn",
+    "parent_location_slug": "syn1",
+    "datahall": "SYN1-DH1",
+    "datahall_slug": "syn1-dh1",
     "rack_u_height": "45",
 }
 
 
 def rows(count: int) -> list[dict[str, str]]:
     """`count` distinct racks in one datahall — the shape a real bulk sheet has."""
-    return [{**BASE_ROW, "rack": f"EXA1-DH1-R{index:04d}"} for index in range(1, count + 1)]
+    return [{**BASE_ROW, "rack": f"SYN1-DH1-R{index:04d}"} for index in range(1, count + 1)]
 
 
 def validate(browser, sheet_rows, page="hierarchy"):
@@ -155,9 +159,9 @@ class TestScale:
         )
 
     def test_the_plan_is_one_action_per_object_not_per_row(self, netbox):
-        """Requirement 11.6: 2,000 racks in one datahall create one region, site, and location."""
+        """Requirement 11.6: many racks under one parent create one child location."""
         plan = HierarchyImporter().validate(parse(rows(50), "fifty.csv"), Lookups(client=netbox))
-        assert plan.verdict.object_count == 53
+        assert plan.verdict.object_count == 51
 
 
 # --- 15.4: the busy state --------------------------------------------------------------------
@@ -172,5 +176,5 @@ class TestBusyState:
         assert "js/apply.js" in body
 
     def test_a_blocked_plan_renders_no_apply_form_to_be_busy_about(self, browser, netbox):
-        page = validate(browser, [{**BASE_ROW, "rack": "R01"}])
+        page = validate(browser, [{**BASE_ROW, "rack": "R01", "rack_u_height": "0"}])
         assert 'id="apply-form"' not in page.content.decode()

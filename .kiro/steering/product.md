@@ -20,7 +20,8 @@ are trusted, authenticated internal staff — not the public, and not customers.
 The first iteration deliberately supports **creation of new entries only**. Three importers,
 one page each, reachable from a shared nav bar:
 
-1. **Site & rack hierarchy** — region, datacenter (site), datahall (room), racks.
+1. **Site & rack hierarchy** — direct child locations and racks beneath an existing site and
+   parent location.
 2. **Devices** — placed into racks by face and rack unit, with loopback and management addresses.
 3. **Cabling** — device-to-device, device-to-panel, and panel-to-panel links.
 

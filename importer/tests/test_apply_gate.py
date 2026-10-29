@@ -23,14 +23,18 @@ from importer.services import plan_store
 from importer.services.netbox_client import Failure, NetBoxUnavailable
 from importer.tests.conftest import upload_of
 
-pytestmark = pytest.mark.django_db
+pytestmark = [
+    pytest.mark.django_db,
+    pytest.mark.usefixtures("hierarchy_prerequisites"),
+]
 
 RACKS = "dcim.racks"
 
 GOOD_ROW = {
-    "location": "Example Region",
-    "datacenter": "SYN1",
-    "datahall": "DH1",
+    "site_slug": "syn",
+    "parent_location_slug": "syn1",
+    "datahall": "SYN1-DH1",
+    "datahall_slug": "syn1-dh1",
     "rack": "SYN1-DH1-R01",
     "rack_u_height": "45",
 }
@@ -38,6 +42,18 @@ GOOD_ROW = {
 
 def row(**overrides) -> dict[str, str]:
     return {**GOOD_ROW, **overrides}
+
+
+def add_matching_child(netbox):
+    site = netbox.stored("dcim.sites")[0]
+    parent = netbox.stored("dcim.locations")[0]
+    return netbox.add(
+        "dcim.locations",
+        name="SYN1-DH1",
+        slug="syn1-dh1",
+        site={"id": site["id"], "name": site["name"]},
+        parent={"id": parent["id"], "name": parent["name"]},
+    )
 
 
 def validate(browser, rows, page="hierarchy"):
@@ -112,18 +128,13 @@ class TestWarningAcknowledgement:
     @pytest.fixture
     def warned(self, browser, netbox):
         """A file whose only problem is a descriptive difference — a warning, not a blocker (D8)."""
-        netbox.add("dcim.regions", name="Example Region", slug="example-region")
-        site = netbox.add(
-            "dcim.sites", name="SYN1", slug="syn1", region={"id": 1001, "name": "Example Region"}
-        )
-        netbox.add(
-            "dcim.locations", name="DH1", slug="dh1", site={"id": site["id"], "name": "SYN1"}
-        )
+        site = netbox.stored("dcim.sites")[0]
+        hall = add_matching_child(netbox)
         netbox.add(
             RACKS,
             name="SYN1-DH1-R01",
-            site={"id": site["id"], "name": "SYN1"},
-            location={"id": 1003, "name": "DH1"},
+            site={"id": site["id"], "name": site["name"]},
+            location={"id": hall["id"], "name": hall["name"]},
             u_height=45,
             width={"value": 19},
             status={"value": "planned"},
@@ -204,8 +215,8 @@ class TestStaleNetBox:
     ):
         validate(browser, [row()])
 
-        # Someone else creates the region between validation and apply.
-        netbox.add("dcim.regions", name="Example Region", slug="example-region")
+        # Someone else creates the child location between validation and apply.
+        add_matching_child(netbox)
 
         response = apply_now(browser)
         assert response.status_code == 302
@@ -217,13 +228,13 @@ class TestStaleNetBox:
 
     def test_the_abort_tells_the_operator_to_validate_again(self, browser, netbox):
         validate(browser, [row()])
-        netbox.add("dcim.regions", name="Example Region", slug="example-region")
+        add_matching_child(netbox)
         apply_now(browser)
         assert "Validate the file again" in ImportRun.objects.get().aborted_reason
 
     def test_netbox_disappearing_before_the_first_write_aborts_cleanly(self, browser, netbox):
         validate(browser, [row()])
-        netbox.unavailable_on_read["dcim.regions"] = NetBoxUnavailable(
+        netbox.unavailable_on_read["dcim.locations"] = NetBoxUnavailable(
             Failure.CONNECTION, netbox.host, "Could not open a connection."
         )
 
@@ -292,7 +303,7 @@ class TestApplying:
         assert response["Location"] == reverse("importer:run_detail", args=[run.pk])
         assert [record["name"] for record in netbox.stored(RACKS)] == ["SYN1-DH1-R01"]
         assert run.verdict == RunVerdict.APPLIED
-        assert run.created_count == 4
+        assert run.created_count == 2
         assert run.applied_at is not None
 
     def test_each_created_object_is_recorded_with_its_id_and_a_link(self, browser, netbox):

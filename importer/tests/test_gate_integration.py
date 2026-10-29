@@ -30,7 +30,6 @@ from importer.tests.conftest import upload_of
 
 pytestmark = pytest.mark.django_db
 
-REGIONS = "dcim.regions"
 SITES = "dcim.sites"
 LOCATIONS = "dcim.locations"
 RACKS = "dcim.racks"
@@ -105,39 +104,64 @@ def seed_for_cabling(netbox) -> dict[str, Any]:
     return {"leaf": leaf, "panel": panel}
 
 
+def seed_for_hierarchy(netbox) -> dict[str, Any]:
+    site = netbox.add(SITES, name="Example Site", slug="exa")
+    parent = netbox.add(
+        LOCATIONS,
+        name="EXA1",
+        slug="exa1",
+        site={"id": site["id"], "name": site["name"]},
+        parent=None,
+    )
+    return {"site": site, "parent": parent}
+
+
+def drift_hierarchy(netbox) -> None:
+    site = netbox.stored(SITES)[0]
+    parent = netbox.stored(LOCATIONS)[0]
+    netbox.add(
+        LOCATIONS,
+        name="EXA1-DH1",
+        slug="exa1-dh1",
+        site={"id": site["id"], "name": site["name"]},
+        parent={"id": parent["id"], "name": parent["name"]},
+    )
+
+
 HIERARCHY = {
     "page": "hierarchy",
-    "seed": lambda netbox: {},
+    "seed": seed_for_hierarchy,
     "good": [
         {
-            "location": "Example Region",
-            "datacenter": "EXA1",
-            "datahall": "DH1",
+            "site_slug": "exa",
+            "parent_location_slug": "exa1",
+            "datahall": "EXA1-DH1",
+            "datahall_slug": "exa1-dh1",
             "rack": "EXA1-DH1-R01",
             "rack_u_height": "45",
         },
         {
-            "location": "Example Region",
-            "datacenter": "EXA1",
-            "datahall": "DH1",
+            "site_slug": "exa",
+            "parent_location_slug": "exa1",
+            "datahall": "EXA1-DH1",
+            "datahall_slug": "exa1-dh1",
             "rack": "EXA1-DH1-R02",
             "rack_u_height": "45",
         },
     ],
-    # The rack name names a datacenter this row does not (Requirement 6.3), which is the mistake a
-    # copied-down spreadsheet row actually makes.
     "bad": {
-        "location": "Example Region",
-        "datacenter": "EXA1",
-        "datahall": "DH1",
+        "site_slug": "exa",
+        "parent_location_slug": "exa1",
+        "datahall": "EXA1-DH1",
+        "datahall_slug": "not a slug",
         "rack": "EXA9-DH1-R03",
         "rack_u_height": "45",
     },
-    "fixed_rack": "EXA1-DH1-R03",
-    "column": "rack",
+    "fix": {"datahall_slug": "exa1-dh1"},
+    "column": "datahall_slug",
     "endpoint": RACKS,
-    "expected_objects": 6,  # region, site, datahall, three racks
-    "drift": lambda netbox: netbox.add(REGIONS, name="Example Region", slug="example-region"),
+    "expected_objects": 4,  # child location and three racks
+    "drift": drift_hierarchy,
 }
 
 DEVICES_SHEET = {

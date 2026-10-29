@@ -9,13 +9,14 @@ Two files per importer:
   *_invalid.csv  every row after the first carries a deliberate, documented fault, to exercise
                  the validation gate and the issue-localisation format
 
-PREREQUISITES AND ORDER — all four steps, in this order
+PREREQUISITES AND ORDER — all five steps, in this order
 -------------------------------------------------------
 1. Run `scripts/seed_netbox.py --apply` so the device types have port templates. Devices created
    before that step get NO interfaces or panel ports, and sheet 3 will fail every row.
-2. Apply 1_hierarchy — creates the region, sites, datahalls and racks these sheets reference.
-3. Apply 2_devices   — creates devices in those racks, inheriting ports from step 1.
-4. Apply 3_cabling   — cables the ports the devices inherited.
+2. Create synthetic site `lab` and parent locations `lab1` and `lab2` in NetBox.
+3. Apply 1_hierarchy — creates direct child locations and the racks these sheets reference.
+4. Apply 2_devices   — creates devices in those racks, inheriting ports from step 1.
+5. Apply 3_cabling   — cables the ports the devices inherited.
 
 The `3_cabling_newports` pair is the exception and needs two more things, both described above that
 section: `NETBOX_AUTOCREATE_INTERFACES=true`, and `seed_netbox.py --late-templates --apply` run
@@ -44,8 +45,8 @@ Panel ports     LC panel        front F1-F24    -> rear R1-R24 (1:1)
                 MPO panel       front MPO1-24   -> rear MPO1-24 (1:1)
                 Breakout panel  front 1A-8D     -> rear MPO1-MPO8, four fronts per trunk
 
-Sites and racks are NOT assumed: sheet 1 creates them, so these sheets are self-contained on a
-NetBox that has only the device types.
+Site `lab` and parent locations `lab1` and `lab2` are prepared prerequisites. Sheet 1 creates only
+their direct child locations and racks.
 
 CSV is always written. XLSX is written too if openpyxl happens to be installed; it is not a
 requirement of this script.
@@ -75,11 +76,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 HIERARCHY_COLUMNS = (
-    "location",
-    "datacenter",
-    # Decision D9: the rack name's first two segments are these slugs, not the two names, so a
-    # multi-word display name needs its slug column filled in.
-    "datacenter_slug",
+    "site_slug",
+    "parent_location_slug",
     "datahall",
     "datahall_slug",
     "rack",
@@ -111,6 +109,8 @@ DEVICE_COLUMNS = (
     "loopback_ip6",
     "management_ip4",
     "management_ip6",
+    "primary address v4",
+    "primary address v6",
 )
 
 CABLING_COLUMNS = (
@@ -137,14 +137,11 @@ CABLING_COLUMNS = (
 # --------------------------------------------------------------------------------------
 
 HIERARCHY_VALID = (
-    # The first three rows leave both slug columns blank, which is the pre-D9 sheet: a single-token
-    # name derives the slug the rack name already carries.
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH1",
-        "",
+        "lab",
+        "lab1",
+        "LAB1-DH1",
+        "lab1-dh1",
         "LAB1-DH1-R01",
         "45",
         "19",
@@ -154,11 +151,10 @@ HIERARCHY_VALID = (
         "compute row",
     ),
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH1",
-        "",
+        "lab",
+        "lab1",
+        "LAB1-DH1",
+        "lab1-dh1",
         "LAB1-DH1-R02",
         "45",
         "19",
@@ -167,13 +163,11 @@ HIERARCHY_VALID = (
         "",
         "second rack, same datahall",
     ),
-    # New datahall under the same site, exercising location creation.
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH2",
-        "",
+        "lab",
+        "lab1",
+        "LAB1-DH2",
+        "lab1_dh2",
         "LAB1-DH2-R01",
         "45",
         "19",
@@ -182,31 +176,27 @@ HIERARCHY_VALID = (
         "",
         "new datahall under LAB1",
     ),
-    # New site under the same region, and the case D9 exists for: two multi-word display names
-    # whose rack name is still short, which only works because the slugs are supplied.
     (
-        "Lab Region",
-        "Lab Two",
+        "lab",
         "lab2",
-        "Data Hall One",
-        "dh1",
+        "LAB2-DH1",
+        "lab2-dh1",
         "LAB2-DH1-R01",
         "42",
         "19",
         "planned",
         "4-post-cabinet",
         "",
-        "new site, multi-word names with supplied slugs",
+        "new child under a second prepared parent",
     ),
 )
 
 HIERARCHY_INVALID = (
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH1",
-        "",
+        "lab",
+        "lab1",
+        "LAB1-DH1",
+        "lab1-dh1",
         "LAB1-DH1-R09",
         "45",
         "19",
@@ -217,59 +207,66 @@ HIERARCHY_INVALID = (
         "this row is valid",
     ),
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH1",
-        "",
-        "LAB1-R05",
+        "missing-site",
+        "lab1",
+        "LAB1-DH1",
+        "lab1-dh1",
+        "MISSING-SITE-R01",
         "45",
         "19",
         "active",
         "",
         "",
         "",
-        "malformed rack name: two segments, expects <datacenter_slug>-<datahall_slug>-<rack>",
+        "site prerequisite does not exist",
     ),
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH1",
-        "",
-        "LAB9-DH1-R06",
+        "lab",
+        "missing-parent",
+        "LAB1-DH1",
+        "lab1-dh1",
+        "MISSING-PARENT-R01",
         "45",
         "19",
         "active",
         "",
         "",
         "",
-        "rack name's first segment (LAB9) disagrees with this row's datacenter slug (lab1)",
+        "parent location prerequisite does not exist",
     ),
-    # D9: a multi-word name with the slug column left blank. The derived slug is `lab-three`, which
-    # contains the delimiter, and the error lands on the datacenter column because that is where the
-    # operator has to act — by filling datacenter_slug in.
     (
-        "Lab Region",
-        "Lab Three",
-        "",
-        "DH1",
-        "",
-        "LAB3-DH1-R01",
+        "lab",
+        "lab1",
+        "LAB1-DH3",
+        "not a slug",
+        "LAB1-DH3-R01",
         "45",
         "19",
         "active",
         "",
         "",
         "",
-        "multi-word datacenter with no slug: the derived slug contains the rack-name delimiter",
+        "datahall_slug contains spaces",
     ),
     (
-        "Lab Region",
-        "LAB1",
+        "lab",
+        "lab1",
+        "LAB1-DH1",
+        "different-slug",
+        "LAB1-DH1-R10",
+        "45",
+        "19",
+        "active",
         "",
-        "DH1",
         "",
+        "",
+        "same child name has a different slug from line 2",
+    ),
+    (
+        "lab",
+        "lab1",
+        "LAB1-DH1",
+        "lab1-dh1",
         "LAB1-DH1-R07",
         "forty-five",
         "19",
@@ -280,11 +277,10 @@ HIERARCHY_INVALID = (
         "rack_u_height is not an integer",
     ),
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH1",
-        "",
+        "lab",
+        "lab1",
+        "LAB1-DH1",
+        "lab1-dh1",
         "LAB1-DH1-R09",
         "45",
         "19",
@@ -295,11 +291,10 @@ HIERARCHY_INVALID = (
         "duplicate of line 2 within this file",
     ),
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH1",
-        "",
+        "lab",
+        "lab1",
+        "LAB1-DH1",
+        "lab1-dh1",
         "LAB1-DH1-R01",
         "12",
         "19",
@@ -311,11 +306,10 @@ HIERARCHY_INVALID = (
         "cannot be fixed by creating",
     ),
     (
-        "Lab Region",
-        "LAB1",
-        "",
-        "DH1",
-        "",
+        "lab",
+        "lab1",
+        "LAB1-DH1",
+        "lab1-dh1",
         "LAB1-DH1-R08",
         "45",
         "19",
@@ -352,9 +346,11 @@ def device(
     loopback_ip6: str = "",
     management_ip4: str = "",
     management_ip6: str = "",
+    primary_address_v4: str = "",
+    primary_address_v6: str = "",
     note: str = "",
 ) -> tuple[str, ...]:
-    """One device row. Panels leave the four address cells blank; switches fill at least one.
+    """One device row. Panels leave address cells blank; switches fill at least one interface IP.
 
     Addresses are RFC 5737 / RFC 3849 documentation ranges only.
     """
@@ -375,6 +371,8 @@ def device(
         loopback_ip6,
         management_ip4,
         management_ip6,
+        primary_address_v4,
+        primary_address_v6,
     )
     return (*row, note) if note else row
 
@@ -421,6 +419,8 @@ DEVICES_VALID = (
         loopback_ip6="2001:db8:0:1::101/128",
         management_ip4="192.0.2.11/24",
         management_ip6="2001:db8:1::11/64",
+        primary_address_v4="192.0.2.11/24",
+        primary_address_v6="2001:db8:1::11/64",
     ),
     device(
         "LAB1-DH1-R01",
@@ -435,6 +435,7 @@ DEVICES_VALID = (
         "active",
         loopback_ip4="192.0.2.102/32",
         management_ip4="192.0.2.12/24",
+        primary_address_v4="192.0.2.102/32",
     ),
     # The only 2U type: ru_height must be 2 or it is an "exists but differs" style conflict.
     # Loopback only — that address is the primary, which is the no-management-IPv4 case.
@@ -450,6 +451,7 @@ DEVICES_VALID = (
         "ns-spine",
         "active",
         loopback_ip4="192.0.2.103/32",
+        primary_address_v4="192.0.2.103/32",
     ),
     # A second rack, so the cabling sheet can show a panel-to-panel trunk between racks.
     device(
@@ -476,6 +478,7 @@ DEVICES_VALID = (
         "ns-leaf",
         "active",
         management_ip4="192.0.2.22/24",
+        primary_address_v4="192.0.2.22/24",
     ),
     # Serial omitted: it is optional.
     device(
@@ -491,6 +494,7 @@ DEVICES_VALID = (
         "active",
         loopback_ip4="192.0.2.201/32",
         management_ip4="192.0.2.21/24",
+        primary_address_v4="192.0.2.21/24",
     ),
 )
 
@@ -507,6 +511,7 @@ DEVICES_INVALID = (
         "ns-leaf",
         "active",
         management_ip4="192.0.2.30/24",
+        primary_address_v4="192.0.2.30/24",
         note="this row is valid",
     ),
     device(
@@ -1641,14 +1646,15 @@ SHEETS: tuple[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...], str], ...
         "1_hierarchy_valid",
         HIERARCHY_COLUMNS,
         HIERARCHY_VALID,
-        "self-contained: creates the region, 2 sites, 3 datahalls and 4 racks on an empty "
-        "instance; the last row exercises supplied slugs (D9)",
+        "needs prepared site `lab` and parent locations `lab1`/`lab2`; creates 3 direct child "
+        "locations and 4 racks, exercising both hyphenated and underscored slugs",
     ),
     (
         "1_hierarchy_invalid",
         HIERARCHY_COLUMNS,
         HIERARCHY_INVALID,
-        "line 2 is valid; lines 3-9 each carry one fault, so the whole file must be blocked",
+        "line 2 is valid; later rows cover missing prerequisites, invalid/inconsistent slugs, "
+        "duplicate racks, invalid values, and an existing-rack conflict",
     ),
     (
         "2_devices_valid",
@@ -1740,7 +1746,7 @@ def check_arity(name: str, columns: tuple[str, ...], rows: tuple[tuple[str, ...]
 
 def write_csv(path: Path, columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
+        writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
         for row in rows:
             # Any trailing note beyond the declared columns is commentary for the reader.
@@ -1776,13 +1782,24 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--outdir", type=Path, default=REPO_ROOT / "samples")
+    parser.add_argument(
+        "--only",
+        choices=("all", "hierarchy"),
+        default="all",
+        help="write all sample pairs, or only the hierarchy CSV/XLSX pair",
+    )
     args = parser.parse_args()
 
     args.outdir.mkdir(parents=True, exist_ok=True)
     wrote_xlsx = False
     print(f"Writing sample sheets to {args.outdir}\n")
 
-    for name, columns, rows, expectation in SHEETS:
+    selected = (
+        SHEETS
+        if args.only == "all"
+        else tuple(sheet for sheet in SHEETS if "hierarchy" in sheet[0])
+    )
+    for name, columns, rows, expectation in selected:
         check_arity(name, columns, rows)
         csv_path = args.outdir / f"{name}.csv"
         write_csv(csv_path, columns, rows)
@@ -1800,11 +1817,12 @@ def main() -> int:
         print("\nCSV only: openpyxl is not installed, so no .xlsx was written.")
         print("Install it later with the app's requirements; Excel opens the CSVs meanwhile.")
 
-    print("\nOrder matters, all four steps:")
+    print("\nOrder matters:")
     print("  1. scripts/seed_netbox.py --apply   (port templates; devices get no ports without it)")
-    print("  2. apply 1_hierarchy   creates the sites, datahalls and racks")
-    print("  3. apply 2_devices     creates devices, inheriting ports from step 1")
-    print("  4. apply 3_cabling     cables those ports")
+    print("  2. create site `lab` and parent locations `lab1` and `lab2` in NetBox")
+    print("  3. apply 1_hierarchy   creates direct child locations and racks")
+    print("  4. apply 2_devices     creates devices, inheriting ports from step 1")
+    print("  5. apply 3_cabling     cables those ports")
     print("\nTo see D12 interface creation:")
     print("  5. scripts/seed_netbox.py --late-templates --apply   (after step 3, not before)")
     print("  6. set NETBOX_AUTOCREATE_INTERFACES=true, then apply 3_cabling_newports")

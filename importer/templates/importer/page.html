@@ -75,11 +75,21 @@ refuses regardless (Requirement 10.6); this is just honesty in the UI.
 
 <section class="panel">
   <h2>2. Upload and validate</h2>
+  {% if page == "hierarchy" %}
   <p>
-    Validation reads NetBox and writes nothing. Rack names follow
-    <code>&lt;datacenter_slug&gt;-&lt;datahall_slug&gt;-&lt;rack&gt;</code>, for example
-    <code>EXA1-DH1-R01</code>, and that name is the join key between all three sheets.
+    Validation reads NetBox and writes nothing. The site and parent location must already exist.
+    This page creates only their direct child location and racks.
   </p>
+  <p>
+    Rack names are opaque join keys: hyphens and underscores are ordinary characters and do not
+    establish ancestry. NetBox site, parent, and location relationships do.
+  </p>
+  {% else %}
+  <p>
+    Validation reads NetBox and writes nothing. Rack and device names are opaque join keys and must
+    match the corresponding existing NetBox objects.
+  </p>
+  {% endif %}
   <p class="muted">
     Up to {{ max_rows }} data rows and {{ max_upload_mb }} MB per file. An apply runs inside this
     request, so a larger file is refused with advice to split it rather than timing out partway.

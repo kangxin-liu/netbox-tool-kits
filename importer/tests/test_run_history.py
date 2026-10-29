@@ -17,14 +17,18 @@ from importer.services import plan_store
 from importer.services.netbox_client import Failure, NetBoxUnavailable
 from importer.tests.conftest import upload_of
 
-pytestmark = pytest.mark.django_db
+pytestmark = [
+    pytest.mark.django_db,
+    pytest.mark.usefixtures("hierarchy_prerequisites"),
+]
 
 RACKS = "dcim.racks"
 
 GOOD_ROW = {
-    "location": "Example Region",
-    "datacenter": "SYN1",
-    "datahall": "DH1",
+    "site_slug": "syn",
+    "parent_location_slug": "syn1",
+    "datahall": "SYN1-DH1",
+    "datahall_slug": "syn1-dh1",
     "rack": "SYN1-DH1-R01",
     "rack_u_height": "45",
 }
@@ -141,12 +145,12 @@ class TestAppliedRunDetail:
     def test_the_rows_are_shown_in_apply_order(self, applied):
         page, _ = applied
         sequences = [result.sequence for result in page.context["results"]]
-        assert sequences == [1, 2, 3, 4]
+        assert sequences == [1, 2]
 
     def test_the_object_type_and_id_are_recorded_for_each_create(self, applied):
         _, run = applied
         kinds = {result.object_type for result in run.results.all()}
-        assert kinds == {"region", "site", "location", "rack"}
+        assert kinds == {"location", "rack"}
         assert all(result.object_id for result in run.results.all())
 
     def test_the_guarantee_is_stated_plainly_rather_than_implied(self, applied):
@@ -165,7 +169,7 @@ class TestAppliedRunDetail:
         response = browser.get(reverse("importer:run_report", args=[run.pk]))
         rows = read_csv(response.content)
         assert rows[0][0] == "sequence"
-        assert len(rows) == 5  # header plus four creates
+        assert len(rows) == 3  # header plus child-location and rack creates
         assert response["Content-Disposition"].startswith("attachment")
 
     def test_the_run_records_which_netbox_it_wrote_to(self, applied):
@@ -225,12 +229,8 @@ class TestAbortedRun:
         apply_now(browser)
 
         run = ImportRun.objects.get()
-        assert run.endpoints_completed.split(",") == [
-            "dcim.regions",
-            "dcim.sites",
-            "dcim.locations",
-        ]
-        assert run.created_count == 3
+        assert run.endpoints_completed.split(",") == ["dcim.locations"]
+        assert run.created_count == 1
         page = browser.get(reverse("importer:run_detail", args=[run.pk]))
         assert b"dcim.locations" in page.content
 
@@ -243,7 +243,7 @@ class TestAbortedRun:
 
         run = ImportRun.objects.get()
         assert run.verdict == RunVerdict.RECONCILIATION_REQUIRED
-        assert run.created_count == 3
+        assert run.created_count == 1
         assert "were not rolled back" in run.aborted_reason
         assert run.mutations.filter(outcome=MutationOutcome.UNKNOWN).count() == 1
 
@@ -264,10 +264,17 @@ class TestAbortedRun:
                 return (400, {"detail": "one of these is a duplicate"})
             return None
 
-        netbox.reject("dcim.regions", reject_the_batch_only)
+        netbox.reject("dcim.locations", reject_the_batch_only)
         validate(
             browser,
-            [row(), row(location="Region Two", datacenter="SYN2", rack="SYN2-DH1-R01")],
+            [
+                row(),
+                row(
+                    datahall="SYN1-DH2",
+                    datahall_slug="syn1-dh2",
+                    rack="SYN1-DH2-R01",
+                ),
+            ],
         )
         apply_now(browser)
 
@@ -317,7 +324,7 @@ class TestNothingLeaks:
             assert settings.NETBOX_TOKEN.encode() not in browser.get(url).content
 
     def test_an_issue_value_is_escaped_in_the_csv_and_in_the_page(self, browser, netbox):
-        validate(browser, [row(rack="=SYN1-DH1-R01")])
+        validate(browser, [row(rack_u_height="=1")])
         run = ImportRun.objects.get()
         rows = read_csv(browser.get(reverse("importer:run_issues", args=[run.pk])).content)
         assert any(cell.startswith("'=") for row_cells in rows for cell in row_cells)

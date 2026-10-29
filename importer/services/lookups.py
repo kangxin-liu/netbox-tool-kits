@@ -27,7 +27,12 @@ from importer.services.netbox_client import Failure, NetBoxClient, NetBoxUnavail
 NATURAL_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
     "dcim.regions": (("slug",), ("name",)),
     "dcim.sites": (("slug",), ("name",)),
-    "dcim.locations": (("site", "name"), ("site", "slug")),
+    "dcim.locations": (
+        ("site", "parent", "name"),
+        ("site", "parent", "slug"),
+        ("site", "slug"),
+        ("site", "name"),
+    ),
     "dcim.racks": (("site", "name"), ("name",)),
     "dcim.device-types": (("model",), ("slug",)),
     "dcim.device-roles": (("slug",), ("name",)),
@@ -100,6 +105,16 @@ class Lookups:
             if not unique:
                 self._records.setdefault(endpoint, [])
             return
+        for field_name, values in filters.items():
+            if not isinstance(values, (list, tuple, set, frozenset)):
+                continue
+            unique = sorted({value for value in values if str(value).strip()})
+            for start in range(0, len(unique), CHUNK_SIZE):
+                chunk = unique[start : start + CHUNK_SIZE]
+                self._load(endpoint, {**filters, field_name: chunk})
+            if not unique:
+                self._records.setdefault(endpoint, [])
+            return
         self._load(endpoint, filters)
 
     def _load(self, endpoint: str, filters: dict[str, Any]) -> None:
@@ -153,6 +168,24 @@ class Lookups:
         self._load(endpoint, _server_filters(natural_key))
         bucket = self._index.get(endpoint, {}).get(fields, {})
         return bucket.get(wanted)
+
+    def get_matches(self, endpoint: str, **natural_key: Any) -> list[dict[str, Any]]:
+        """Return every locally verified match for a natural key.
+
+        NetBox permits duplicate display names in several models. Importers resolving prepared
+        prerequisites use this method so ambiguity blocks instead of silently selecting the first
+        record added to the cache.
+        """
+        fields = tuple(natural_key)
+        wanted = tuple(_comparable(value) for value in natural_key.values())
+        bucket = self._index.get(endpoint, {}).get(fields)
+        if endpoint not in self._records or bucket is None:
+            self._load(endpoint, _server_filters(natural_key))
+        return [
+            record
+            for record in self._records.get(endpoint, [])
+            if tuple(key_value(record, field_name) for field_name in fields) == wanted
+        ]
 
     def all_records(self, endpoint: str) -> list[dict[str, Any]]:
         return list(self._records.get(endpoint, []))

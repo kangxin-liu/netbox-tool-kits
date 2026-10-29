@@ -252,12 +252,11 @@ class TestCellChecks:
         assert "retired" in error.message
         assert "decommissioning" in error.expected
 
-    def test_a_malformed_rack_name_blocks_with_the_expected_pattern(self, importer, netbox):
-        """Requirement 6.2: the rack name is the join key between the sheets."""
+    def test_an_opaque_short_rack_name_reaches_the_lookup(self, importer, netbox):
+        """D16: rack punctuation and segment count have no semantic meaning."""
         seed(netbox)
         plan = validate(importer, netbox, [row(rack="R01")])
-        error = next(i for i in plan.verdict.errors if i.code is Code.RACK_NAME_MALFORMED)
-        assert "<datacenter_slug>-<datahall_slug>-<rack>" in error.expected
+        assert {issue.code for issue in plan.verdict.errors} == {Code.RACK_NOT_FOUND}
 
     def test_every_problem_in_the_stage_is_reported_not_just_the_first(self, importer, netbox):
         """Requirement 10.3."""
@@ -364,6 +363,21 @@ class TestRackPlacement:
         assert plan.rows[0].outcome == RowOutcome.BLOCKED
         assert netbox.posts == []
         assert len(netbox.stored(RACKS)) == 1
+
+    def test_an_ambiguous_opaque_rack_name_blocks_and_lists_candidates(self, importer, netbox):
+        seed(netbox)
+        other_site = netbox.add(SITES, name="EXA2", slug="exa2")
+        netbox.add(
+            RACKS,
+            name="exa1-dh1-r01",
+            site={"id": other_site["id"], "name": "EXA2"},
+            location={"id": 999, "name": "Other Hall"},
+            u_height=45,
+        )
+        plan = validate(importer, netbox, [row()])
+        error = next(issue for issue in plan.verdict.errors if issue.column == "rack")
+        assert error.code is Code.RACK_AMBIGUOUS
+        assert "EXA1" in error.message and "EXA2/Other Hall" in error.message
 
     def test_a_rack_is_matched_case_insensitively(self, importer, netbox):
         """Requirement 6.4."""

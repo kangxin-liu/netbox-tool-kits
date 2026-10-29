@@ -5,16 +5,15 @@ API token is CONFIDENTIAL and belongs only in `.env` or your secret manager.
 
 This is the day-to-day guide: how to fill a sheet in, what the verdict is telling you, and what to do
 when something goes wrong. If you are pointing the tool at a NetBox that has never been used before,
-read [`empty-instance-prep.md`](empty-instance-prep.md) first — sheet 1 works on an empty instance,
-sheets 2 and 3 do not.
+read [`empty-instance-prep.md`](empty-instance-prep.md) first — sheet 1 requires a prepared site and
+parent location, and sheets 2 and 3 have additional prerequisites.
 
 ## The one thing to know
 
-**Iteration 1 only ever creates objects**, with one named exception: after creating a device's
-loopback or management address it PATCHes only that device's primary IP, because NetBox cannot set
-a primary IP at create time. It never updates anything else and never deletes. If an object already
-exists it is skipped, which is why re-uploading the same sheet is safe and why fixing a wrong value
-in NetBox is a job for NetBox, not for this tool.
+**Iteration 1 only ever creates objects**, with one named exception: when a device row explicitly
+selects a primary address it PATCHes only that device's primary-IP fields. It never updates anything
+else and never deletes. If an object already exists it is skipped, which is why re-uploading the
+same sheet is safe and why fixing a wrong value in NetBox is a job for NetBox, not for this tool.
 
 **A single error blocks the whole file.** Not the row — the file. There is no partial apply, because
 a half-populated NetBox is the exact failure this tool exists to prevent. Until the verdict is clean
@@ -30,7 +29,7 @@ row, since it is refused as example data.
 
 | Order | Page | Creates | One row is |
 | --- | --- | --- | --- |
-| 1 | Site & rack hierarchy | region, site, location, racks | one rack |
+| 1 | Site & rack hierarchy | direct child locations and racks | one rack |
 | 2 | Devices | devices mounted in racks, plus loopback and management addresses | one device |
 | 3 | Cabling | cables between devices and panels | one cable, unless rows share a `cable_group` |
 
@@ -48,22 +47,24 @@ patch panel — whose device type has no management port and no loopback — lea
 | `management_ip6` | IPv6 of the same port |
 | `loopback_ip4` | IPv4 of the loopback |
 | `loopback_ip6` | IPv6 of the same loopback |
+| `primary address v4` | Optional address to set as `primary_ip4` |
+| `primary address v6` | Optional address to set as `primary_ip6` |
 
 Each cell takes a CIDR host address with an explicit mask (`10.0.0.1/32`, `2001:db8::1/128`). A
 bare host with no mask is rejected rather than guessed. An `*_ip4` cell must be IPv4 and an `*_ip6`
 cell must be IPv6.
 
-**Which address is primary.** IPv4 is preferred over IPv6 unless the row supplies no IPv4 at all.
-Within a family, management wins over loopback. Both families are still assigned: a dual-stack
-row has `primary_ip4` *and* `primary_ip6` set, and NetBox shows the IPv4 as the device's primary.
+**Which address is primary.** Selection is explicit: fill `primary address v4`, `primary address
+v6`, or both. The value must exactly match a CIDR assigned to any interface on that device. It may
+match one of the four addresses created by the same row, or an address already assigned to an
+existing device's interface. It does not have to be a management or loopback address.
 
-| What you filled | Address NetBox shows as primary |
+| Primary columns | Result |
 | --- | --- |
-| management IPv4, anything else | management IPv4 |
-| loopback IPv4, no management IPv4 | loopback IPv4 |
-| management IPv6 and loopback IPv4, no management IPv4 | loopback IPv4 |
-| only IPv6, management filled | management IPv6 |
-| only loopback IPv6 | loopback IPv6 |
+| both blank | No primary-IP change |
+| only `primary address v4` | Sets `primary_ip4` |
+| only `primary address v6` | Sets `primary_ip6` |
+| both filled | Sets both; NetBox displays IPv4 |
 
 **Do not put the interface name in the sheet.** Arista calls the management port `Management1`,
 Juniper calls it `fxp0` (or `em0`, or `me0`), Nvidia Cumulus calls it `eth0`. The loopback is
@@ -77,8 +78,9 @@ edit the device type (community YAML often types `Loopback0` as `virtual`, which
 not treat as a loopback), then re-upload. NetBox does not copy a newly added template onto devices
 that already exist, so fix the type *before* the first import of that model.
 
-A re-upload of a device that already exists still creates missing addresses and still sets an
-unset primary IP. An address already held by a different device is an error, not a steal.
+A re-upload of a device that already exists still creates missing addresses and can set an unset
+primary IP when the corresponding primary column is filled. An address already held by a different
+device is an error, not a steal.
 
 ## Breakout cables
 
@@ -209,34 +211,25 @@ later failure can leave an earlier interface or tag behind. Re-uploading is safe
 interfaces are detected and only remaining work is sent. The run report and history show each
 completed tag update, and the guarded revert restores its exact prior tag set when no drift occurred.
 
-## Rack names, and the slug columns
+## Prepared parent locations and rack names
 
-Rack names follow `<datacenter_slug>-<datahall_slug>-<rack>`, for example `SYD1-DH1-R01`. That name
-is the join key between all three sheets: sheet 2 and sheet 3 find a rack, and the devices in it, by
-this name.
+Before using the hierarchy page, create the site and its parent location in NetBox. Each hierarchy
+row supplies `site_slug` and `parent_location_slug`; both must resolve uniquely, and this importer
+never creates, renames, or moves either prerequisite.
 
-The first two segments are **slugs**, not display names, and the hierarchy sheet has an optional
-column for each:
+The `datahall` and `datahall_slug` fields describe a direct child of that parent. The importer
+reuses an exact match or creates it with both the selected site and parent. If the name or slug
+already exists under another parent, the file is blocked instead of re-parenting the location.
 
-| Column | Fill it in when | Leave it blank when |
-| --- | --- | --- |
-| `datacenter_slug` | the datacenter's name is more than one word | the name is already a short token like `SYD1` |
-| `datahall_slug` | the datahall's name is more than one word | the name is already `DH1` or similar |
+Rack names are opaque join keys between the hierarchy, device, and cabling sheets. A name such as
+`SYD1-DH1-R01`, `R01`, or `rack_with_underscores` is accepted as a complete value; punctuation is
+not parsed into hierarchy segments. Rack names compare case-insensitively but retain the casing
+supplied when created.
 
-A blank cell means the slug is derived from the name, so a sheet written before these columns existed
-still validates unchanged.
-
-Two rules about a slug you type yourself:
-
-* It may contain letters, digits, underscores and hyphens — **except** the rack-name delimiter, which
-  is `-` by default. The rack name is split on that character, so a slug containing it could not be
-  read back.
-* A multi-word name derives a slug containing hyphens (`Sydney One` → `sydney-one`), which is exactly
-  the forbidden character. That is why a multi-word datacenter or datahall **needs its slug column
-  filled in**; the file is blocked, naming the cell, if it is not.
-
-So "Sydney One" with `datacenter_slug` = `SYD1` gives racks named `SYD1-DH1-R01` while NetBox still
-shows the site as "Sydney One".
+Location slugs use NetBox's full slug rules: letters, digits, hyphens, and underscores, up to 100
+characters. The ancestry is established by NetBox relationships, not by requiring text prefixes.
+Old hierarchy sheets containing `location`, `datacenter`, or `datacenter_slug` fail file-structure
+validation and must be migrated to the new required columns.
 
 ## Validate, read, fix, apply
 
@@ -305,7 +298,9 @@ This is the one case that needs a human. The guarantee is precise:
 > writes are journaled and can be reverted later from history after a drift check; that compensation
 > is not an atomic transaction.
 
-So for a hierarchy sheet, the sites can exist while the racks do not. What to do:
+For a hierarchy sheet there are two write endpoints: child locations, then racks. A rack-batch
+failure can therefore leave the new child locations in place while no racks were created. The
+prepared sites and parent locations are never part of the run. What to do:
 
 1. Open the run report. It lists **which endpoints completed** and every object created, with a link
    to each one in NetBox.

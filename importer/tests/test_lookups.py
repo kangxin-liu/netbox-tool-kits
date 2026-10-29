@@ -65,6 +65,42 @@ class TestNaturalKeyLookups:
         assert lookups.get_or_none("dcim.locations", site=5, name="DH1") is None
 
     @responses.activate
+    def test_a_child_location_is_scoped_to_site_and_parent(self, lookups):
+        stub(
+            "dcim/locations",
+            {
+                "id": 11,
+                "name": "MMR1",
+                "slug": "mmr1",
+                "site": {"id": 3},
+                "parent": {"id": 8},
+            },
+            {
+                "id": 12,
+                "name": "MMR1",
+                "slug": "mmr1",
+                "site": {"id": 3},
+                "parent": {"id": 9},
+            },
+        )
+        lookups.prefetch("dcim.locations")
+        assert lookups.get_or_none("dcim.locations", site=3, parent=8, name="MMR1")["id"] == 11
+        assert lookups.get_or_none("dcim.locations", site=3, parent=9, slug="mmr1")["id"] == 12
+
+    @responses.activate
+    def test_get_matches_preserves_ambiguity(self, lookups):
+        stub(
+            "dcim/racks",
+            {"id": 9, "name": "R01"},
+            {"id": 10, "name": "r01"},
+        )
+        lookups.prefetch("dcim.racks")
+        assert {record["id"] for record in lookups.get_matches("dcim.racks", name="R01")} == {
+            9,
+            10,
+        }
+
+    @responses.activate
     def test_a_missing_object_is_none_rather_than_an_error(self, lookups):
         stub("dcim/device-types")
         lookups.prefetch("dcim.device-types")

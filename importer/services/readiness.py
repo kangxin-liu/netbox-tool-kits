@@ -20,9 +20,9 @@ from importer.services.netbox_client import Failure, NetBoxClient, NetBoxUnavail
 
 logger = logging.getLogger("importer.netbox")
 
-# What each importer needs before it can resolve anything.
-HIERARCHY_NEEDS_NOTHING = (
-    "The hierarchy importer creates its own parents, so an empty NetBox is fine."
+HIERARCHY_PREREQUISITES = (
+    "Each row needs an existing site and parent location. The importer creates only their direct "
+    "child location and rack."
 )
 
 
@@ -97,11 +97,9 @@ def connection_status(client: NetBoxClient) -> ConnectionStatus:
 
 def readiness_for(importer: str, client: NetBoxClient) -> Readiness:
     """Count what the importer depends on. Read-only; creates nothing (Requirement 17.4)."""
-    if importer == "hierarchy":
-        # Requirement 17.7: sheet 1 works on a completely empty instance.
-        return Readiness(importer=importer, ready=True, note=HIERARCHY_NEEDS_NOTHING)
-
     try:
+        if importer == "hierarchy":
+            return _hierarchy_readiness(client)
         if importer == "devices":
             return _devices_readiness(client)
         if importer == "cabling":
@@ -114,6 +112,39 @@ def readiness_for(importer: str, client: NetBoxClient) -> Readiness:
         )
 
     raise ValueError(f"unknown importer {importer!r}")
+
+
+def _hierarchy_readiness(client: NetBoxClient) -> Readiness:
+    sites = client.count("dcim.sites")
+    locations = client.count("dcim.locations")
+    facts = [
+        Fact(
+            label="Sites defined",
+            value=str(sites),
+            level="ok" if sites else "error",
+            detail="" if sites else "Create the target site in NetBox first.",
+        ),
+        Fact(
+            label="Locations defined",
+            value=str(locations),
+            level="ok" if locations else "error",
+            detail="" if locations else "Create the parent location in NetBox first.",
+        ),
+    ]
+    blockers: list[str] = []
+    if not sites:
+        blockers.append("NetBox holds no sites, and the hierarchy importer never creates them.")
+    if not locations:
+        blockers.append(
+            "NetBox holds no locations. Create each parent location before importing its children."
+        )
+    return Readiness(
+        importer="hierarchy",
+        ready=not blockers,
+        facts=facts,
+        blockers=blockers,
+        note=HIERARCHY_PREREQUISITES,
+    )
 
 
 def _devices_readiness(client: NetBoxClient) -> Readiness:

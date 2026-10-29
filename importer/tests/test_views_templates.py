@@ -70,6 +70,13 @@ def test_the_page_offers_both_downloads_and_documents_its_columns(signed_in, pag
         assert f"<code>{spec.label}</code>" in html
 
 
+def test_hierarchy_page_explains_prepared_parents_and_opaque_rack_names(signed_in):
+    html = signed_in.get(reverse("importer:hierarchy")).content.decode()
+    assert "site and parent location must already exist" in html
+    assert "Rack names are opaque join keys" in html
+    assert "&lt;datacenter_slug&gt;" not in html
+
+
 def test_a_downloaded_template_round_trips_through_the_view(signed_in):
     """The same guarantee as the unit test, but over HTTP: what the operator gets is what the
     parser accepts, apart from the deliberate refusal of the example row (Requirements 4.2, 4.5)."""

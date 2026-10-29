@@ -12,7 +12,14 @@ from importer.columns import Conflict
 # Straight from the requirements tables. Kept literal here on purpose: if someone edits a column
 # tuple, this list is what argues with them.
 EXPECTED_REQUIRED = {
-    "hierarchy": ("location", "datacenter", "datahall", "rack", "rack_u_height"),
+    "hierarchy": (
+        "site_slug",
+        "parent_location_slug",
+        "datahall",
+        "datahall_slug",
+        "rack",
+        "rack_u_height",
+    ),
     "devices": ("rack", "rack_face", "bottom_ru", "ru_height", "device_name", "model"),
     # `*_end_kind` are optional: Requirement 9.1 gives them a default, and a required column's
     # blank cell is rejected before a default can apply.
@@ -20,11 +27,7 @@ EXPECTED_REQUIRED = {
 }
 
 EXPECTED_OPTIONAL = {
-    # The two slug columns are optional so a sheet written before D9 still validates: a blank cell
-    # falls back to a slug derived from the name (Requirement 7.10).
     "hierarchy": (
-        "datacenter_slug",
-        "datahall_slug",
         "rack_width",
         "rack_status",
         "rack_form_factor",
@@ -42,6 +45,8 @@ EXPECTED_OPTIONAL = {
         "loopback_ip6",
         "management_ip4",
         "management_ip6",
+        "primary_address_v4",
+        "primary_address_v6",
     ),
     # `cable_profile` and `cable_group` are the D10 pair, both optional: a sheet that uses neither
     # is every cabling sheet written before them (Requirements 9.13, 9.15). The two
@@ -69,9 +74,7 @@ EXPECTED_OPTIONAL = {
 
 # The D8 split from design.md. Everything not named here is IDENTITY.
 EXPECTED_CONSEQUENTIAL = {
-    # The slug columns are CONSEQUENTIAL, not IDENTITY: IDENTITY means "cannot differ", which stops
-    # being true the moment an operator types the value themselves (D9, Requirement 7.13).
-    "hierarchy": {"datacenter_slug", "datahall_slug", "rack_u_height", "rack_width"},
+    "hierarchy": {"datahall_slug", "rack_u_height", "rack_width"},
     "devices": {
         "rack",
         "rack_face",
@@ -82,6 +85,8 @@ EXPECTED_CONSEQUENTIAL = {
         "loopback_ip6",
         "management_ip4",
         "management_ip6",
+        "primary_address_v4",
+        "primary_address_v6",
     },
     # `cable_profile` joins `cable_type`: it is what NetBox traces lanes through, so an existing
     # cable profiled differently from the sheet is a wrong picture, not a wrong label (D10).
@@ -171,7 +176,7 @@ def test_examples_are_synthetic(importer):
     blob = " ".join(columns.example_row(importer).values()).lower()
     for real_ish in ("syd", "firmus", "lab1", "nvidia", "arista", "commscope", "spectrum"):
         assert real_ish not in blob
-    assert "example" in blob or "exa1" in blob
+    assert "example" in blob or "exa" in blob
 
 
 @pytest.mark.parametrize("importer", SHEETS)
@@ -185,6 +190,14 @@ def test_choice_columns_offer_at_least_two_values(importer):
 def test_the_transceiver_column_does_not_exist(importer="cabling"):
     """Decision D3: dropped from iteration 1, so an uploaded one is an unrecognised column."""
     assert "transceiver" not in columns.spec_by_key(importer)
+
+
+def test_primary_address_columns_use_the_requested_excel_headers():
+    specs = columns.spec_by_key("devices")
+    assert specs["primary_address_v4"].label == "primary address v4"
+    assert specs["primary_address_v6"].label == "primary address v6"
+    assert specs["primary_address_v4"].required is False
+    assert specs["primary_address_v6"].required is False
 
 
 def test_rack_form_factor_is_not_called_rack_type():

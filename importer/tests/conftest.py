@@ -56,6 +56,20 @@ def netbox(monkeypatch) -> FakeNetBox:
 
 
 @pytest.fixture
+def hierarchy_prerequisites(netbox):
+    """Synthetic prepared site and parent location required by D16 hierarchy sheets."""
+    site = netbox.add("dcim.sites", name="Example Site", slug="syn")
+    parent = netbox.add(
+        "dcim.locations",
+        name="SYN1",
+        slug="syn1",
+        site={"id": site["id"], "name": site["name"], "slug": site["slug"]},
+        parent=None,
+    )
+    return site, parent
+
+
+@pytest.fixture
 def operator(db):
     return get_user_model().objects.create_superuser(
         username="operator", email="operator@example.com", password="synthetic-password"

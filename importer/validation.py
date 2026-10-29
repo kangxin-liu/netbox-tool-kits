@@ -122,6 +122,13 @@ class Code(StrEnum):
 
     # S4 — cross-reference against NetBox
     RACK_NOT_FOUND = "RACK_NOT_FOUND"
+    RACK_AMBIGUOUS = "RACK_AMBIGUOUS"
+    SITE_PREREQUISITE_MISSING = "SITE_PREREQUISITE_MISSING"
+    SITE_PREREQUISITE_AMBIGUOUS = "SITE_PREREQUISITE_AMBIGUOUS"
+    PARENT_LOCATION_MISSING = "PARENT_LOCATION_MISSING"
+    PARENT_LOCATION_AMBIGUOUS = "PARENT_LOCATION_AMBIGUOUS"
+    PARENT_LOCATION_WRONG_SITE = "PARENT_LOCATION_WRONG_SITE"
+    CHILD_LOCATION_CONFLICT = "CHILD_LOCATION_CONFLICT"
     DEVICE_TYPE_NOT_FOUND = "DEVICE_TYPE_NOT_FOUND"
     DEVICE_TYPE_WILL_BE_CREATED = "DEVICE_TYPE_WILL_BE_CREATED"
     """Autocreate is on and the model is new: a warning, so the operator reviews it (Req 8.7)."""
@@ -184,6 +191,9 @@ class Code(StrEnum):
 
     IP_ALREADY_ASSIGNED = "IP_ALREADY_ASSIGNED"
     """The address exists in IPAM assigned to a different object, or unassigned (8.21)."""
+
+    PRIMARY_IP_NOT_ON_DEVICE = "PRIMARY_IP_NOT_ON_DEVICE"
+    """An explicit primary reference is not assigned to an interface on the row's device (8.18)."""
 
     ALREADY_EXISTS = "ALREADY_EXISTS"
     EXISTS_BUT_DIFFERS = "EXISTS_BUT_DIFFERS"

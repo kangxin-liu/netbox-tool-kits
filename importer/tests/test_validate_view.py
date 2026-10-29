@@ -19,12 +19,16 @@ from importer.services import plan_store
 from importer.tests.conftest import upload_of
 from importer.validation import Code
 
-pytestmark = pytest.mark.django_db
+pytestmark = [
+    pytest.mark.django_db,
+    pytest.mark.usefixtures("hierarchy_prerequisites"),
+]
 
 GOOD_ROW = {
-    "location": "Example Region",
-    "datacenter": "SYN1",
-    "datahall": "DH1",
+    "site_slug": "syn",
+    "parent_location_slug": "syn1",
+    "datahall": "SYN1-DH1",
+    "datahall_slug": "syn1-dh1",
     "rack": "SYN1-DH1-R01",
     "rack_u_height": "45",
 }
@@ -51,7 +55,7 @@ class TestValidationWritesNothing:
         assert netbox.posts == []
 
     def test_a_file_with_one_error_issues_no_write(self, browser, netbox):
-        validate(browser, [row(rack="SYN1_DH1_R01")])
+        validate(browser, [row(rack_u_height="0")])
         assert netbox.posts == []
 
     def test_an_unreadable_file_issues_no_write(self, browser, netbox):
@@ -75,16 +79,15 @@ class TestVerdict:
         page = validate(browser, [row()])
         assert "Ready" in page.content.decode()
         assert page.context["verdict"].create_count == 1  # one row
-        # …which creates four objects: region, site, location, rack. The operator is authorising the
-        # objects, not the rows, so both numbers are stated.
-        assert page.context["verdict"].object_count == 4
-        assert b"Apply 4 creates" in page.content
+        # The prepared site and parent are never actions: one child and one rack are created.
+        assert page.context["verdict"].object_count == 2
+        assert b"Apply 2 creates" in page.content
 
     def test_two_rows_sharing_a_new_parent_do_not_double_count_it(self, browser, netbox):
         """Requirement 7.6: the shared datahall is created once, so the count says so."""
         page = validate(browser, [row(), row(rack="SYN1-DH1-R02")])
         assert page.context["verdict"].create_count == 2
-        assert page.context["verdict"].object_count == 5  # region, site, hall, two racks
+        assert page.context["verdict"].object_count == 3  # child location and two racks
 
     def test_a_blocked_file_says_so_and_states_the_error_count(self, browser, netbox):
         page = validate(browser, [row(rack_u_height="0")])
@@ -136,7 +139,7 @@ class TestStages:
         page = browser.get(reverse("importer:hierarchy"))
         codes = [code for code, _ in page.context["issue_report"].code_counts]
         assert str(Code.REQUIRED_COLUMN_MISSING) in codes
-        assert page.context["issue_report"].code_counts[0][1] == 4
+        assert page.context["issue_report"].code_counts[0][1] == 6
 
     def test_a_cell_level_failure_records_that_s2_ran(self, browser, netbox):
         """S2 found the problem, so S2 was reached — the report must not claim it was skipped."""
@@ -153,7 +156,7 @@ class TestStages:
 
 class TestIssueLocalisation:
     def test_an_issue_names_file_sheet_line_and_column(self, browser, netbox):
-        page = validate(browser, [row(rack="SYN1_DH1_R01")], filename="racks.csv")
+        page = validate(browser, [row(rack_u_height="0")], filename="racks.csv")
         text = page.content.decode()
         assert "file racks.csv" in text
         assert "line 2" in text
@@ -161,15 +164,15 @@ class TestIssueLocalisation:
 
     def test_the_line_number_is_the_one_excel_shows(self, browser, netbox):
         """Header is line 1, so the first data row of this upload is line 2 (Requirement 16.2)."""
-        page = validate(browser, [row(), row(rack="SYN1_DH1_R02x", datahall="DH1")])
+        page = validate(browser, [row(), row(rack="R02", rack_u_height="0")])
         lines = {issue.line for issue in page.context["verdict"].errors}
         assert lines == {3}
 
     def test_a_received_value_and_an_expectation_are_both_shown(self, browser, netbox):
-        page = validate(browser, [row(rack="SYN1_DH1_R01")])
+        page = validate(browser, [row(rack_u_height="0")])
         text = page.content.decode()
         assert "received" in text and "expected" in text
-        assert "SYN1_DH1_R01" in text
+        assert "greater than zero" in text
 
     def test_a_duplicate_names_both_lines(self, browser, netbox):
         page = validate(browser, [row(), row()])
@@ -186,7 +189,7 @@ class TestIssueLocalisation:
 
     def test_a_cell_holding_markup_is_escaped_rather_than_rendered(self, browser, netbox):
         """Sheet content is untrusted: it reaches the page through autoescaping (Req 14.4)."""
-        page = validate(browser, [row(rack="<script>alert(1)</script>")])
+        page = validate(browser, [row(datahall_slug="<script>alert(1)</script>")])
         assert b"<script>alert(1)</script>" not in page.content
         assert b"&lt;script&gt;" in page.content
 
@@ -206,7 +209,7 @@ class TestIssueReport:
     def test_the_list_is_truncated_with_a_notice_while_the_csv_stays_complete(
         self, browser, netbox
     ):
-        rows = [row(rack=f"SYN1_DH1_R{index:02d}") for index in range(1, 9)]
+        rows = [row(rack=f"SYN1-DH1-R{index:02d}", rack_u_height="0") for index in range(1, 9)]
         page = validate(browser, rows)
         assert b"Showing the first 3 of" in page.content
 
@@ -214,7 +217,7 @@ class TestIssueReport:
         csv_text = browser.get(reverse("importer:run_issues", args=[run.pk])).content.decode(
             "utf-8-sig"
         )
-        assert csv_text.count("RACK_NAME_MALFORMED") == 8
+        assert csv_text.count("NOT_A_POSITIVE_INTEGER") == 8
 
     def test_the_issue_csv_download_is_offered_alongside_the_truncated_list(self, browser, netbox):
         page = validate(browser, [row(rack_u_height="0")])
@@ -235,12 +238,14 @@ class TestPreview:
         assert "SYN1-DH1-R01" in text
 
     def test_a_row_whose_objects_exist_reads_as_a_skip(self, browser, netbox):
-        netbox.add("dcim.regions", name="Example Region", slug="example-region")
-        site = netbox.add(
-            "dcim.sites", name="SYN1", slug="syn1", region={"id": 1001, "name": "Example Region"}
-        )
+        site = netbox.stored("dcim.sites")[0]
+        parent = netbox.stored("dcim.locations")[0]
         hall = netbox.add(
-            "dcim.locations", name="DH1", slug="dh1", site={"id": site["id"], "name": "SYN1"}
+            "dcim.locations",
+            name="SYN1-DH1",
+            slug="syn1-dh1",
+            site={"id": site["id"], "name": site["name"]},
+            parent={"id": parent["id"], "name": parent["name"]},
         )
         netbox.add(
             "dcim.racks",
@@ -264,12 +269,14 @@ class TestPreview:
         the stage where rows have already been planned. A cell-level error stops before planning, so
         there are no rows to mark.
         """
-        netbox.add("dcim.regions", name="Example Region", slug="example-region")
-        site = netbox.add(
-            "dcim.sites", name="SYN1", slug="syn1", region={"id": 1001, "name": "Example Region"}
-        )
+        site = netbox.stored("dcim.sites")[0]
+        parent = netbox.stored("dcim.locations")[0]
         hall = netbox.add(
-            "dcim.locations", name="DH1", slug="dh1", site={"id": site["id"], "name": "SYN1"}
+            "dcim.locations",
+            name="SYN1-DH1",
+            slug="syn1-dh1",
+            site={"id": site["id"], "name": site["name"]},
+            parent={"id": parent["id"], "name": parent["name"]},
         )
         netbox.add(
             "dcim.racks",

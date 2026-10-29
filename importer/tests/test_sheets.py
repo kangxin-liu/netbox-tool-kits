@@ -56,14 +56,12 @@ def hierarchy_rows(*data: list[str]) -> bytes:
     return csv_bytes([header, *data])
 
 
-# Positional, against HIERARCHY_COLUMNS. The two slug cells are left blank on purpose: parsing has
-# no opinion about slugs, and a blank one exercises the derived fallback these tests predate (D9).
+# Positional, against the D16 HIERARCHY_COLUMNS contract.
 VALID_HIERARCHY_ROW = [
-    "Test Region",
+    "tst",
     "TST1",
-    "",
-    "DH1",
-    "",
+    "TST1-DH1",
+    "tst1-dh1",
     "TST1-DH1-R01",
     "45",
     "19",
@@ -235,19 +233,20 @@ class TestHeaders:
                     " RACK ",
                     "Rack U Height",
                     "datahall",
-                    "  DataCenter",
-                    "location",
+                    "DataHall Slug",
+                    "Parent Location Slug",
+                    "Site Slug",
                 ],
-                ["TST1-DH1-R01", "45", "DH1", "TST1", "Test Region"],
+                ["TST1-DH1-R01", "45", "TST1-DH1", "tst1-dh1", "TST1", "tst"],
             ]
         )
         parsed = parse("hierarchy", payload, "reordered.csv")
         assert parsed.rows[0].values["rack"] == "TST1-DH1-R01"
         assert parsed.rows[0].values["rack_u_height"] == "45"
-        assert parsed.rows[0].values["location"] == "Test Region"
+        assert parsed.rows[0].values["site_slug"] == "tst"
 
     def test_every_missing_required_column_is_listed_at_once(self):
-        payload = csv_bytes([["location", "datacenter"], ["Test Region", "TST1"]])
+        payload = csv_bytes([["site_slug", "parent_location_slug"], ["tst", "TST1"]])
         with pytest.raises(SheetRejected) as raised:
             parse("hierarchy", payload, "short.csv")
         missing = {
@@ -255,7 +254,7 @@ class TestHeaders:
             for issue in raised.value.issues
             if issue.code is Code.REQUIRED_COLUMN_MISSING
         }
-        assert missing == {"datahall", "rack", "rack_u_height"}
+        assert missing == {"datahall", "datahall_slug", "rack", "rack_u_height"}
 
     def test_nothing_is_parsed_when_a_required_column_is_missing(self):
         payload = csv_bytes([["location"], ["Test Region"]])
@@ -287,13 +286,15 @@ class TestHeaders:
 class TestRows:
     def test_line_numbers_are_the_ones_excel_shows(self):
         """Requirement 16.2: header is line 1, so the first data row is line 2 here."""
-        second = [*VALID_HIERARCHY_ROW[:3], "TST1-DH1-R02", "45"]
+        second = [*VALID_HIERARCHY_ROW]
+        second[4] = "TST1-DH1-R02"
         payload = hierarchy_rows(VALID_HIERARCHY_ROW, second)
         parsed = parse("hierarchy", payload, "two.csv")
         assert [row.line for row in parsed.rows] == [2, 3]
 
     def test_blank_rows_are_skipped_wherever_they_appear(self):
-        second = [*VALID_HIERARCHY_ROW[:3], "TST1-DH1-R02", "45", "", "", "", "", ""]
+        second = [*VALID_HIERARCHY_ROW]
+        second[4] = "TST1-DH1-R02"
         payload = hierarchy_rows(VALID_HIERARCHY_ROW, [], ["", "", ""], second, [])
         parsed = parse("hierarchy", payload, "gappy.csv")
         assert [row.line for row in parsed.rows] == [2, 5]
@@ -313,24 +314,35 @@ class TestRows:
 
     def test_cells_are_trimmed_and_kept_as_text(self):
         row = [
-            "  Test Region  ",
+            "  tst  ",
             " TST1 ",
-            "",
-            "DH1",
-            "",
+            " TST1-DH1 ",
+            " tst1-dh1 ",
             "TST1-DH1-R01",
             " 45 ",
             *[""] * 5,
         ]
         parsed = parse("hierarchy", hierarchy_rows(row), "spaced.csv")
-        assert parsed.rows[0].values["location"] == "Test Region"
+        assert parsed.rows[0].values["site_slug"] == "tst"
         assert parsed.rows[0].values["rack_u_height"] == "45"
 
     def test_a_cell_holding_markup_is_carried_as_text(self):
         """Requirement 5.7 / T5: the parser never interprets a cell, it only trims it."""
-        row = ["<script>alert(1)</script>", "TST1", "DH1", "TST1-DH1-R01", "45", "", "", "", "", ""]
+        row = [
+            "tst",
+            "TST1",
+            "<script>alert(1)</script>",
+            "tst1-dh1",
+            "TST1-DH1-R01",
+            "45",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]
         parsed = parse("hierarchy", hierarchy_rows(row), "markup.csv")
-        assert parsed.rows[0].values["location"] == "<script>alert(1)</script>"
+        assert parsed.rows[0].values["datahall"] == "<script>alert(1)</script>"
 
     def test_the_fingerprint_changes_with_the_file(self):
         """Requirement 10.13: the plan is bound to this."""
@@ -338,7 +350,7 @@ class TestRows:
         again = parse("hierarchy", hierarchy_rows(VALID_HIERARCHY_ROW), "a.csv")
         edited = parse(
             "hierarchy",
-            hierarchy_rows([*VALID_HIERARCHY_ROW[:4], "42", "", "", "", "", ""]),
+            hierarchy_rows([*VALID_HIERARCHY_ROW[:5], "42", *VALID_HIERARCHY_ROW[6:]]),
             "a.csv",
         )
         assert one.fingerprint == again.fingerprint
@@ -354,7 +366,19 @@ class TestXlsxSpecifics:
                 header,
                 # Numbers as numbers: openpyxl writes 45 and 19 as floats, and they must read back
                 # as the text the sheet meant.
-                ["Test Region", "TST1", "", "DH1", "", "TST1-DH1-R01", 45, 19, "active", *[""] * 3],
+                [
+                    "tst",
+                    "TST1",
+                    "TST1-DH1",
+                    "tst1-dh1",
+                    "TST1-DH1-R01",
+                    45,
+                    19,
+                    "active",
+                    "",
+                    "",
+                    "",
+                ],
             ]
         )
         parsed = parse("hierarchy", payload, "numbers.xlsx")
@@ -394,11 +418,10 @@ class TestXlsxSpecifics:
             [
                 header,
                 [
-                    "Test Region",
+                    "tst",
                     "TST1",
-                    "",
-                    "DH1",
-                    "",
+                    "TST1-DH1",
+                    "tst1-dh1",
                     "TST1-DH1-R01",
                     "45",
                     "",

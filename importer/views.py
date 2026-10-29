@@ -56,8 +56,8 @@ PAGES: dict[str, str] = {
 
 PAGE_BLURBS: dict[str, str] = {
     "hierarchy": (
-        "Creates the location (region), datacenter (site), datahall (location), and racks. "
-        "Works against an empty NetBox: it creates its own parents."
+        "Creates direct child locations and racks under an existing parent location. "
+        "The site and parent location must already exist and are never changed."
     ),
     "devices": (
         "Places devices into existing racks by face and rack unit. Racks, device roles, and "

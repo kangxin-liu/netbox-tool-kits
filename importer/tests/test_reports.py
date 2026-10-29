@@ -23,9 +23,9 @@ def issue(**overrides) -> ValidationIssue:
         "sheet": "hierarchy.csv",
         "line": 3,
         "column": "rack",
-        "value": "EXA1_DH1",
-        "expected": "<datacenter_slug>-<datahall_slug>-<rack>",
-        "message": "The rack name needs three segments.",
+        "value": "",
+        "expected": "a non-empty NetBox rack name",
+        "message": "A rack name cannot be blank.",
     }
     return ValidationIssue(**{**fields, **overrides})
 

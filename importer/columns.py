@@ -65,9 +65,10 @@ class Conflict(Enum):
 @dataclass(frozen=True)
 class ColumnSpec:
     key: str
-    """snake_case, and the exact header text a template is generated with."""
+    """snake_case identity used after header whitespace and hyphens are normalised."""
 
     label: str
+    """Exact header text generated in CSV and Excel templates."""
     required: bool
     conflict: Conflict
     help_text: str
@@ -91,71 +92,55 @@ class ColumnSpec:
 
 
 # --- Sheet 1: hierarchy, one row per rack ---------------------------------------------------
-# Location → dcim.Region, Datacenter → dcim.Site, Datahall → dcim.Location (D1). The three name
-# columns are identity columns: they are how an existing object is found, so they cannot conflict.
-#
-# The two slug columns (D9) are CONSEQUENTIAL rather than IDENTITY, which is worth a note because
-# they *are* the natural key the lookup uses. IDENTITY means "cannot differ" — a different value
-# denotes a different object — and that holds only while the slug is derived. Once an operator types
-# one, a supplied slug that disagrees with the matched object is a real disagreement to report and
-# block (Requirement 7.13), and CONSEQUENTIAL is the class that produces that. The derived fallback
-# leaves the cell blank and so never reaches the comparison at all (Requirement 7.14).
+# D16 treats the site and parent location as prepared prerequisites. The importer may create only
+# their direct child datahall and its racks. Prerequisite slugs and names are identities; the child
+# slug is consequential because an existing child may first be matched by name.
 HIERARCHY_COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec(
-        key="location",
-        label="location",
+        key="site_slug",
+        label="site_slug",
         required=True,
         conflict=Conflict.IDENTITY,
-        help_text="Geographic grouping, created as a NetBox region. A slug is derived from it",
-        example="Example Region",
+        help_text="Slug of an existing NetBox site. This importer never creates the site",
+        example="exa",
     ),
     ColumnSpec(
-        key="datacenter",
-        label="datacenter",
+        key="parent_location_slug",
+        label="parent_location_slug",
         required=True,
         conflict=Conflict.IDENTITY,
-        help_text="The facility, created as a NetBox site within the row's location",
-        example="Example One",
-    ),
-    ColumnSpec(
-        key="datacenter_slug",
-        label="datacenter_slug",
-        required=False,
-        conflict=Conflict.CONSEQUENTIAL,
         help_text=(
-            "The site's NetBox slug and the rack name's first segment. Letters, digits and "
-            "underscore, no hyphen. Derived from the datacenter name when left blank"
+            "Slug of an existing parent location in the site. This importer never creates or "
+            "moves the parent"
         ),
-        example="exa1",
+        example="exa01",
     ),
     ColumnSpec(
         key="datahall",
         label="datahall",
         required=True,
         conflict=Conflict.IDENTITY,
-        help_text="Room, created as a NetBox location inside the site. Scoped to its datacenter",
-        example="Example Hall One",
+        help_text="Child location name, resolved or created directly under the parent location",
+        example="EXA01-MMR1",
     ),
     ColumnSpec(
         key="datahall_slug",
         label="datahall_slug",
-        required=False,
+        required=True,
         conflict=Conflict.CONSEQUENTIAL,
         help_text=(
-            "The datahall's NetBox slug and the rack name's second segment. Letters, digits and "
-            "underscore, no hyphen. Derived from the datahall name when left blank"
+            "Child location slug. Required; letters, digits, hyphen and underscore are accepted. "
+            "Hierarchy comes from NetBox relationships, not from this text"
         ),
-        example="dh1",
+        example="exa01_mmr1",
     ),
     ColumnSpec(
         key="rack",
         label="rack",
         required=True,
         conflict=Conflict.IDENTITY,
-        help_text=(
-            "Must read <datacenter_slug>-<datahall_slug>-<rack> and agree with those two slugs"
-        ),
-        example="EXA1-DH1-R01",
+        help_text="Opaque NetBox rack name. Hyphens and underscores have no hierarchy meaning",
+        example="EXA01-MMR1-RK0001",
     ),
     ColumnSpec(
         key="rack_u_height",
@@ -373,6 +358,28 @@ DEVICE_COLUMNS: tuple[ColumnSpec, ...] = (
         help_text=(
             "IPv6 CIDR of the same management port. Becomes the device's primary only when "
             "no IPv4 is supplied"
+        ),
+        example="2001:db8:1::10/64",
+    ),
+    ColumnSpec(
+        key="primary_address_v4",
+        label="primary address v4",
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text=(
+            "Optional IPv4 CIDR to use as primary_ip4. It must match an address assigned to any "
+            "interface on this device, either by this row or already in NetBox"
+        ),
+        example="192.0.2.10/24",
+    ),
+    ColumnSpec(
+        key="primary_address_v6",
+        label="primary address v6",
+        required=False,
+        conflict=Conflict.CONSEQUENTIAL,
+        help_text=(
+            "Optional IPv6 CIDR to use as primary_ip6. It must match an address assigned to any "
+            "interface on this device, either by this row or already in NetBox"
         ),
         example="2001:db8:1::10/64",
     ),

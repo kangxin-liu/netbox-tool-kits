@@ -20,7 +20,10 @@ from importer.models import (
 from importer.services import revert
 from importer.tests.test_run_history import apply_now, row, validate
 
-pytestmark = pytest.mark.django_db
+pytestmark = [
+    pytest.mark.django_db,
+    pytest.mark.usefixtures("hierarchy_prerequisites"),
+]
 
 RACKS = "dcim.racks"
 DEVICES = "dcim.devices"
@@ -70,8 +73,8 @@ class TestMutationJournalIntegration:
 
         run = ImportRun.objects.get()
         mutations = list(run.mutations.all())
-        assert len(mutations) == 4
-        assert [item.sequence for item in mutations] == [1, 2, 3, 4]
+        assert len(mutations) == 2
+        assert [item.sequence for item in mutations] == [1, 2]
         assert all(item.outcome == MutationOutcome.APPLIED for item in mutations)
         assert all(item.object_id and item.post_last_updated for item in mutations)
 
@@ -271,9 +274,11 @@ class TestRevertViews:
         assert response.status_code == 302
         attempt.refresh_from_db()
         assert attempt.status == RevertStatus.REVERTED
-        assert len(netbox.deletes) == 4
+        assert len(netbox.deletes) == 2
         browser.post(reverse("importer:revert_confirm", args=[run.pk, attempt.pk]))
-        assert len(netbox.deletes) == 4
+        assert len(netbox.deletes) == 2
+        assert len(netbox.stored("dcim.sites")) == 1
+        assert len(netbox.stored("dcim.locations")) == 1  # prepared parent remains
 
     def test_revert_routes_are_post_only(self, browser, netbox):
         validate(browser, [row()])

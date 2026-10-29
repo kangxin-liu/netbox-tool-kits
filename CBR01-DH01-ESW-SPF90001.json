@@ -1,0 +1,283 @@
+{
+  "device": {
+    "id": 4305,
+    "name": "CBR01-DH01-ESW-SPF90001"
+  },
+  "interface_count": 22,
+  "ip_address_count": 1,
+  "interfaces": [
+    {
+      "id": 39618,
+      "name": "eth0",
+      "type": "1000base-t",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [
+        {
+          "id": 9390,
+          "address": "10.151.160.212/24",
+          "vrf": null,
+          "dns_name": "",
+          "status": "active"
+        }
+      ],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110532,
+      "name": "swp1",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": [
+        {
+          "id": 110625,
+          "name": "swp1s0",
+          "type": "virtual",
+          "enabled": true,
+          "description": "",
+          "mtu": null,
+          "parent_id": 110532,
+          "lag_id": null,
+          "ip_addresses": [],
+          "sub_interfaces": []
+        },
+        {
+          "id": 110626,
+          "name": "swp1s1",
+          "type": "virtual",
+          "enabled": true,
+          "description": "",
+          "mtu": null,
+          "parent_id": 110532,
+          "lag_id": null,
+          "ip_addresses": [],
+          "sub_interfaces": []
+        }
+      ]
+    },
+    {
+      "id": 110378,
+      "name": "swp49",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110380,
+      "name": "swp50",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110382,
+      "name": "swp51",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110384,
+      "name": "swp52",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110386,
+      "name": "swp53",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110388,
+      "name": "swp54",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110390,
+      "name": "swp55",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110392,
+      "name": "swp56",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110410,
+      "name": "swp57",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110412,
+      "name": "swp58",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110414,
+      "name": "swp59",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110416,
+      "name": "swp60",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110418,
+      "name": "swp61",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110420,
+      "name": "swp62",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110422,
+      "name": "swp63",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 110424,
+      "name": "swp64",
+      "type": "800gbase-x-osfp",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 39619,
+      "name": "swp65",
+      "type": "25gbase-x-sfp28",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    },
+    {
+      "id": 39620,
+      "name": "swp66",
+      "type": "25gbase-x-sfp28",
+      "enabled": true,
+      "description": "",
+      "mtu": null,
+      "parent_id": null,
+      "lag_id": null,
+      "ip_addresses": [],
+      "sub_interfaces": []
+    }
+  ]
+}

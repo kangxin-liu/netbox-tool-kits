@@ -111,12 +111,22 @@ class TestConnectionStatus:
 
 class TestHierarchyReadiness:
     @responses.activate
-    def test_the_hierarchy_importer_needs_no_prerequisites(self, netbox):
-        """Requirement 17.7: sheet 1 works against a completely empty instance."""
+    def test_an_empty_instance_reports_missing_site_and_parent(self, netbox):
+        stub_count("dcim/sites", 0)
+        stub_count("dcim/locations", 0)
+        summary = readiness.readiness_for("hierarchy", netbox)
+        assert summary.ready is False
+        assert len(summary.blockers) == 2
+        assert no_writes_were_issued()
+
+    @responses.activate
+    def test_sites_and_locations_make_the_hierarchy_page_ready(self, netbox):
+        stub_count("dcim/sites", 3)
+        stub_count("dcim/locations", 8)
         summary = readiness.readiness_for("hierarchy", netbox)
         assert summary.ready is True
         assert summary.blockers == []
-        assert len(responses.calls) == 0
+        assert "existing site and parent location" in summary.note
 
 
 class TestDevicesReadiness:

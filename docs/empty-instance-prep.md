@@ -3,10 +3,9 @@
 Classification: INTERNAL. Nothing here holds a credential; the API token you create belongs in `.env`
 or your secret manager, never in a commit.
 
-A brand-new NetBox has no device roles, no manufacturers, no device types, and no patch panels.
-Iteration 1 of this tool creates none of those — it creates the DCIM objects its three sheets
-describe, and on the device sheet the loopback and management addresses assigned to those devices,
-and nothing else — so on an unprepared instance the device and cabling importers have
+A brand-new NetBox has no sites, locations, device roles, manufacturers, device types, or patch
+panels. Iteration 1 creates only direct child locations, racks, devices, addresses, and cables, so
+on an unprepared instance all three importers have
 nothing to resolve against. That is expected, and each page's readiness panel says so before you
 upload anything.
 
@@ -14,12 +13,15 @@ What that means in practice:
 
 | Sheet | On a brand-new instance |
 | --- | --- |
-| 1. Hierarchy | **works immediately.** It creates its own parents: region, site, location, racks |
+| 1. Hierarchy | needs the target site and parent location; creates direct child locations and racks |
 | 2. Devices | needs device roles and device types to exist first, with `mgmt_only` and `loopback` marked on network types |
 | 3. Cabling | needs devices that have ports, which means device types with port templates |
 
-So a new instance is always usable for sheet 1 first. Everything below is preparation for sheets 2
-and 3.
+Prepare the site and parent location before sheet 1. Everything else below prepares sheets 2 and 3.
+
+For each hierarchy scope, create the site first, then create the parent location with that site
+selected. Record both slugs exactly. The hierarchy sheet uses `site_slug` and
+`parent_location_slug` to resolve these prerequisites and will not create or re-parent them.
 
 ## 1. A local NetBox, if you need one
 
@@ -232,7 +234,7 @@ Load each importer page and read its readiness panel — it is strictly read-onl
 
 | Page | Tells you |
 | --- | --- |
-| Hierarchy | that it needs no prerequisites |
+| Hierarchy | how many sites and locations exist, and that each row needs an existing site and parent location |
 | Devices | whether the default role resolves, how many roles and device types exist, and how many of those types define a management (`mgmt_only`) and a loopback interface |
 | Cabling | how many devices exist, how many interfaces and panel ports they have, and whether all three breakout tag slugs exist |
 

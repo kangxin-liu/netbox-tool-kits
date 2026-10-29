@@ -6,7 +6,7 @@ A small Django web application that lets an authenticated engineer populate a Ne
 from spreadsheets. It connects to NetBox with a URL and API token taken from environment
 configuration, and exposes three importer pages reachable from a shared nav bar:
 
-1. **Site & rack hierarchy** — location, datacenter, datahall, racks
+1. **Child-location & rack hierarchy** — datahalls and racks beneath an existing site/location
 2. **Devices** — placed into racks by face and rack unit
 3. **Cabling** — device and patch-panel terminations
 
@@ -26,23 +26,22 @@ The spreadsheets use the engineers' vocabulary. NetBox's DCIM model is the targe
 
 | Sheet term | NetBox object | Notes |
 | --- | --- | --- |
-| Location | `dcim.Region` | Geographic grouping, e.g. a metro or country |
-| Datacenter | `dcim.Site` | The physical facility. Its slug is the rack name's first segment |
-| Datahall / room | `dcim.Location` | A child location scoped to the site. Its slug is the rack name's second segment |
+| Region | `dcim.Region` | Existing geographic grouping; hierarchy import does not create it |
+| Site / datacenter | `dcim.Site` | Existing physical facility, resolved by `site_slug` |
+| Parent location | `dcim.Location` | Existing site-scoped container, resolved by `parent_location_slug` |
+| Datahall / room | `dcim.Location` | Existing or new direct child of the parent location |
 | Rack | `dcim.Rack` | Assigned to both the site and the datahall location |
 | Model | `dcim.DeviceType` | Matched by model name (and manufacturer when creating) |
 | Panel | `dcim.Device` with front/rear ports | A patch panel is an ordinary device in NetBox |
 | Management interface | `dcim.Interface` with `mgmt_only=true` | Named on the device type, never in the sheet. Arista `Management1`, Juniper `fxp0`/`em0`/`me0`, Cumulus `eth0` are all the same role |
 | Loopback interface | `dcim.Interface` with type `loopback` | Likewise named on the device type. Arista `Loopback0`, Juniper `lo0`, Cumulus `lo` are all the same role |
 
-**Naming convention.** A rack name is `<datacenter_slug>-<datahall_slug>-<rack>`, for example
-`SYD1-DH1-R01` where the slugs are `syd1` and `dh1`. This is the join key used by all three sheets.
-
-The first two segments are the *slugs* of the datacenter and the datahall, not their names, so that
-display names can stay human — "Sydney One", "Data Hall 1" — while the rack name stays short. The
-sheet supplies those slugs in their own columns, falling back to a slug derived from the name
-(Requirement 7.10). Because the name is split on `RACK_NAME_DELIMITER`, neither slug may contain that
-character (Requirement 6.6).
+**Rack identity.** A rack name is an opaque NetBox name and the join key between the hierarchy and
+device sheets. The cabling sheet names devices and does not parse rack names.
+The tool does not infer a site, parent location, or datahall from delimiter-separated pieces of that
+name. Hierarchy is validated from NetBox foreign-key relationships. This permits valid slugs and
+names containing `-` or `_`, such as child slug `bth01_mmr1` and rack
+`BTH01-MMR1-RK0001`, without pretending punctuation proves ancestry.
 
 ## Requirement 1: Local admin-only access
 
@@ -161,102 +160,86 @@ safely, so that a malformed or oversized file cannot break the tool.
  identified by its leading marker — without treating it as data, so that a template filled in below
  the guidance can be uploaded as downloaded.
 
-## Requirement 6: Rack naming convention
+## Requirement 6: Rack identity
 
-**User Story:** As an engineer, I want rack names to follow `datacenter_slug-datahall_slug-rack`
-consistently, so that the device and cabling sheets can reference racks unambiguously and a rack name
-stays short even where the datacenter and datahall have long display names.
-
-### Acceptance Criteria
-
-1. The system SHALL parse a rack name into exactly three segments split on
- `RACK_NAME_DELIMITER` (default `-`).
-2. IF a rack name does not yield exactly three non-empty segments, THEN the system SHALL reject
- that row with an error quoting the received value and the expected pattern.
-3. WHEN the hierarchy sheet supplies a rack name whose first or second segment disagrees with that
- row's effective datacenter or datahall slug (Requirement 7.10), THEN the system SHALL reject the row
- and state both values.
-4. The system SHALL compare rack names case-insensitively for lookup while preserving the
- supplied casing for any object it creates. A rack may therefore be named `SYD1-DH1-R01` where the
- slugs are `syd1` and `dh1`, and a sheet that predates the slug columns keeps working wherever the
- datacenter and datahall names are single tokens.
-5. The system SHALL implement this convention in exactly one module, so that changing the
- delimiter or segment count is a single-file change.
-6. The system SHALL reject any datacenter or datahall slug containing `RACK_NAME_DELIMITER`, whether
- that slug was supplied or derived, because the rack name is split on that character and an embedded
- delimiter would make the segment boundaries ambiguous — `syd-1` and `dh1` would produce a
- four-segment name. NetBox's own slug charset permits the hyphen, so this restriction belongs to the
- tool, and the error SHALL name the forbidden character and offer `_` as the alternative.
-7. The system SHALL express 6.6 in terms of `RACK_NAME_DELIMITER` and not a literal hyphen, so that
- configuring `_` as the delimiter forbids `_` inside slugs and permits `-`, which is what keeps 6.5
- true.
-
-## Requirement 7: Site and rack hierarchy import
-
-**User Story:** As an engineer commissioning a new hall, I want to upload one sheet that creates
-the location, datacenter, datahall, and all its racks, so that I can lay the foundation in one
-step.
+**User Story:** As an engineer, I want every sheet that names a rack to use its exact NetBox name as an
+unambiguous join key, without rejecting valid names merely because a location slug or rack name
+contains punctuation.
 
 ### Acceptance Criteria
 
-Sheet columns — required: `location`, `datacenter`, `datahall`, `rack`, `rack_u_height`.
-Optional: `datacenter_slug`, `datahall_slug`, `rack_width`, `rack_status`, `rack_form_factor`,
-`tenant`, `description`.
+1. The system SHALL accept any non-empty rack name that NetBox accepts; `-` and `_` are ordinary
+ characters and SHALL NOT be interpreted as hierarchy delimiters.
+2. The system SHALL compare rack names case-insensitively for lookup while preserving the supplied
+ casing for a rack it creates.
+3. The hierarchy importer SHALL establish a rack's site and datahall from the resolved objects in
+ that row, never by parsing the rack name.
+4. The device importer SHALL treat the complete rack cell as an opaque natural key and SHALL reject
+ an absent or ambiguous lookup rather than attempting to derive another spelling. The cabling
+ importer SHALL likewise treat device names as opaque and SHALL NOT infer a rack from them.
+5. IF the same rack name resolves to more than one NetBox rack, THEN the system SHALL block and name
+ every candidate's site and location; it SHALL NOT guess from substrings in the rack name.
+6. An organisation MAY encode a location code in a rack name, but that convention is outside the
+ importer's integrity model. NetBox's `site`, `parent`, and `location` relationships are
+ authoritative.
 
-`datacenter_slug` and `datahall_slug` are optional rather than required so that a sheet written
-before they existed still validates: a blank cell falls back to a slug derived from the name, which
-for a single-token name such as `SYD1` reproduces exactly what the tool derived before. They become
-necessary as soon as a name is multi-word, because the derived slug would then contain the rack-name
-delimiter (Requirement 6.6). The region has no slug column: its slug is never part of a rack name, so
-nothing the operator can see depends on it.
+## Requirement 7: Child-location and rack hierarchy import
+
+**User Story:** As an engineer commissioning a new hall, I want to upload one sheet that creates or
+reuses a datahall beneath an existing parent location and creates its racks, without changing the
+prepared region, site, or parent location.
+
+### Acceptance Criteria
+
+Sheet columns — required: `site_slug`, `parent_location_slug`, `datahall`, `datahall_slug`, `rack`,
+`rack_u_height`. Optional: `rack_width`, `rack_status`, `rack_form_factor`, `tenant`, `description`.
+
+The site and parent location are prerequisites, identified by their existing slugs. Both datahall
+name and slug are required because they describe the child object the row may create; no slug is
+derived and no string-containment relationship among the three slugs/names is assumed.
 
 The column is `rack_form_factor`, not `rack_type`: NetBox 4.2 renamed `Rack.type` to
 `Rack.form_factor` and gave `rack_type` to a foreign key pointing at the separate `RackType` model.
 A column named `rack_type` carrying `4-post-cabinet` would therefore be aimed at the wrong field.
 
-1. The system SHALL accept one row per rack, with the location, datacenter, and datahall values
- repeated across the rows that share them.
-2. WHEN a row's location, datacenter, or datahall does not exist in NetBox, THEN the system SHALL
- create it, creating parents before children in the order region → site → location.
-3. The system SHALL set a URL-safe slug on every region, site, and datahall location it creates,
- since NetBox requires one on all three: taken verbatim from `datacenter_slug` or `datahall_slug`
- where that column is non-blank, and derived from the object's name otherwise. It SHALL reject a row
- whose slug, supplied or derived, collides with a *differently named* existing object.
-4. WHEN creating a site, THEN the system SHALL assign it to the region created or matched for
- that row; WHEN creating a datahall, THEN the system SHALL assign it to that site.
-5. WHEN creating a rack, THEN the system SHALL set its site and its datahall location, and SHALL
- apply `rack_u_height` as the rack's height in units.
-6. IF `rack_u_height` is not a positive integer within NetBox's permitted range, THEN the system
+1. The system SHALL accept one row per rack, with `site_slug`, `parent_location_slug`, `datahall`,
+ and `datahall_slug` repeated across rows sharing the same child location.
+2. The system SHALL require exactly one existing site whose slug case-insensitively equals
+ `site_slug`; a missing or ambiguous site SHALL block the row and nothing above the datahall SHALL be
+ created.
+3. The system SHALL require exactly one existing parent location whose slug case-insensitively
+ equals `parent_location_slug` and whose `site` is the resolved site. A missing, ambiguous, or
+ differently sited parent SHALL block the row.
+4. The system SHALL resolve a datahall within the tuple `(site, parent location, name or slug)`.
+ IF none exists, it SHALL create `dcim.Location` with the supplied `datahall` name,
+ `datahall_slug`, resolved site, and resolved parent location.
+5. IF name and slug resolve to different child locations, THEN the system SHALL block as ambiguous.
+ IF one existing datahall matches by name or slug but its site, parent, name, or slug differs from
+ the row, THEN the system SHALL raise a blocking ERROR naming both values; it SHALL never rename or
+ re-parent an existing location.
+6. The system SHALL validate `site_slug`, `parent_location_slug`, and `datahall_slug` against
+ NetBox's complete slug contract: letters, digits, `-`, and `_`, maximum 100 characters. Hyphen and
+ underscore SHALL both be accepted.
+7. The system SHALL NOT require `datahall_slug` to contain `site_slug` or
+ `parent_location_slug`. The resolved NetBox relationships, not textual prefixes, prove ancestry.
+8. IF two rows give one `(site, parent, datahall name)` different datahall slugs, or one
+ `(site, parent, datahall slug)` different names, THEN the system SHALL reject the later row and
+ name the earlier line.
+9. WHEN creating a rack, the system SHALL set its site to the resolved site and its location to the
+ resolved child datahall, and SHALL apply `rack_u_height` as the rack's height in units.
+10. IF an existing rack with the supplied name belongs to a different site or datahall, THEN the
+ system SHALL block and SHALL never move it.
+11. IF `rack_u_height` is not a positive integer within NetBox's permitted range, THEN the system
  SHALL reject that row.
-7. The system SHALL default `rack_width` to 19 inches and `rack_status` to `active` when the
- optional columns are absent or blank, and SHALL validate supplied values against the choices
- NetBox reports.
-8. IF two rows in one sheet declare the same rack name, THEN the system SHALL reject the later
- row as a duplicate and name the earlier row number.
-9. WHEN a datahall is referenced by rows belonging to different datacenters, THEN the system
- SHALL treat them as distinct datahalls, since a NetBox location is scoped to its site.
-10. The system SHALL define a level's **effective slug** as the supplied slug where its column is
- non-blank and the slug derived from its name otherwise, and SHALL use that single value for the
- NetBox lookup, for the created object's `slug`, and for the rack-name agreement check of
- Requirement 6.3 — so that those three readings of "the slug" cannot disagree with one another.
-11. IF a supplied slug falls outside NetBox's slug charset of letters, digits, hyphen and underscore,
- THEN the system SHALL reject the row against the slug column. IF an effective slug contains
- `RACK_NAME_DELIMITER`, THEN the system SHALL reject the row, locating the issue on the **slug**
- column where the slug was supplied and on the **name** column where it was derived — in the latter
- case the operator's fix is to fill the slug column in, so that is where the error must point.
-12. IF two rows give one datacenter or datahall name two different effective slugs, THEN the system
- SHALL reject the later row and name the earlier row's number, since one object cannot hold two
- slugs. IF two rows give two different names one effective slug, THEN the system SHALL reject the
- later row as a collision, since NetBox would treat them as a single object. Datahall slugs SHALL be
- compared within a datacenter and not globally, following 7.9.
-13. IF a site or datahall already exists in NetBox and the sheet **supplied** a slug differing from
- the one it holds, THEN the system SHALL raise a blocking ERROR naming both values, because iteration
- 1 never updates an existing object (Requirement 11.3) and the row asks for something the tool cannot
- deliver. A region can never reach this case, having no slug column.
-14. WHERE the slug column is blank or absent and a **derived** slug differs from what a matched object
- holds, the system SHALL match on name and proceed, since a derived slug is the tool's guess rather
- than the operator's assertion and an object created outside this tool has no reason to match it. This
- is what keeps a region — and any sheet predating the slug columns — behaving exactly as before.
+12. The system SHALL default `rack_width` to 19 inches and `rack_status` to `active` when the
+ optional columns are absent or blank, and SHALL validate supplied values against choices NetBox
+ reports.
+13. IF two rows in one sheet declare the same rack name, THEN the system SHALL reject the later row
+ as a duplicate and name the earlier row.
+14. The create order SHALL be child locations before racks. Region, site, and parent location SHALL
+ never appear in the create plan or mutation journal for a hierarchy run.
+15. Re-uploading an applied sheet SHALL resolve existing child locations and racks by the same
+ scoped keys and create nothing.
 
 ## Requirement 8: Device import
 
@@ -268,9 +251,11 @@ device by device.
 
 Sheet columns — required: `rack`, `rack_face`, `bottom_ru`, `ru_height`, `device_name`, `model`.
 Optional: `serial`, `manufacturer`, `device_role`, `status`, `asset_tag`, `tenant`,
-`loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`.
+`loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`, `primary address v4`, and
+`primary address v6`. Header normalisation maps the two space-separated labels to the internal keys
+`primary_address_v4` and `primary_address_v6`.
 
-The four address columns are optional as *columns* so a sheet written before they existed still
+The four interface-address columns are optional as *columns* so a sheet written before they existed still
 parses, and so a patch panel — whose device type has neither interface — can leave all four cells
 blank. They are not optional as *values* on a device whose type defines those interfaces: at least
 one of the four cells must be filled, which is decision **D11**. Dual-stack is first-class: each
@@ -278,7 +263,9 @@ role has an IPv4 column and an IPv6 column, and a row may fill any non-empty sub
 *names* are not columns. Arista, Juniper and Nvidia Cumulus all call the management port something
 different, and the same is true of the loopback; putting those names in the sheet would copy the
 vendor problem onto every row. They belong on the device type, which is where NetBox already keeps
-them.
+them. The two primary-address columns are optional as both columns and values. A blank primary cell
+requests no primary-IP change for that family; the importer SHALL NOT infer one from management or
+loopback.
 
 1. WHEN a row's `rack` does not resolve to exactly one existing rack, THEN the system SHALL
  reject that row and SHALL NOT create the rack.
@@ -312,12 +299,14 @@ them.
 Criteria 8.13–8.26 are decision **D11** — dual-stack loopback and management addresses, and the
 primary IP.
 
-13. The system SHALL accept optional `loopback_ip4`, `loopback_ip6`, `management_ip4`, and
- `management_ip6` columns. A non-blank cell SHALL be a CIDR host address with an explicit prefix
+13. The system SHALL accept optional `loopback_ip4`, `loopback_ip6`, `management_ip4`,
+ `management_ip6`, `primary address v4`, and `primary address v6` columns. A non-blank cell SHALL
+ be a CIDR host address with an explicit prefix
  length (`10.0.0.1/32`, `2001:db8::1/128`); a host with no prefix is rejected rather than defaulted
  to `/32` or `/128`, because a silent mask is how two engineers end up with different addresses from
- the same cell. An `*_ip4` cell SHALL be IPv4 and an `*_ip6` cell SHALL be IPv6; a family that
- disagrees with its column is rejected against that column, not silently swapped.
+ the same cell. `loopback_ip4`, `management_ip4`, and `primary address v4` SHALL be IPv4;
+ `loopback_ip6`, `management_ip6`, and `primary address v6` SHALL be IPv6. A family that disagrees
+ with its column is rejected against that column, not silently swapped.
 14. WHEN the resolved device type (or, for an existing device, the device itself) has at least one
  management or loopback interface as defined in 8.16, THEN the system SHALL require at least one of
  the four address cells to be non-blank, and SHALL reject a row that fills none. WHEN the type has
@@ -342,31 +331,36 @@ primary IP.
  resolved interface (`assigned_object_type=dcim.interface`, `assigned_object_id` of that interface,
  `status=active`) and SHALL NOT create prefixes, VRFs, or VLANs. A covering prefix is not required;
  NetBox accepts an address without one. A row may create up to four addresses.
-18. The system SHALL choose the device's primary IP by family first, then by role: IPv4 is preferred
- over IPv6 unless no IPv4 address is supplied on that row; within a family, the management address
- wins over the loopback. Concretely: `primary_ip4` is `management_ip4` if that cell is non-blank,
- otherwise `loopback_ip4` if that cell is non-blank, otherwise unset; `primary_ip6` is
- `management_ip6` if that cell is non-blank, otherwise `loopback_ip6` if that cell is non-blank,
- otherwise unset. Every supplied address is still assigned to its interface. NetBox's own
- `primary_ip` (the address shown on the device) is `primary_ip4` when it is set and `primary_ip6`
- only when it is not — so a row that supplies both families is reached at its IPv4, and a
- v6-only row is reached at its IPv6. `oob_ip` is not written — see D11.
+18. A non-blank `primary address v4` or `primary address v6` SHALL explicitly select the device's
+ `primary_ip4` or `primary_ip6`, respectively. The selected address SHALL resolve to exactly one
+ `ipam.IPAddress` assigned to any interface on that device. The matching address MAY be supplied in
+ one of the four interface-address cells on the same row and created by this run, or MAY already be
+ assigned to an interface on an existing device. It need not be on the management or loopback
+ interface. An address that is absent, unassigned, assigned to another device, or of the wrong family
+ SHALL block the row. A primary-address cell is a reference, not a request to create an address.
+ Blank primary-address cells SHALL leave that family's primary IP unset on a new device and unchanged
+ on an existing device; no management-over-loopback default is inferred. If both cells are supplied,
+ both family-specific fields are set; NetBox's own `primary_ip` display still prefers `primary_ip4`
+ when both exist. `oob_ip` is not written — see D11.
 19. NetBox cannot accept a primary IP at device-create time because the address does not exist yet.
  After the address creates of 8.17 return, the system MAY PATCH the device with only `primary_ip4`
- and/or `primary_ip6` pointing at the IPs selected by 8.18, and SHALL send no other field on that
+ and/or `primary_ip6` pointing at the explicitly selected IPs of 8.18, and SHALL send no other field on that
  PATCH. This is the first of Requirement 11.3's two field-scoped forward-PATCH exceptions; D15 adds
  only the parent-interface `tags` exception of 9.49. The system SHALL NOT PATCH a primary IP that is
  already set to a different address — that is the consequential conflict of 11.5.
 20. Applying a device row SHALL be ordered: create the device (or skip it per 8.10), then create the
- addresses against its interfaces, then PATCH the primary IP fields. A re-upload whose device
- already exists therefore still creates missing addresses and still sets an unset primary, which is
- what makes a sheet that gained these columns finish the devices it created last week.
+ supplied interface addresses, resolve each non-blank primary-address reference across both those
+ newly created addresses and addresses already assigned to the device, then PATCH the selected
+ primary-IP fields. A re-upload whose device already exists therefore still creates missing
+ addresses and may set an unset primary to either a same-row or pre-existing interface address.
 21. IF an address already exists in NetBox assigned to the intended interface, THEN the system SHALL
  skip creating it. IF it exists assigned to a different object, or unassigned, THEN the system SHALL
  raise a blocking ERROR identifying the holder, matching the asset-tag collision of 11.6: the create
  would fail or, worse, steal an address.
 22. IF two cells in one sheet declare the same address — two rows, or two columns of one row —
- THEN the system SHALL reject the later cell and name the earlier location.
+ THEN the system SHALL reject the later declaration and name the earlier location. A primary-address
+ cell that repeats an interface-address cell is a reference to that declaration and SHALL NOT be
+ reported as a duplicate.
 23. IF an existing device is missing the interface its type now defines — NetBox does not copy
  templates onto devices that already exist — THEN the system SHALL create that interface from the
  template, by the same rule and from the same source as 9.25, and assign the address to it. **Amended
@@ -381,15 +375,17 @@ primary IP.
  that the device sheet cannot invent a name at all, so it has no typo path to guard against.
 24. The system SHALL compare addresses as structured IP values, not as strings, so
  `2001:db8:0:0::1/128` and `2001:db8::1/128` are the same address (Requirement 11.5b).
-25. `loopback_ip4`, `loopback_ip6`, `management_ip4`, and `management_ip6` are **consequential**
+25. `loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`,
+ `primary_address_v4`, and `primary_address_v6` are **consequential**
  (Requirement 11.5, decision D8): an existing device whose assigned address or primary IP disagrees
  with the sheet blocks, because later automation reaching the device by the sheet's address would
  reach the wrong place. They are not descriptive, and they are not identity — a different address
  is not a different device.
 26. The plan preview SHALL name, for each supplied address, the resolved interface (so `eth0`
- versus `Management1` is visible before apply), the address that will be assigned to it, and which
- address will be `primary_ip4`, which will be `primary_ip6`, and which of those NetBox will show as
- the device's primary.
+ versus `Management1` is visible before apply), the address that will be assigned to it, each
+ explicit primary-address selection and whether it comes from this row or already exists on the
+ device, which address will be `primary_ip4`, which will be `primary_ip6`, and which of those NetBox
+ will show as the device's primary.
 
 ## Requirement 9: Cabling import
 
@@ -755,10 +751,10 @@ can finish a partial import without creating duplicates.
 
 ### Acceptance Criteria
 
-1. Before creating any object, the system SHALL look it up by natural key — slug for regions and
- sites, name within parent scope for locations, racks, and devices, and existing termination
- occupancy for cables. For regions, sites, and datahalls the slug used is the effective slug of
- Requirement 7.10, so a sheet that states a slug is looked up by the slug it states.
+1. Before creating any object, the system SHALL look it up by natural key — site slug; location name
+ or slug within `(site, parent)` scope; rack name; device name; and existing termination occupancy
+ for cables. Hierarchy prerequisite lookups and child-location creates SHALL use the exact supplied
+ slugs from Requirement 7.
 2. WHEN a matching object exists, THEN the system SHALL skip it, record it as already present,
  and continue with the row's remaining work.
 3. A forward apply SHALL NOT update, rename, re-parent, or delete any existing NetBox object, even
@@ -783,12 +779,12 @@ can finish a partial import without creating duplicates.
  NetBox holds, THEN the system SHALL raise a blocking ERROR naming the field, the sheet value, and
  the NetBox value, because iteration 1 cannot reconcile the difference by updating, and because a
  difference in these fields means later rows are built on a false premise (decision D8).
- Consequential fields are: a region's parent; a site's region; a location's site and parent; a
+ Consequential fields are: a location's site and parent; a
  rack's `u_height` and `width`; a device's rack, position, face, and device type; a device's
- `loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`, and primary IP (Requirement
- 8.25); a cable's `type` and
- `profile`; and a slug the sheet supplied explicitly for a site or datahall, per Requirement 7.13 — a
- slug the tool merely derived is not consequential, per 7.14. A cable's `profile` sits on this side
+ `loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`, `primary_address_v4`, and
+ `primary_address_v6` (Requirement 8.25); a cable's `type` and
+ `profile`; and a datahall slug that differs on a child matched by name. A cable's
+ `profile` sits on this side
  because it is what NetBox traces lanes through: an existing cable profiled differently from the sheet
  means the operator's picture of that link is wrong, not merely differently labelled.
 5a. IF the differing value is **descriptive** — one that nothing else in the import depends on —
@@ -965,9 +961,9 @@ rather than to appear broken.
  `loopback`-typed interface on each network device type (community templates often type a loopback
  as `virtual` — that is not this tool's loopback), and building at least one patch panel whose
  front-to-rear port mappings use the NetBox 4.5+ `rear_ports` format.
-7. WHEN the hierarchy importer runs against a completely empty instance, THEN it SHALL succeed
- without prerequisites, since it creates its own parents — so a new instance is always usable for
- sheet 1 first.
+7. The hierarchy readiness summary SHALL state that at least one site and parent location must
+ already exist. A completely empty instance SHALL block hierarchy validation without writing, because
+ the importer does not invent geographic or facility structure.
 8. The empty-instance runbook SHALL require administrators to create the three D15 tag slugs before
  a parented cable profile using the corresponding factor is uploaded. A missing unused factor tag
  MAY appear as a readiness warning but SHALL block validation only when the sheet actually requires
@@ -1054,22 +1050,22 @@ without guessing or deleting unrelated NetBox data.
  create panels, and D12 does not change that: it creates device interfaces only (9.29). A front port
  is meaningless without the rear port and position it maps to, and that mapping is a property of the
  panel's internals rather than of any link, so it stays device-type preparation.
-6. Rack names are globally unique in practice because they embed the datacenter and datahall slugs.
+6. Rack names are used as cross-sheet natural keys. Deployments SHALL keep them globally
+ unambiguous; punctuation and textual prefixes do not establish scope.
 7. NetBox field names are taken from the target instance rather than from memory. Two 4.x renames
  caught during spec verification against 4.6.8 are worth naming, because a sheet column pointed at
  the old name would fail or, worse, hit a different field: `Rack.type` became `Rack.form_factor` in
  4.2 (`rack_type` is now a foreign key to the `RackType` model), and `dcim.Location` requires a
  `slug` just as regions and sites do.
-8. NetBox validates a slug against `^[-a-zA-Z0-9_]+$` with a maximum length of 100, so the hyphen is
- legal in a NetBox slug even though Requirement 6.6 forbids it in the two slugs that a rack name is
- built from. Uppercase is likewise legal, and a supplied slug is submitted with the casing the sheet
- gave it rather than being folded, matching Requirement 6.4's treatment of names.
+8. NetBox validates a slug against `^[-a-zA-Z0-9_]+$` with a maximum length of 100. The hierarchy
+ importer accepts that complete contract; uppercase is legal, and a supplied slug is submitted with
+ the casing the sheet gave it while comparisons are case-insensitive.
 
 ## Decisions
 
-- **D1 — Hierarchy mapping. DECIDED:** Location → `dcim.Region`, Datacenter → `dcim.Site`,
- Datahall → `dcim.Location`. (`dcim.SiteGroup` was the alternative, for an organisational rather
- than geographic top level.)
+- **D1 — Original hierarchy mapping. SUPERSEDED for forward hierarchy import by D16:** Location →
+ `dcim.Region`, Datacenter → `dcim.Site`, Datahall → `dcim.Location`. D16 retains the object types
+ but makes region/site/parent location prerequisites instead of create targets.
 - **D2 — Device role. DECIDED:** optional `device_role` column plus a configurable default role
  slug, rejecting the row when neither resolves. NetBox requires a role on every device and it was
  not among the requested columns.
@@ -1105,7 +1101,7 @@ without guessing or deleting unrelated NetBox data.
  reads cannot produce a wrong result, so it warns and the operator acknowledges it. Blocking on
  everything would have made a one-word description mismatch stop a 4,000-row import, which is how a
  safety gate loses its credibility and gets switched off. See Requirements 11.5, 11.5a, 11.5b.
-- **D9 — Slugs in the sheet, and in rack names. DECIDED:** the hierarchy sheet gains optional
+- **D9 — Slugs in the sheet, and in rack names. SUPERSEDED by D16:** the hierarchy sheet gains optional
  `datacenter_slug` and `datahall_slug` columns, and a rack name is built from those two slugs rather
  than from the datacenter and datahall names. Deriving the slug from the name was fine while the slug
  was invisible plumbing, but it forced the *name* to double as the short code: a datacenter had to be
@@ -1115,12 +1111,13 @@ without guessing or deleting unrelated NetBox data.
  breaks and the single-token cases keep working untouched. **A supplied slug that disagrees with an
  existing object blocks** rather than warning — the operator asserted a value that iteration 1
  cannot write, and silently using a different one would leave rack names pointing at a slug NetBox
- does not have. **A derived slug that disagrees does not block** (Requirement 7.14): applying the
+ does not have. **A derived slug that disagrees does not block** under the former hierarchy
+ contract: applying the
  blocking rule to the fallback would make every pre-existing object whose slug this tool did not
  derive start rejecting rows that work today.
  The alternative — keep deriving, and require the *name* to be delimiter-free — was rejected because
  it fixes the rack-name problem by making the names worse, which is the constraint the change set out
- to remove. The cost of D9 is that the delimiter ban of Requirement 6.6 becomes load-bearing, and
+ to remove. The cost of D9 was that its delimiter ban became load-bearing, and
  that a multi-word name now needs its slug column filled in.
 - **D10 — Cable profiles and breakout. PROPOSED, awaiting review.** The cabling sheet gains two
  optional columns: `cable_profile`, validated against NetBox's own profile choices, and `cable_group`,
@@ -1151,21 +1148,22 @@ without guessing or deleting unrelated NetBox data.
  `BaseImporter`, and the per-line report attribution. Nothing outside the cabling path changes.
 
 - **D11 — Dual-stack loopback and management addresses on the device sheet. PROPOSED, awaiting
- review.** The device sheet gains four optional columns: `loopback_ip4`, `loopback_ip6`,
- `management_ip4`, `management_ip6`. At least one must be filled on any row whose device type
- defines those interfaces. Primary IP is chosen by family first, then by role: IPv4 wins over IPv6
- unless the row supplies no IPv4 at all; within a family, management wins over loopback. Interface
- names are not columns.
+ review.** The device sheet gains four optional interface-address columns: `loopback_ip4`,
+ `loopback_ip6`, `management_ip4`, `management_ip6`. At least one must be filled on any row whose
+ device type defines those interfaces. It also gains optional `primary address v4` and
+ `primary address v6` columns. Each non-blank primary column explicitly references an address
+ assigned to any interface on the device, whether supplied by the same row or already present in
+ NetBox. Blank primary columns request no primary-IP change. Interface names are not columns.
  **Why four columns rather than two cells that accept either family.** A single `loopback_ip` that
  might be v4 or v6 cannot say "both". Comma-separated dual values in one cell are how a sheet
  becomes un-diffable and how a missing mask on one of two addresses is reported against the wrong
  one. Four columns make family a property of the header, which is what S2 can check.
- **Why family first, then role.** "IPv4 preferred unless no IPv4 is supplied for the device" is a
- property of the row, not of a role. A row with `management_ip6` and `loopback_ip4` is therefore
- reached at the loopback IPv4, with the management IPv6 still assigned and written as
- `primary_ip6`. Role-first would have made that device v6-primary while an IPv4 sat on it, which is
- the opposite of the preference. Within the winning family, management still beats loopback, which
- is the original rule for a single-family row.
+ **Why primary selection is explicit.** Interface role does not always determine reachability:
+ operations may use a loopback, management address, or an address on another interface. Inferring
+ management-over-loopback made the spreadsheet unable to express that intent and could select an
+ address merely because it was present. Separate family-specific reference columns preserve
+ dual-stack and let an existing device select an address already assigned to any of its interfaces
+ without re-declaring or moving that address.
  **Why the names stay on the device type.** Arista uses `Management1` and `Loopback0`, Juniper uses
  `fxp0` (or `em0`, or `me0`) and `lo0`, Nvidia Cumulus uses `eth0` and `lo`. A sheet column of names
  would make every row restate a fact the device type already holds, and would be wrong for the next
@@ -1186,8 +1184,8 @@ without guessing or deleting unrelated NetBox data.
  `ipam.ip-addresses`, and a PATCH), Requirement 11.3's exception, the devices readiness panel, and
  the device-type prep in the empty-instance runbook. Cabling is untouched.
  One question inside D11 remains the operator's: whether a supplied management address should also
- be written to NetBox's `oob_ip` (the sheet rule as stated puts it on `primary_ip*` and leaves
- `oob_ip` alone). Dual-stack is decided: four columns, family first.
+ be written to NetBox's `oob_ip`; the current rule leaves `oob_ip` alone. Dual-stack interface
+ assignment and explicit per-family primary selection are decided.
 
 - **D12 — Creating a missing device interface from the cabling sheet. PROPOSED, awaiting review.**
  A cabling row naming a port NetBox does not have is `PORT_NOT_FOUND` today, and the operator's only
@@ -1323,7 +1321,33 @@ without guessing or deleting unrelated NetBox data.
  phase, tags-only interface PATCH support and drift signatures, D14 UPDATE journal/revert coverage,
  readiness checks for the three tag slugs, and cabling tests/docs.
 
-D1–D9 are settled; D3 and D6 are deferred to iteration 2 by choice, not left undecided. **D10, D11,
+- **D16 — Prepared parent locations, child-location creates, and opaque rack names. BUILT AND
+ TESTED; disposable live write probe and release approvals outstanding.** The hierarchy page
+ requires an existing site and parent location and may
+ create only the direct child datahall and rack. Required prerequisite identifiers are `site_slug`
+ and `parent_location_slug`; the child supplies both `datahall` and `datahall_slug`. The child create
+ carries both `site` and `parent`, and a relationship mismatch on an existing child or rack blocks
+ rather than re-parenting it.
+ **Why prerequisites rather than creating every level.** The deployment's region, site, and facility
+ containers are governed inventory and already exist. A sheet intended to add rooms and racks must
+ not silently invent a parallel region/site tree because a prerequisite was misspelled.
+ **Why ancestry is relational rather than textual.** A child slug such as `bth01_mmr1` and a rack
+ such as `BTH01-MMR1-RK0001` are valid while using different punctuation. Requiring a child slug to
+ contain a site slug would accept accidental prefixes such as `bth01` for `bth` and reject valid
+ naming schemes. NetBox's `site`, location `parent`, and rack `location` fields are authoritative.
+ **Why rack names are opaque.** The former exactly-three-segment parser made NetBox-valid hyphens in
+ slugs impossible and created an unusable import path for existing objects. Devices need only an
+ unambiguous rack natural key, while cables resolve existing devices; neither needs to recover
+ hierarchy from rack spelling.
+ **Compatibility.** This deliberately replaces the old hierarchy template. Old
+ `location`/`datacenter`/`datacenter_slug` sheets fail S1 with the new required-column list instead of
+ being silently reinterpreted.
+ **Cost if reversed:** hierarchy columns/templates/samples, location natural keys and parent-aware
+ prefetch, hierarchy planning/order, rack validation in the hierarchy and device importers,
+ readiness, runbooks, and D9 naming tests.
+
+D1–D9 are settled historically; D1 and D9 are superseded for hierarchy import by D16. D3 and D6 are
+deferred to iteration 2 by choice, not left undecided. **D10, D11,
 D12 are the open decisions.** Inside D10: whether grouped rows must repeat the cable's
 attributes or inherit them from the first row (9.18 proposes inherit), and whether lane order can be
 left as row order (9.21) or needs explicit connector columns. Inside D11: `oob_ip` versus primary-only.

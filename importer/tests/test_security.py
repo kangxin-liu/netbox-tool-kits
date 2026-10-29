@@ -35,7 +35,10 @@ from importer.models import ImportRun
 from importer.services.netbox_client import Failure, NetBoxUnavailable, redact
 from importer.tests.conftest import upload_of
 
-pytestmark = pytest.mark.django_db
+pytestmark = [
+    pytest.mark.django_db,
+    pytest.mark.usefixtures("hierarchy_prerequisites"),
+]
 
 REPO = Path(settings.BASE_DIR)
 
@@ -44,10 +47,11 @@ REPO = Path(settings.BASE_DIR)
 SENTINEL = "deadbeef" * 5
 
 GOOD_ROW = {
-    "location": "Example Region",
-    "datacenter": "EXA1",
-    "datahall": "DH1",
-    "rack": "EXA1-DH1-R01",
+    "site_slug": "syn",
+    "parent_location_slug": "syn1",
+    "datahall": "SYN1-DH1",
+    "datahall_slug": "syn1-dh1",
+    "rack": "SYN1-DH1-R01",
     "rack_u_height": "45",
 }
 
@@ -134,7 +138,7 @@ class TestTheTokenStaysPut:
 
     def test_an_unreachable_target_reports_the_failure_without_it(self, browser, netbox, caplog):
         """The error paths are the ones that leak, so they are the ones tested hardest."""
-        netbox.unavailable_on_read["dcim.regions"] = NetBoxUnavailable(
+        netbox.unavailable_on_read["dcim.sites"] = NetBoxUnavailable(
             Failure.CONNECTION, netbox.host, f"Could not connect using Token {SENTINEL}."
         )
         with caplog.at_level("DEBUG"):
@@ -152,7 +156,7 @@ class TestTheTokenStaysPut:
 
     def test_a_rejected_write_records_the_reason_without_it(self, browser, netbox):
         netbox.reject(
-            "dcim.regions",
+            "dcim.locations",
             lambda payloads: (400, f"invalid request (authenticated with Token {SENTINEL})"),
         )
         page = validate(browser, [GOOD_ROW])
@@ -195,7 +199,7 @@ class TestAutoescaping:
         assert "&lt;script&gt;" in body, "the value must be shown, escaped, not dropped"
 
     def test_the_stored_report_is_escaped_too(self, browser, netbox):
-        validate(browser, [{**GOOD_ROW, "rack": MARKUP}])
+        validate(browser, [{**GOOD_ROW, "datahall_slug": MARKUP}])
         run = ImportRun.objects.latest("pk")
         body = browser.get(reverse("importer:run_detail", args=[run.pk])).content.decode()
 
@@ -204,7 +208,7 @@ class TestAutoescaping:
 
     def test_markup_in_a_name_that_validates_is_escaped_in_the_plan_preview(self, browser, netbox):
         """Not every markup-bearing cell is rejected, and the ones that pass still render inert."""
-        page = validate(browser, [{**GOOD_ROW, "location": f"Example {MARKUP} Region"}])
+        page = validate(browser, [{**GOOD_ROW, "datahall": f"Example {MARKUP} Hall"}])
         body = page.content.decode()
 
         assert "<script>alert" not in body
@@ -212,7 +216,7 @@ class TestAutoescaping:
 
     def test_markup_arriving_from_netbox_is_escaped(self, browser, netbox):
         """A value this tool did not create is no more trusted than one it read from a sheet."""
-        netbox.add("dcim.regions", name=f"Example {MARKUP} Region", slug="example-region")
+        netbox.stored("dcim.sites")[0]["name"] = f"Example {MARKUP} Site"
         body = validate(browser, [GOOD_ROW]).content.decode()
         assert "<script>alert" not in body
 

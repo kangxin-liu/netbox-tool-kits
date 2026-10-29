@@ -20,7 +20,8 @@ SAFETY
   loopback-only exception in the spec (requirement 2.3a).
 * Idempotent: a template that already exists by name is skipped, so re-running is safe.
 * Creates nothing except component templates on device types that already exist. It never creates
-  device types, devices, sites, or racks — those come from the importer sheets.
+  device types, devices, sites, locations, or racks. Sites and parent locations are prepared
+  directly in NetBox; hierarchy sheets create only child locations and racks.
 
 USAGE
 -----

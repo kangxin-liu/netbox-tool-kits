@@ -26,8 +26,10 @@ append-only mutation journal used for history summaries, drift checks, and compe
 NetBox remains the system of record.
 
 Design status: **the original baseline is verified against NetBox 4.6.8 and complete.** Decisions
-D1–D9 in `requirements.md` are settled and built; each one's blast radius if reversed is named in the
-table below. **D10 — cable profiles and breakout — is built and verified**: its field-level facts were
+D1–D9 in `requirements.md` are settled and built historically; D1 and D9 are superseded for the
+hierarchy importer by D16, which is built and tested with its disposable live write probe and
+release approvals outstanding. Each decision's blast radius is named in the table below.
+**D10 — cable profiles and breakout — is built and verified**: its field-level facts were
 probed read-only on 2026-08-20 and its behavioural ones by creating and deleting cables on
 2026-08-24. Every assumption held, so nothing in Requirement 9 needed amending. The one thing still
 taken on trust is the internal position map of a `-shuffle` profile, which NetBox does not serve. **D11 — loopback and management
@@ -55,6 +57,10 @@ adds an existing
 derived from that profile side's positions per connector. Existing parents require a tags-only,
 drift-checked PATCH and D14 UPDATE journal entry; a live 4.6.8 probe must confirm the writable tag
 payload shape before implementation.
+**D16 — prepared parent locations, child-location creates, and opaque rack names — is built and
+tested, with the disposable live write probe and release approvals outstanding.** It makes site and
+parent location read-only prerequisites, creates only child datahalls and racks, and validates
+ancestry from NetBox relationships rather than name punctuation.
 Field names in this document were checked against the target instance's own
 `OPTIONS` responses rather than from memory — see "Verified against the target instance".
 
@@ -72,7 +78,7 @@ flowchart TB
         F["forms.py — upload validation"]
         S["services/sheets.py — csv/xlsx read + template gen"]
         C["columns.py — the sheet contract"]
-        N["naming.py — rack name convention"]
+        N["naming.py — case-folding + slug validation"]
         VAL["validation.py — Severity, ValidationIssue, Verdict"]
         I["importers/ — hierarchy | devices | cabling"]
         L["services/lookups.py — cached natural-key lookups"]
@@ -123,9 +129,9 @@ Ordered, and each stage only runs if the previous one left the file interpretabl
 | Stage | Checks | Needs NetBox? |
 | --- | --- | --- |
 | **S1** file structure | extension, size, worksheet present, required columns, unknown columns, example row still present | no |
-| **S2** cell format | required-but-blank, integer/enum coercion, rack-name shape, choice values against cached API choices | choices only |
-| **S3** intra-file consistency | duplicate racks, duplicate device names, duplicate loopback/management addresses, RU-range overlap between rows, the same cable termination used twice *outside* a shared `cable_group`, a group's rows disagreeing about the cable they describe, rack name disagreeing with its own datacenter/datahall columns | no |
-| **S4** cross-reference | referenced racks/models/roles/tenants exist, ports resolve, terminations not already cabled, slugs and unique fields free, existing objects match the sheet, device-type `mgmt_only` / `loopback` interfaces resolve, IP addresses are free or already on the intended interface | yes |
+| **S2** cell format | required-but-blank, integer/enum coercion, complete NetBox slug validation, choice values against cached API choices | choices only |
+| **S3** intra-file consistency | duplicate racks, inconsistent child-location name/slug pairs within one parent, duplicate device names, duplicate loopback/management addresses, RU-range overlap between rows, the same cable termination used twice *outside* a shared `cable_group`, a group's rows disagreeing about the cable they describe | no |
+| **S4** cross-reference | hierarchy site and parent-location prerequisites exist, child relationships match, referenced racks/models/roles/tenants exist, ports resolve, terminations not already cabled, slugs and unique fields free, existing objects match the sheet, device-type `mgmt_only` / `loopback` interfaces resolve, IP addresses are free or already on the intended interface | yes |
 | **S5** feasibility | parent-before-child ordering resolvable, row count within the bound, no contradictory creates | no |
 
 S4 is the only stage whose result can go stale, which is why it alone is re-run at apply time.
@@ -246,8 +252,8 @@ NetBox wraps the request in a transaction.
 
 **Consequence for apply:** creates are grouped by endpoint and issued as one bulk POST each. The
 half-complete window is no longer "between any two rows" but "between two endpoints" — for the
-hierarchy importer that is three boundaries (regions → sites → locations → racks) regardless of
-whether the sheet has 4 rows or 4,000. Devices and cabling are single-endpoint, so each of those
+D16 hierarchy importer that is one boundary (child locations → racks) regardless of whether the
+sheet has 4 rows or 4,000. Devices and cabling are single-endpoint, so each of those
 sheets applies as one all-or-nothing operation.
 
 **The catch — error attribution.** The three tests returned errors in two different shapes. Test A
@@ -281,9 +287,9 @@ renamed field fails at apply time — after the operator has been told the file 
 | Rack enumerated form factor | `form_factor`, **not** `type`. `rack_type` is a foreign key to the `RackType` model, so a `4-post-cabinet` string sent there would be rejected as an invalid id |
 | `Rack.width` choices | `10, 19, 21, 23` — matches the sheet definition |
 | `Rack.status` choices | `reserved, available, planned, active, deprecated` |
-| Required on create | region/site/location: `name` + `slug` (location also `site`); rack: `name` + `site`; device: `device_type` + `role` + `site`; cable: nothing |
+| Required on create | D16 child location: `name` + `slug` + `site` + `parent`; rack: `name` + `site` + `location`; device: `device_type` + `role` + `site`; cable: nothing |
 | `dcim.Location` slug | **required**, same as regions and sites — the spec previously derived slugs for regions and sites only |
-| Slug validation | `^[-a-zA-Z0-9_]+$`, max length 100, uppercase accepted. The hyphen being legal in a NetBox slug is what forces the tool's own stricter rule on the two slugs a rack name is built from (Req 6.6) |
+| Slug validation | `^[-a-zA-Z0-9_]+$`, max length 100, uppercase accepted. D16 accepts the complete contract and does not parse slugs as rack-name segments |
 | `Device.face` choices | `front, rear` |
 | `Cable.type` choices | includes `cat6`, `cat6a`, `mmf-om4`, `smf-os2`, `dac-passive` as the sheet examples assume |
 | `Cable.status` / `length_unit` | `connected, planned, decommissioning` / `km, m, cm, mi, ft, in` |
@@ -399,6 +405,7 @@ OWASP Top 10 baseline, scoped to what this app actually does.
 | T10 | Partial-write confusion | Aborted apply or revert leaves NetBox and the local audit record ambiguous | Intent before each request; reconcile unknown outcomes; immutable ordered mutation and revert records | 12.4, 13.2–13.2b, 18.11–18.13 |
 | T11 | Revert destroys later work | An old run deletes an object that was edited or gained dependencies after apply | Prefer a separate no-create revert credential; isolate DELETE in the revert adapter even under token fallback; same-host and exact post-state checks; short-lived plan fingerprint; reverse order; stop on first failure | 2.1, 18.5–18.12 |
 | T12 | Interface tag PATCH overwrites concurrent work | NetBox's relationship-list write replaces tags added by another operator after validation | Preserve the complete existing set, compare tag ids order-insensitively immediately before apply, abort on any drift, PATCH only `tags`, journal exact before/after sets | 9.49, 9.52–9.54, 10.14 |
+| T13 | Rack attached to the wrong facility branch | Similar names/slugs or substring-prefix inference select another site, parent, or child | Exact case-folded prerequisite slugs; child keys include site and parent ids; name/slug split matches block; rack site/location conflicts block; pre-apply relationship drift check | 6.3–6.6, 7.2–7.10, 10.14, D16 |
 
 **Known residual risk.** NetBox offers no cross-request transaction, and its database cannot share a
 transaction with the local audit database. An apply or compensating revert can therefore stop between
@@ -414,20 +421,21 @@ on disk — it should be rotated if it has ever been shared, and `.gitignore` no
 
 | ID | Decision | Rationale | Blast radius if changed |
 | --- | --- | --- | --- |
-| D1 | Location → `dcim.Region`, Datacenter → `dcim.Site`, Datahall → `dcim.Location` | Matches NetBox's own geographic hierarchy; a Location is site-scoped, which is exactly what a datahall is | `importers/hierarchy.py` + lookups |
+| D1 **(superseded by D16)** | Location → `dcim.Region`, Datacenter → `dcim.Site`, Datahall → `dcim.Location` | Original create-from-empty hierarchy; D16 retains the object types but makes the upper levels prerequisites | `importers/hierarchy.py` + lookups |
 | D2 | Optional `device_role` column, falling back to `NETBOX_DEFAULT_DEVICE_ROLE`; reject if neither resolves | NetBox requires a role; silently inventing one would produce misleading data | `importers/devices.py` |
 | D3 | Transceiver recording deferred to iteration 2; no such column exists | Setting `interface.type` cannot record anything once device types define interface types, and every other mechanism is a bigger change than iteration 1 warrants | nothing — the feature is absent |
 | D4 | Device-type autocreate off by default, opt-in via env | Accidentally creating device types from typos pollutes a shared NetBox | `importers/devices.py` |
 | D5 | Apply runs inline in the request, bounded by a max row count | No worker infrastructure for iteration 1 | `views.py` |
 | D7 | Apply issues one bulk POST per endpoint, not one per row | Measured: NetBox wraps a list POST in a transaction, so a failure anywhere rolls the whole list back | `importers/base.py` |
 | D8 | An "exists but differs" conflict blocks on consequential fields and warns on descriptive ones | A wrong region or rack height invalidates every row built on it; a wrong description invalidates nothing, and blocking on it would teach operators to distrust the gate | `columns.py` (`Conflict`) + S4 |
-| D9 | Optional `datacenter_slug` / `datahall_slug` columns, and a rack name built from those slugs rather than from the two names | Deriving the slug from the name forced the name to double as the short code, so a site had to be called `SYD1` rather than "Sydney One" just to keep rack names short. Optional with a derived fallback keeps every existing sheet valid | `columns.py`, `naming.py`, `importers/hierarchy.py`, and the rack-name pattern all three sheets join on |
+| D9 **(superseded by D16)** | Optional `datacenter_slug` / `datahall_slug` columns, and a rack name built from those slugs rather than from the two names | Historical three-segment convention; valid existing location slugs containing `-` exposed that delimiter parsing was the wrong integrity boundary | `columns.py`, `naming.py`, `importers/hierarchy.py`, and rack validation |
 | D10 **(proposed)** | Optional `cable_profile` *and* `cable_group` columns, so several rows can describe one multi-connector cable | A breakout is one cable with one A termination and several B terminations. The profile column alone cannot express it: the rows sharing the A port are rejected as duplicate terminations before the profile is read | `columns.py`, `importers/cabling.py` (S3 + planning), one grouping hook on `importers/base.py`, per-line report attribution |
-| D11 **(proposed)** | Optional `loopback_ip4` / `loopback_ip6` / `management_ip4` / `management_ip6`; names from the device type; IPv4 preferred as primary unless the row has none, then management over loopback within the family; first PATCH, scoped to those two fields | Dual-stack cannot fit in two family-agnostic cells. Vendor names belong on the type once. NetBox cannot set `primary_ip4` at device create because the IP does not exist yet | `columns.py`, `importers/devices.py` (S2–S4 + apply), `ipam.ip-addresses` endpoint, Requirement 11.3's exception, devices readiness, empty-instance prep |
+| D11 **(proposed)** | Optional `loopback_ip4` / `loopback_ip6` / `management_ip4` / `management_ip6` assignment columns plus optional `primary address v4` / `primary address v6` references; names from the device type; a primary reference must match an address assigned to any interface on the device, from this row or already in NetBox; first PATCH scoped to those two fields | Dual-stack cannot fit in family-agnostic cells. Interface role does not always determine the intended primary, so selection must be explicit. Vendor names belong on the type once. NetBox cannot set `primary_ip4` at device create when the referenced IP does not exist yet | `columns.py`, `importers/devices.py` (S2–S4 + apply), `ipam.ip-addresses` endpoint, Requirement 11.3's exception, devices readiness, empty-instance prep |
 | D12 **(built, probe outstanding)** | A cabling row may create a missing *device* interface — from the device type's template first, from optional `a_interface_type` / `b_interface_type` otherwise — behind `NETBOX_AUTOCREATE_INTERFACES`, off by default | NetBox never copies a newly added template onto existing devices, so the common failure is a port the type defines and the device lacks; creating it from the template invents nothing and makes a typo fall through to a row that demands an explicit type. Off by default because the tool cannot tell a new port from a mistyped one | `columns.py`, `importers/cabling.py` (port resolution + a second `endpoint_order` entry), the pre-apply drift check, one settings flag, Requirement 8.23 |
 | D13 **(built, probe outstanding)** | Optional `a_parent` / `b_parent` interface names, resolved on the corresponding `*_end` device: the end's `*_port` becomes a `virtual` child created under that parent, the cable terminates on the physical parent, and `*_interface_type` types the parent. Decoupled from `cable_group`, which stays a free-text tag, so a shuffle harness is one group with child rows on both ends | D10 cabled the cage but left the breakout children uncreated, so NetBox shows a consumed cage as free and nothing stops a lane being cabled twice; `virtual` children with a parent fix both. The parent must be its own column, not `cable_group`, because a shuffle has several parents per side under one harness | `columns.py`, `importers/cabling.py` (parent/child end-resolution, S3 child-vs-parent checks, plan-on-parent), the preview's lane-pairing line, sample/template generation, the live probe |
 | D14 **(built)** | Append-only operation journal plus a two-step, reverse-order compensating revert | Row results cannot represent one-row/many-object and many-row/one-object writes precisely. Safe reversion needs operation identity, minimal before/after values, same-target and post-state checks, and immutable attempt outcomes; without those, a history button could delete later work | apply instrumentation, audit models, history UI/CSV, `services/revert.py`, NetBox delete permission, Requirement 18 |
 | D15 **(built, probe outstanding)** | Derive `port-breakout-2x` / `4x` / `8x` from each D13 parent's profile-side positions and add the existing tag to that physical parent | Row count is population, not breakout capacity; total profile connectors misstate shuffle parents. Positions per connector is the stable factor. Existing parents need a bounded tags-only PATCH, while conflicting factor tags block rather than being removed | tag lookup/readiness, cabling S3/S4 planning, interface create payloads, an interface PATCH phase, drift signatures, D14 UPDATE/revert coverage, live probe |
+| D16 **(built, live write probe and release approvals outstanding)** | Existing site + parent location are hierarchy prerequisites; create/reuse only the direct child datahall and rack; rack names are opaque | Governed upper-level inventory must not be invented from typos, and NetBox relationships are authoritative where punctuation and slug prefixes are not | hierarchy columns/templates/importer, location natural keys, naming validation, readiness, samples/docs/tests |
 
 ## Component design
 
@@ -456,27 +464,24 @@ DEVICE_COLUMNS: tuple[ColumnSpec, ...]
 CABLING_COLUMNS: tuple[ColumnSpec, ...]
 ```
 
-`IDENTITY` covers the columns used to *find* the existing object — a rack's name, a site's name.
+`IDENTITY` covers columns used to *find* an existing object — a rack's name or prerequisite slug.
 They cannot conflict, because a different value means a different object, which is a create rather
 than a match. Everything else is a judgement call the author of the column has to make:
 
 | `CONSEQUENTIAL` — blocks | `DESCRIPTIVE` — warns |
 | --- | --- |
-| a site's region, a location's site and parent, a region's parent | `description` |
-| `datacenter_slug`, `datahall_slug` | |
+| a location's site and parent | `description` |
+| `datahall_slug` | |
 | `rack_u_height`, `rack_width` | `rack_status`, `rack_form_factor`, `status` |
 | a device's `rack`, `bottom_ru`, `rack_face`, `model` | `tenant`, `serial`, `asset_tag` |
-| a device's `loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`, and primary IP | |
+| a device's `loopback_ip4`, `loopback_ip6`, `management_ip4`, `management_ip6`, `primary_address_v4`, and `primary_address_v6` | |
 | a cable's `cable_type` and `cable_profile` | a cable's `label`, `color`, `length`, `length_unit` |
 | | `a_interface_type`, `b_interface_type` — declarative only, see Sheet 3 |
 
-The two slug columns are `CONSEQUENTIAL` rather than `IDENTITY`, which is worth a sentence because
-they *are* the natural key the lookup uses. `IDENTITY` means "cannot differ" — a different value
-denotes a different object — and that holds while a slug is derived. Once the operator types one, a
-supplied slug that disagrees with the matched object is a genuine disagreement to report and block
-(Req 7.13), and the only class that produces that outcome is `CONSEQUENTIAL`. The derived fallback
-never reaches this comparison at all (Req 7.14), so the classification only ever fires on a value
-somebody actually wrote.
+`site_slug` and `parent_location_slug` are `IDENTITY`: a different value selects a different
+prerequisite. `datahall_slug` is `CONSEQUENTIAL` because a child can first match by its name; if that
+object carries a different slug, silently accepting it would attach racks to inventory other than
+the row describes. There is no derived fallback under D16.
 
 Comparison is asymmetric by type: identifiers, slugs, integers, and choice values must match
 exactly, while free text is trimmed, whitespace-collapsed, and case-folded first, so `spine row A`
@@ -488,60 +493,25 @@ the value would make a numeric-looking `label` compare differently from a textua
 difference in behaviour nobody chose. The flag is set on `rack_u_height`, `rack_width`, `bottom_ru`,
 `ru_height`, and `length`.
 
-### `naming.py` — rack name convention and slugs
+### `naming.py` — opaque rack keys and NetBox slugs
 
 ```python
-@dataclass(frozen=True)
-class RackName:
-    datacenter: str          # segment 1 — a slug, per D9
-    datahall: str            # segment 2 — a slug
-    rack: str
-    raw: str
-    def key(self) -> str: ...                            # case-folded, for comparison
-    def agrees_with(self, *, datacenter_slug, datahall_slug) -> bool: ...
+def fold(value: str) -> str:
+    """Trim and case-fold an opaque natural key for comparison."""
 
-def parse_rack_name(value: str, delim: str | None = None, *, column: str = "rack") -> RackName:
-    """Split into exactly 3 non-empty segments. Raises RowError otherwise."""
+def validate_rack_name(value: str, *, column: str = "rack") -> str:
+    """Require a non-empty name; do not split or infer hierarchy."""
 
-def build_rack_name(datacenter: str, datahall: str, rack: str, delim: str | None = None) -> str: ...
-def expected_pattern(delim: str | None = None) -> str: ...   # for the `expected` field on an issue
-def derive_slug(name: str) -> str: ...
-def validate_slug(value: str, *, column: str, delim: str | None = None,
-                  derived_from: str = "", advice: str = "") -> str:
-    """NetBox's charset, minus the delimiter. Raises RowError otherwise."""
-def effective_slug(name: str, supplied: str, *, column: str, name_column: str,
-                   delim: str | None = None) -> str:
-    """Supplied when non-blank, derived from the name otherwise (Req 7.10). Validates either way."""
+def validate_slug(value: str, *, column: str) -> str:
+    """Validate NetBox's complete 100-character [-a-zA-Z0-9_] contract."""
 ```
 
-`derived_from` and `advice` carry the two things a message about a *derived* slug needs and a message
-about a supplied one does not: the name it came from, and the fact that the fix is to fill the slug
-column in. They only change wording, never the verdict, and keeping them here rather than catching
-and re-raising in `effective_slug` means all slug phrasing lives in one function.
+Rack identity remains in one helper module so hierarchy and device validation cannot drift, but D16
+removes segment parsing, `build_rack_name`, effective-slug derivation, and delimiter configuration.
+The complete supplied rack name is preserved for create and used case-insensitively for lookup.
 
-The only module that knows the convention (Req 6.5); the delimiter defaults to `RACK_NAME_DELIMITER`.
-
-`derive_slug` lives here rather than in each importer. NetBox requires a slug on regions, sites,
-locations, device types, and manufacturers; only the hierarchy sheet asks for one, and only for two of
-its three levels, so everywhere else the slug is derived from the name (Req 7.3) — and it has to be
-derived *identically*, or two importers would disagree about which existing object a given name
-refers to.
-
-**Why `validate_slug` is two checks and not one regex.** NetBox accepts `^[-a-zA-Z0-9_]+$`, and the
-rack name is split on `-`, so the two rules disagree about the hyphen and the operator needs to be
-told which one they broke. A value outside NetBox's charset is one error ("letters, digits, hyphen and
-underscore only"); a value inside it that contains the delimiter is a different error ("the rack name
-is split on `-`; use `_`"). Writing it as a single narrowed regex would collapse both into one
-message that is wrong for one of the two cases. The second check reads the delimiter from settings
-rather than matching a literal hyphen, so configuring `_` as the delimiter forbids `_` and permits `-`
-without touching this module's rules (Req 6.7).
-
-**Why `effective_slug` takes both column names.** The fallback can itself produce an invalid slug:
-`derive_slug("Data Hall 1")` is `data-hall-1`, which contains the delimiter. That row has to be
-rejected, but pointing the error at `datahall_slug` — a cell the operator left deliberately blank —
-tells them nothing. So the issue is located on the slug column when the value was supplied and on the
-name column when it was derived, with a message that says to fill the slug column in. That is the one
-piece of state this helper exists to carry; computing the slug is the easy half.
+Slugs are never parsed for ancestry. `bth01_mmr1` and `bth01-mmr1` are both valid NetBox slugs;
+whether either location is below `bth01` is decided only by its `parent` id.
 
 ### `importers/base.py` — the shared pipeline
 
@@ -604,6 +574,9 @@ happened is the worst possible moment to show them a traceback.
 Per-request cache keyed by `(endpoint, natural_key)`. Prefetches the referenced sets in bulk —
 sites, locations, racks, device types, roles, and for cabling the terminations of every device
 named in the sheet — so validating 2,000 rows is a handful of requests, not thousands (Req 15.2).
+D16 indexes locations by `(site, parent, name)` and `(site, parent, slug)`. The parent prerequisite
+uses `(site, slug)` with an explicit uniqueness check; a child lookup never drops the parent from its
+local verification merely because a server-side filter returned a result.
 
 ```python
 def prefetch(endpoint: str, **filters) -> None: ...
@@ -627,7 +600,7 @@ confirmed on 4.6.8, force that:
 2. Filtering by an id that no longer exists returns **400**, not an empty list. The pre-apply re-check
    reads that as "not found" — an object deleted since validation is drift to report, not a crash.
 
-Matching is case-insensitive (Req 6.4, 11.1): the index is keyed on case-folded values while the
+Matching is case-insensitive (Req 6.2, 11.1): the index is keyed on case-folded values while the
 record keeps whatever casing NetBox holds.
 
 ### `services/netbox_client.py`
@@ -668,12 +641,11 @@ Three things differ from the original sketch:
 
 | Column | Req | Format / choices | NetBox target |
 | --- | --- | --- | --- |
-| `location` | yes | text | `dcim.Region.name` (+ derived slug) |
-| `datacenter` | yes | text | `dcim.Site.name`, region = row's location |
-| `datacenter_slug` | no | `[a-zA-Z0-9_]+`, no `-`; derived from `datacenter` when blank | `dcim.Site.slug`, and segment 1 of the rack name |
-| `datahall` | yes | text | `dcim.Location.name`, site-scoped |
-| `datahall_slug` | no | `[a-zA-Z0-9_]+`, no `-`; derived from `datahall` when blank | `dcim.Location.slug`, and segment 2 of the rack name |
-| `rack` | yes | `<datacenter_slug>-<datahall_slug>-<rack>` | `dcim.Rack.name` |
+| `site_slug` | yes | existing NetBox slug | Resolve existing `dcim.Site`; never created |
+| `parent_location_slug` | yes | existing NetBox slug | Resolve existing `dcim.Location` in the site; never created |
+| `datahall` | yes | text | Child `dcim.Location.name` |
+| `datahall_slug` | yes | NetBox slug `[-a-zA-Z0-9_]+`, max 100 | Child `dcim.Location.slug` |
+| `rack` | yes | non-empty opaque NetBox name | `dcim.Rack.name` |
 | `rack_u_height` | yes | positive int | `Rack.u_height` |
 | `rack_width` | no | 10 / 19 / 21 / 23, default 19 | `Rack.width` |
 | `rack_status` | no | from API, default `active` | `Rack.status` |
@@ -681,13 +653,18 @@ Three things differ from the original sketch:
 | `tenant` | no | existing tenant name | `Rack.tenant` |
 | `description` | no | text | `Rack.description` |
 
-Example row: `APAC, Sydney One, syd1, Data Hall 1, dh1, SYD1-DH1-R01, 45, 19, active, 4-post-frame, , spine row A`
+Example row:
+`exa, exa01, EXA01-MMR1, exa01_mmr1, EXA01-MMR1-RK0001, 45, 19, active, 4-post-frame, , spine row A`
 
-That row is the case D9 was written for: two multi-word display names whose rack name is still
-`SYD1-DH1-R01`, matching the slugs case-insensitively per Req 6.4. Leave both slug cells blank and the
-row is rejected — `sydney-one` contains the delimiter — with the error on the `datacenter` column
-telling the operator to fill `datacenter_slug` in. Blank slugs are only viable where the names are
-already single tokens, which is precisely the pre-D9 sheet.
+Resolution is relational:
+
+1. Resolve site slug `exa`.
+2. Resolve parent-location slug `exa01` in that site.
+3. Resolve or create child `(site, parent, name/slug)` with name `EXA01-MMR1` and slug
+   `exa01_mmr1`.
+4. Resolve or create rack `EXA01-MMR1-RK0001` with that site and child location.
+
+The underscore in the child slug and hyphens in the display/rack names have no inferred meaning.
 
 ### Sheet 2 — devices
 
@@ -990,8 +967,9 @@ iteration to discover.
 
 ### Ordering
 
-Hierarchy creates strictly parents-first: region → site → location → rack. Devices need racks, so
-the device sheet only reads them. A device row that supplies addresses then creates those addresses
+Hierarchy reads the site and parent location, then creates strictly child-first:
+child location → rack. Devices need racks, so the device sheet only reads them. A device row that
+supplies addresses then creates those addresses
 against the device's inherited interfaces and PATCHes only the primary-IP fields (D11). Cabling needs
 devices, and reads them; under D12 it may create the interfaces it terminates on, so its order is
 interfaces → cables. Within a sheet, rows are applied in file order (Req 8.12) so the report lines up
@@ -1007,14 +985,22 @@ tool's loopback, and it is prep to correct (see `docs/empty-instance-prep.md`).
 
 A row supplies addresses; the type supplies names. At least one of the four address cells is
 required when the type defines either interface; all four must be blank when it defines neither
-(a patch panel). Dual-stack is four columns, not two overloaded cells. Primary IP is chosen by
-family first, then by role: IPv4 wins over IPv6 unless the row supplies no IPv4; within a family,
-management wins over loopback. So a row with `management_ip6` and `loopback_ip4` is reached at
-the loopback IPv4, with the management IPv6 still assigned and recorded as `primary_ip6`.
+(a patch panel). Dual-stack assignment is four columns, not two overloaded cells.
 
-| `primary_ip4` | `primary_ip6` | Address NetBox shows (`primary_ip`) |
+Two additional optional Excel columns, `primary address v4` and `primary address v6` (normalised
+internally to `primary_address_v4` / `primary_address_v6`), explicitly select the corresponding
+NetBox primary-IP fields. A selection is a reference, not another address declaration: it must match
+an `ipam.IPAddress` assigned to any interface on the device. That address may be created from one of
+the four assignment cells in the same row or may already exist on an interface of an existing
+device. Blank means no primary request for that family; the importer does not infer a primary from
+interface role.
+
+| `primary address v4` | `primary address v6` | Result |
 | --- | --- | --- |
-| `management_ip4` if filled, else `loopback_ip4` | `management_ip6` if filled, else `loopback_ip6` | the IPv4 if set, otherwise the IPv6 |
+| blank | blank | no primary-IP PATCH |
+| address assigned to this device | blank | set `primary_ip4` |
+| blank | address assigned to this device | set `primary_ip6` |
+| address assigned to this device | address assigned to this device | set both; NetBox displays IPv4 |
 
 ```mermaid
 sequenceDiagram
@@ -1037,18 +1023,23 @@ sequenceDiagram
     end
     I->>L: device interfaces by name from the type
     I->>NB: POST /api/ipam/ip-addresses/<br/>{address, assigned_object_type: dcim.interface,<br/> assigned_object_id, status: active}
-    I->>NB: PATCH /api/dcim/devices/{id}/<br/>{primary_ip4 and/or primary_ip6 only}
+    I->>L: resolve explicit primary references<br/>against new and existing interface addresses
+    opt primary address v4 and/or v6 supplied
+        I->>NB: PATCH /api/dcim/devices/{id}/<br/>{primary_ip4 and/or primary_ip6 only}
+    end
 ```
 
 The PATCH is the first write that is not a create. It sends only `primary_ip4` / `primary_ip6`, and
-only to set them to an address this run assigned (or found already assigned) on that device. A
-primary already pointing at a different address blocks rather than being overwritten (Req 8.19,
-11.5). `oob_ip` is not written — that is one of D11's open questions.
+only when the corresponding primary-address column explicitly selects an address this run assigned
+or found already assigned to any interface on that device. A missing, unassigned, wrong-family, or
+other-device address blocks. A primary already pointing at a different address blocks rather than
+being overwritten (Req 8.19, 11.5). `oob_ip` is not written — that is one of D11's open questions.
 
 Apply therefore issues two bulk POSTs (devices, then IP addresses) and one field-scoped PATCH
-(primary IP), which widens D7's half-complete window from "between two endpoints" to those three
-steps. A re-upload is what closes it: an existing device still has its remaining address work
-done (Req 8.10, 8.20).
+(primary IP, only when explicitly requested), which widens D7's half-complete window from "between
+two endpoints" to those three steps. A re-upload is what closes it: an existing device still has its
+remaining address work done and can select a pre-existing interface address as primary (Req 8.10,
+8.20).
 
 Facts that still need a read-only probe against 4.6.8 before implementation (task 27a):
 
@@ -1196,11 +1187,13 @@ PATCH; no forward `DELETE` exists (Req 11.3a), and Requirement 8.23 is amended t
 left contradicting 9.25.
 
 **D11 is the first exception, and it is a different kind of PATCH.** NetBox will not accept
-`primary_ip4` on the device POST: the IP does not exist yet. The sequence is create device → create
-`ipam.IPAddress` assigned to the inherited interface → PATCH the device with only `primary_ip4`
-and/or `primary_ip6`. The PATCH does not rename, re-parent, or rewrite any other field, and a
-primary IP already set to a *different* address is not patched — it blocks (Req 11.5). Completing a
-partly-cabled breakout stays on the other side of that line.
+`primary_ip4` on the device POST when the referenced IP does not exist yet. The sequence is create
+device → create any same-row `ipam.IPAddress` assignments → resolve non-blank `primary address v4`
+and `primary address v6` references against those new addresses and addresses already assigned to
+the device → PATCH only `primary_ip4` and/or `primary_ip6`. Blank reference cells cause no primary
+write. The PATCH does not rename, re-parent, or rewrite any other field, and a primary IP already set
+to a *different* address is not patched — it blocks (Req 11.5). Completing a partly-cabled breakout
+stays on the other side of that line.
 
 **D15 is the second exception, limited to interface tags.** The cable profile already states the
 breakout factor, and downstream automation needs the corresponding existing tag on the physical
@@ -1318,7 +1311,7 @@ class RevertItemResult(models.Model):
 ```
 
 `ImportMutation` is the reversible source of truth; `ImportRowResult` remains the per-line
-presentation record. That separation is required because one hierarchy line may create four objects
+presentation record. That separation is required because one D16 hierarchy line may create a child location and a rack
 and four breakout lines may create one cable. An operation intent is committed locally before its
 NetBox request. A response finalises it as applied or failed; a timeout leaves it `unknown`, keeps the
 run `reconciliation_required`, and resolves it by id or natural key before history offers revert.
@@ -1381,11 +1374,11 @@ what logout clears (along with the cached plans themselves).
 
 ### Two counts, not one
 
-`Verdict` carries `create_count` (rows) and `object_count` (objects). One hierarchy row can create a
-region, a site, a location, and a rack, so "1 row" and "4 objects in NetBox" are different consents and
-the apply button quotes the second. `object_count` counts distinct `(endpoint, key)` pairs rather than
+`Verdict` carries `create_count` (rows) and `object_count` (objects). One D16 hierarchy row can create
+a child location and a rack, so "1 row" and "2 objects in NetBox" are different consents and the
+apply button quotes the second. `object_count` counts distinct `(endpoint, key)` pairs rather than
 actions, because twenty rows in one new datahall each carry an action for it and apply creates it once
-(Requirement 7.6) — counting actions would overstate what the operator is authorising.
+— counting actions would overstate what the operator is authorising.
 
 ### History summary and compensating revert
 
@@ -1512,22 +1505,21 @@ There are two levels of double, deliberately:
 
 The whole suite runs in about twenty seconds, which is why it gets run on every change.
 
-- **Unit — `naming.py`:** valid 3-segment names, wrong segment counts, empty segments, alternate
- delimiter, case-insensitive comparison (Req 6); and for slugs, the NetBox charset accepted,
- underscore accepted, hyphen rejected, over-length rejected, a name with nothing slug-able in it,
- supplied-versus-derived precedence, and — the one that protects Req 6.7 — that configuring `_` as
- the delimiter flips which of `-` and `_` is the forbidden character.
+- **Unit — `naming.py`:** opaque non-empty rack names, case-insensitive keys with preserved create
+ casing (Req 6), and the complete NetBox slug contract: hyphen and underscore accepted, outside
+ characters and over-length values rejected.
 - **Unit — `sheets.py`:** csv and xlsx parsing, reordered headers, case/whitespace in headers,
  missing required column, unknown column warning, blank rows, oversize rejection, formulas read
  as values, template round-trip (generate → parse yields the declared columns) (Req 4, 5).
 - **Unit — importers, one test per numbered criterion:**
- - hierarchy: parent-before-child ordering, slug derivation and collision, duplicate rack rows,
- rack name vs slug disagreement, same datahall name under two datacenters (Req 7); plus the D9
- cases — a supplied slug reaching the create payload verbatim, a blank slug falling back to the
- derived one, a derived slug containing the delimiter reported against the *name* column, one name
- carrying two slugs, two names carrying one slug, the same datahall slug reused under a second
- datacenter being legal, a supplied slug disagreeing with an existing object blocking, and the same
- disagreement from a derived slug not blocking
+ - hierarchy: missing/ambiguous site prerequisite; missing, ambiguous, or differently sited parent
+ location; child-location create carrying exact site and parent ids; child-before-rack ordering;
+ one name carrying two slugs or one slug carrying two names within `(site, parent)`; a same-name or
+ same-slug child already under a different parent blocking rather than being duplicated or moved;
+ existing-child site/parent/name/slug mismatches blocking; duplicate rack rows; existing rack in
+ another site/location blocking;
+ hyphen/underscore slugs accepted; opaque rack names with varying segment counts accepted; and
+ idempotent re-upload (Req 6, 7, D16)
  - devices: face validation, RU overflow past rack height, overlap with an existing device and
  with another row, `ru_height` vs device-type height mismatch, missing model with autocreate off
  then on, role fallback then failure, duplicate device name (Req 8)
@@ -1628,7 +1620,6 @@ requirement rather than a preference:
 | `NETBOX_URL` / `NETBOX_TOKEN` | none — startup fails naming the variable | 2.1, 2.2 |
 | `NETBOX_VERIFY_SSL` | `true`; `false` warns in the log and banners the UI | 2.3 |
 | `NETBOX_TIMEOUT` | 30s | 2.5 |
-| `RACK_NAME_DELIMITER` | `-` | 6.1 |
 | `NETBOX_DEFAULT_DEVICE_ROLE` | unset; a device row with no `device_role` is then rejected | 8.8, D2 |
 | `NETBOX_AUTOCREATE_DEVICE_TYPES` | `false` | 8.7, D4 |
 | `NETBOX_AUTOCREATE_INTERFACES` | `false`; while off, an unknown port name is `PORT_NOT_FOUND` as today | 9.24, D12 |

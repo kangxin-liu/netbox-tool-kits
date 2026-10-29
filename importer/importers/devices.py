@@ -21,9 +21,10 @@ draw a rack elevation the operator is not expecting — and to size a device typ
 creates.
 
 A device that already exists is not recreated (Requirements 8.10, 11.2, 11.3). Remaining work
-on that row — loopback and management addresses, then a field-scoped PATCH of the primary IP —
-is still planned (Requirements 8.20, 8.19). A row whose device *and* addresses already match is
-skipped in full. Device-field disagreements still block; they are never patched.
+on that row — loopback and management addresses, then any explicitly requested field-scoped primary
+IP PATCH — is still planned (Requirements 8.20, 8.19). A row whose device, addresses, and primary
+references already match is skipped in full. Device-field disagreements still block; they are never
+patched.
 """
 
 from dataclasses import dataclass, field
@@ -33,13 +34,15 @@ from django.conf import settings
 
 from importer.device_addresses import (
     ADDRESS_COLUMNS,
+    PRIMARY_ADDRESS_COLUMNS,
     ParsedAddress,
+    ParsedPrimaryAddress,
     canonical,
     choice_value,
-    displayed_primary,
     parse_device_ip,
+    parse_primary_ip,
     parse_row_addresses,
-    primary_columns,
+    parse_row_primary_addresses,
     related_id,
     resolve_roles,
 )
@@ -51,7 +54,7 @@ from importer.importers.base import (
     Registry,
     RowOutcome,
 )
-from importer.naming import derive_slug, parse_rack_name
+from importer.naming import derive_slug, validate_rack_name
 from importer.services.lookups import CHUNK_SIZE, Lookups, fold
 from importer.services.sheets import Row
 from importer.validation import (
@@ -148,7 +151,7 @@ class DeviceImporter(BaseImporter):
         # well as in sheet 1 (Requirement 6.2) rather than surfacing as a lookup miss.
         errors: list[RowError] = []
         try:
-            parse_rack_name(row.get("rack"))
+            validate_rack_name(row.get("rack"))
         except RowError as error:
             errors.append(error)
         for column in ADDRESS_COLUMNS:
@@ -157,6 +160,14 @@ class DeviceImporter(BaseImporter):
                 continue
             try:
                 parse_device_ip(column, raw)
+            except RowError as error:
+                errors.append(error)
+        for column in PRIMARY_ADDRESS_COLUMNS:
+            raw = row.get(column)
+            if not str(raw).strip():
+                continue
+            try:
+                parse_primary_ip(column, raw)
             except RowError as error:
                 errors.append(error)
         return errors
@@ -348,7 +359,7 @@ class DeviceImporter(BaseImporter):
 
         wanted: list[str] = []
         for row in rows:
-            for column in ADDRESS_COLUMNS:
+            for column in (*ADDRESS_COLUMNS, *PRIMARY_ADDRESS_COLUMNS):
                 raw = row.get(column).strip()
                 if not raw or "/" not in raw:
                     continue
@@ -473,14 +484,14 @@ class DeviceImporter(BaseImporter):
     ) -> dict[str, Any] | None:
         """Requirement 8.1: exactly one existing rack, and this importer never creates one."""
         try:
-            rack_name = parse_rack_name(row.get("rack"))
+            rack_name = validate_rack_name(row.get("rack"))
         except RowError as error:
             collector.add_row_error(error, row.line)
             planned.outcome = RowOutcome.BLOCKED
             return None
 
-        existing = lookups.get_or_none(RACKS, name=rack_name.raw)
-        if existing is None:
+        matches = lookups.get_matches(RACKS, name=rack_name.raw)
+        if not matches:
             collector.add(
                 Severity.ERROR,
                 Code.RACK_NOT_FOUND,
@@ -496,6 +507,29 @@ class DeviceImporter(BaseImporter):
             planned.outcome = RowOutcome.BLOCKED
             return None
 
+        if len(matches) > 1:
+            candidates = ", ".join(
+                f"{(match.get('site') or {}).get('name') or '(no site)'}/"
+                f"{(match.get('location') or {}).get('name') or '(no location)'} "
+                f"(id {match.get('id')})"
+                for match in matches
+            )
+            collector.add(
+                Severity.ERROR,
+                Code.RACK_AMBIGUOUS,
+                line=row.line,
+                column="rack",
+                value=rack_name.raw,
+                expected="one globally unique rack name",
+                message=(
+                    f"Rack name {rack_name.raw!r} is ambiguous. Candidates: {candidates}. "
+                    "Resolve the duplicate NetBox records; the device importer will not guess."
+                ),
+            )
+            planned.outcome = RowOutcome.BLOCKED
+            return None
+
+        existing = matches[0]
         self._register(
             state,
             registry,
@@ -1038,6 +1072,7 @@ class DeviceImporter(BaseImporter):
         so the caller can report already-present.
         """
         addresses = parse_row_addresses(row.get)
+        primary_addresses = parse_row_primary_addresses(row.get)
         type_id = related_id(device_type) if device_type is not None else None
         if type_id is None and existing is not None:
             type_id = related_id(existing.get("device_type"))
@@ -1077,7 +1112,7 @@ class DeviceImporter(BaseImporter):
             planned.outcome = RowOutcome.BLOCKED
             return False
 
-        if not addresses:
+        if not addresses and not primary_addresses:
             return False
 
         roles_needed = {item.role for item in addresses}
@@ -1099,11 +1134,7 @@ class DeviceImporter(BaseImporter):
                     message=(
                         f"{role.capitalize()} is ambiguous on this type: {names}. Mark exactly "
                         f"one interface as "
-                        + (
-                            "mgmt_only"
-                            if role == "management"
-                            else "type loopback"
-                        )
+                        + ("mgmt_only" if role == "management" else "type loopback")
                         + " before importing."
                     ),
                 )
@@ -1189,27 +1220,21 @@ class DeviceImporter(BaseImporter):
             row,
             lookups,
             registry,
+            state,
             collector,
             planned,
             device_name=device_name,
             existing=existing,
             device_ref=device_ref,
             addresses=addresses,
+            primary_addresses=primary_addresses,
+            device_interfaces=ifaces,
         )
         if planned.outcome == RowOutcome.BLOCKED:
             return False
         if patch is not None:
             planned.actions.append(patch)
             added = True
-        ip4_col, ip6_col = primary_columns(addresses)
-        by_col = {item.column: item for item in addresses}
-        if ip4_col:
-            planned.resolved["primary_ip4"] = by_col[ip4_col].cidr
-        if ip6_col:
-            planned.resolved["primary_ip6"] = by_col[ip6_col].cidr
-        shown = displayed_primary(ip4_col, ip6_col)
-        if shown:
-            planned.resolved["displayed_primary"] = shown
         return added
 
     def _address_action(
@@ -1289,6 +1314,7 @@ class DeviceImporter(BaseImporter):
         row: Row,
         lookups: Lookups,
         registry: Registry,
+        state: dict[str, str],
         collector: IssueCollector,
         planned: PlannedRow,
         *,
@@ -1296,45 +1322,68 @@ class DeviceImporter(BaseImporter):
         existing: dict[str, Any] | None,
         device_ref: Any,
         addresses: list[ParsedAddress],
+        primary_addresses: list[ParsedPrimaryAddress],
+        device_interfaces: list[dict[str, Any]],
     ) -> CreateAction | None:
-        ip4_col, ip6_col = primary_columns(addresses)
-        if ip4_col is None and ip6_col is None:
+        if not primary_addresses:
             return None
-        by_col = {item.column: item for item in addresses}
+
+        same_row = {addr.cidr for addr in addresses}
+        interface_ids = {
+            int(iface["id"]) for iface in device_interfaces if iface.get("id") is not None
+        }
         payload: dict[str, Any] = {
             "id": int(existing["id"]) if existing is not None else device_ref
         }
+        resolved: list[tuple[str, ParsedPrimaryAddress, Any]] = []
 
-        def intended(column: str) -> Any:
-            cidr = by_col[column].cidr
-            found = registry.id_for(IP_ADDRESSES, Registry.key(cidr))
-            return found if found is not None else Ref(IP_ADDRESSES, Registry.key(cidr))
+        for primary in primary_addresses:
+            field = "primary_ip4" if primary.family == 4 else "primary_ip6"
+            target = self._resolve_primary_reference(
+                row,
+                lookups,
+                registry,
+                state,
+                collector,
+                planned,
+                device_name=device_name,
+                existing=existing,
+                primary=primary,
+                same_row=same_row,
+                interface_ids=interface_ids,
+            )
+            if target is None:
+                return None
+            resolved.append((field, primary, target))
 
         if existing is not None:
-            for field, column in (("primary_ip4", ip4_col), ("primary_ip6", ip6_col)):
-                if column is None:
-                    continue
+            for field, primary, target in resolved:
                 held = existing.get(field)
                 held_addr = held.get("address") if isinstance(held, dict) else None
-                if not held or not held_addr:
-                    payload[field] = intended(column)
+                held_id = related_id(held)
+                target_id = target if isinstance(target, int) else None
+                if not held:
+                    payload[field] = target
                     continue
-                try:
-                    matches = canonical(held_addr) == canonical(by_col[column].cidr)
-                except ValueError:
-                    matches = False
+                matches = held_id is not None and target_id is not None and held_id == target_id
+                if not matches and held_addr:
+                    try:
+                        matches = canonical(held_addr) == primary.cidr
+                    except ValueError:
+                        matches = False
                 if matches:
                     continue
                 collector.add(
                     Severity.ERROR,
                     Code.EXISTS_BUT_DIFFERS,
                     line=row.line,
-                    column=column,
-                    value=by_col[column].cidr,
-                    expected=str(held_addr),
+                    column=primary.column,
+                    value=primary.cidr,
+                    expected=str(held_addr or held_id),
                     message=(
-                        f"Device {device_name!r} already has {field} {held_addr!r}, which is not "
-                        f"{by_col[column].cidr}. Primary IP is not overwritten."
+                        f"Device {device_name!r} already has {field} "
+                        f"{str(held_addr or held_id)!r}, which is not {primary.cidr}. "
+                        "Primary IP is not overwritten."
                     ),
                     related_object=f"Device {device_name}",
                     related_url=self._url(lookups, DEVICES, existing),
@@ -1342,10 +1391,19 @@ class DeviceImporter(BaseImporter):
                 planned.outcome = RowOutcome.BLOCKED
                 return None
         else:
-            if ip4_col:
-                payload["primary_ip4"] = intended(ip4_col)
-            if ip6_col:
-                payload["primary_ip6"] = intended(ip6_col)
+            for field, _primary, target in resolved:
+                payload[field] = target
+
+        has_primary_v4 = bool(existing and existing.get("primary_ip4")) or any(
+            primary.family == 4 for primary in primary_addresses
+        )
+        has_primary_v6 = bool(existing and existing.get("primary_ip6")) or any(
+            primary.family == 6 for primary in primary_addresses
+        )
+        if has_primary_v4:
+            planned.resolved["displayed_primary"] = "primary_ip4"
+        elif has_primary_v6:
+            planned.resolved["displayed_primary"] = "primary_ip6"
 
         if "primary_ip4" not in payload and "primary_ip6" not in payload:
             return None
@@ -1358,6 +1416,69 @@ class DeviceImporter(BaseImporter):
             object_kind="device primary IP",
             method="patch",
         )
+
+    def _resolve_primary_reference(
+        self,
+        row: Row,
+        lookups: Lookups,
+        registry: Registry,
+        state: dict[str, str],
+        collector: IssueCollector,
+        planned: PlannedRow,
+        *,
+        device_name: str,
+        existing: dict[str, Any] | None,
+        primary: ParsedPrimaryAddress,
+        same_row: set[str],
+        interface_ids: set[int],
+    ) -> Any | None:
+        if primary.cidr in same_row:
+            found = registry.id_for(IP_ADDRESSES, Registry.key(primary.cidr))
+            target = found if found is not None else Ref(IP_ADDRESSES, Registry.key(primary.cidr))
+            source = "this row"
+        else:
+            held = self._ip_record(lookups, primary.cidr)
+            held_type = str((held or {}).get("assigned_object_type") or "")
+            held_interface = (held or {}).get("assigned_object_id")
+            on_device = (
+                existing is not None
+                and held is not None
+                and held_type == "dcim.interface"
+                and held_interface is not None
+                and int(held_interface) in interface_ids
+            )
+            if not on_device:
+                holder = self._ip_holder_label(held or {})
+                collector.add(
+                    Severity.ERROR,
+                    Code.PRIMARY_IP_NOT_ON_DEVICE,
+                    line=row.line,
+                    column=primary.column,
+                    value=primary.cidr,
+                    expected=f"an IPv{primary.family} address assigned to an interface on "
+                    f"{device_name!r}",
+                    message=(
+                        f"{primary.cidr} cannot be selected as {primary.column}: "
+                        f"it is not assigned to an interface on {device_name!r}"
+                        + (f" ({holder})" if holder else "")
+                        + ". Supply it in this row or assign it to the device first."
+                    ),
+                    related_object=holder or None,
+                )
+                planned.outcome = RowOutcome.BLOCKED
+                return None
+
+            target = int(held["id"])
+            registry.remember(IP_ADDRESSES, Registry.key(primary.cidr), target)
+            state[f"{IP_ADDRESSES}:{primary.cidr}"] = (
+                f"id={target},assigned={held_type}:{held_interface}"
+            )
+            source = "existing on device"
+
+        field = "primary_ip4" if primary.family == 4 else "primary_ip6"
+        planned.resolved[primary.column] = f"{primary.cidr} ({source})"
+        planned.resolved[field] = primary.cidr
+        return target
 
     def _ip_record(self, lookups: Lookups, cidr: str) -> dict[str, Any] | None:
         wanted = canonical(cidr)
@@ -1381,10 +1502,7 @@ class DeviceImporter(BaseImporter):
             place = f"{device_name} {assigned.get('name')}".strip()
             return f"assigned to {place}" if place else "assigned elsewhere"
         if record.get("assigned_object_type") and record.get("assigned_object_id"):
-            return (
-                f"assigned to {record['assigned_object_type']} "
-                f"{record['assigned_object_id']}"
-            )
+            return f"assigned to {record['assigned_object_type']} {record['assigned_object_id']}"
         return "unassigned"
 
     def after_phase(
