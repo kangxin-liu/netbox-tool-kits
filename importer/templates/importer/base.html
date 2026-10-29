@@ -9,7 +9,40 @@ context at all (Requirements 2.4, 14.1, 14.4).
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}NetBox tool kits{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}?v=3">
+  <style>
+    /* In the page, not only the stylesheet: a cached app.css was still painting the default blue button. */
+    .scroll-jumps {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+      margin: 0;
+      pointer-events: none;
+    }
+    .scroll-jumps button.scroll-jump {
+      pointer-events: auto;
+      touch-action: manipulation;
+      width: 48px;
+      height: 48px;
+      padding: 0;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--panel);
+      color: var(--accent);
+      border: 1px solid var(--line);
+      box-shadow: 0 8px 24px rgba(22, 25, 29, 0.28);
+      line-height: 0;
+    }
+    .scroll-jumps button.scroll-jump svg { width: 26px; height: 26px; display: block; }
+    .scroll-jumps button.scroll-jump:hover { background: #eef1f5; filter: none; }
+    .scroll-jumps button.scroll-jump:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .scroll-jumps button.scroll-jump[hidden] { display: none; }
+  </style>
 </head>
 <body>
 {% if user.is_authenticated %}
@@ -69,6 +102,19 @@ context at all (Requirements 2.4, 14.1, 14.4).
 <main>
   {% block content %}{% endblock %}
 </main>
+<div class="scroll-jumps" style="position: fixed; right: 16px; bottom: 16px; z-index: 1000; display: flex; flex-direction: column; gap: 10px;">
+  <button type="button" class="scroll-jump" id="scroll-to-bottom" hidden aria-label="Scroll to bottom">
+    <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path fill="currentColor" d="M18 6.41 16.59 5 12 9.58 7.41 5 6 6.41 12 12.41zm0 6.59-1.41-1.41L12 16.17 7.41 11.59 6 13l6 6z"/>
+    </svg>
+  </button>
+  <button type="button" class="scroll-jump" id="scroll-to-top" hidden aria-label="Scroll to top">
+    <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path fill="currentColor" d="M6 17.59 7.41 19 12 14.42 16.59 19 18 17.59 12 11.59zm0-6.59 1.41 1.41L12 7.83l4.59 4.58L18 11l-6-6z"/>
+    </svg>
+  </button>
+</div>
 {% block scripts %}{% endblock %}
+<script src="{% static 'js/scroll.js' %}" defer></script>
 </body>
 </html>

@@ -262,3 +262,40 @@ body.centred input {
 }
 body.centred button { width: 100%; margin-top: 18px; }
 .fineprint { margin: 18px 0 0; color: var(--muted); font-size: 0.85em; }
+
+/* Viewport overlay. The same rules are in base.html so a cached stylesheet cannot fall back to the blue text button. */
+.scroll-jumps {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  width: max-content;
+  margin: 0;
+  pointer-events: none;
+}
+.scroll-jumps button.scroll-jump {
+  pointer-events: auto;
+  touch-action: manipulation;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--panel);
+  color: var(--accent);
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 24px rgba(22, 25, 29, 0.28);
+  line-height: 0;
+}
+.scroll-jumps button.scroll-jump svg { width: 26px; height: 26px; display: block; }
+.scroll-jumps button.scroll-jump:hover { background: #eef1f5; filter: none; }
+.scroll-jumps button.scroll-jump:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.scroll-jumps button.scroll-jump[hidden] { display: none; }
