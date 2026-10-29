@@ -74,6 +74,21 @@ def test_unverified_tls_shows_a_persistent_banner(signed_in):
     assert "verification is <strong>disabled</strong>" in html
 
 
+@pytest.mark.parametrize("page", PAGES)
+def test_scroll_jumps_are_present_and_start_hidden(signed_in, page):
+    """Long verdicts need a way back to either end; the controls stay out of the way until then."""
+    html = signed_in.get(reverse(f"importer:{page}")).content.decode()
+    assert 'id="scroll-to-bottom" hidden' in html
+    assert 'id="scroll-to-top" hidden' in html
+    assert 'aria-label="Scroll to bottom"' in html
+    assert 'aria-label="Scroll to top"' in html
+    assert "border-radius: 50%" in html
+    assert 'fill="currentColor"' in html
+    assert 'class="scroll-jumps"' in html
+    assert "position: fixed" in html
+    assert "js/scroll.js" in html
+
+
 def test_login_page_reveals_no_target(client):
     html = client.get(reverse("login")).content.decode()
     from django.conf import settings

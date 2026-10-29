@@ -64,8 +64,10 @@ built:
   downloads.
 - **Prepared-parent hierarchy (D16).** The hierarchy sheet requires `site_slug`,
   `parent_location_slug`, `datahall`, `datahall_slug`, `rack`, and `rack_u_height`. Sites and parent
-  locations must already exist; the importer creates only direct child locations and racks. Existing
-  objects are never re-parented, and old hierarchy templates intentionally fail structure validation.
+  locations must already exist; the importer creates only direct child locations and racks. Optional
+  `rack_role` values must be existing rack role slugs and are applied to new racks or patched onto
+  existing racks. Existing objects are never re-parented, and old hierarchy templates intentionally
+  fail structure validation.
 
 - **Hardening and handover (19–22).** The row-count bound stated on every page and enforced as a
   validation error, so a file too large to finish in one request is refused rather than timed out; an

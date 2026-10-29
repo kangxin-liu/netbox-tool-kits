@@ -143,6 +143,17 @@ HIERARCHY_COLUMNS: tuple[ColumnSpec, ...] = (
         example="EXA01-MMR1-RK0001",
     ),
     ColumnSpec(
+        key="rack_role",
+        label="rack_role",
+        required=False,
+        conflict=Conflict.DESCRIPTIVE,
+        help_text=(
+            "Existing NetBox rack role slug. New racks receive it; existing racks are "
+            "updated to this value"
+        ),
+        example="compute",
+    ),
+    ColumnSpec(
         key="rack_u_height",
         label="rack_u_height",
         required=True,

@@ -63,6 +63,7 @@ VALID_HIERARCHY_ROW = [
     "TST1-DH1",
     "tst1-dh1",
     "TST1-DH1-R01",
+    "",
     "45",
     "19",
     "active",
@@ -319,6 +320,7 @@ class TestRows:
             " TST1-DH1 ",
             " tst1-dh1 ",
             "TST1-DH1-R01",
+            "",
             " 45 ",
             *[""] * 5,
         ]
@@ -334,6 +336,7 @@ class TestRows:
             "<script>alert(1)</script>",
             "tst1-dh1",
             "TST1-DH1-R01",
+            "",
             "45",
             "",
             "",
@@ -350,7 +353,7 @@ class TestRows:
         again = parse("hierarchy", hierarchy_rows(VALID_HIERARCHY_ROW), "a.csv")
         edited = parse(
             "hierarchy",
-            hierarchy_rows([*VALID_HIERARCHY_ROW[:5], "42", *VALID_HIERARCHY_ROW[6:]]),
+            hierarchy_rows([*VALID_HIERARCHY_ROW[:6], "42", *VALID_HIERARCHY_ROW[7:]]),
             "a.csv",
         )
         assert one.fingerprint == again.fingerprint
@@ -372,6 +375,7 @@ class TestXlsxSpecifics:
                     "TST1-DH1",
                     "tst1-dh1",
                     "TST1-DH1-R01",
+                    "",
                     45,
                     19,
                     "active",

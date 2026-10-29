@@ -93,6 +93,8 @@ CHOICES: dict[str, dict[str, frozenset[str]]] = {
 
 
 DEVICES = "dcim.devices"
+RACKS = "dcim.racks"
+RACK_ROLES = "dcim.rack-roles"
 INTERFACES = "dcim.interfaces"
 INTERFACE_TEMPLATES = "dcim.interface-templates"
 IP_ADDRESSES = "ipam.ip-addresses"
@@ -244,6 +246,8 @@ class FakeNetBox:
                 raise NetBoxWriteRejected(status, body, endpoint)
         if endpoint == INTERFACES:
             return [self._apply_interface_tags_patch(item) for item in payloads]
+        if endpoint == RACKS:
+            return [self._apply_rack_role_patch(item) for item in payloads]
         return [self._apply_primary_patch(item) for item in payloads]
 
     def restore(self, endpoint: str, object_id: int, fields: dict[str, Any]) -> dict[str, Any]:
@@ -416,6 +420,16 @@ class FakeNetBox:
             return record
         return {"id": object_id, "tags": self._tag_briefs(item.get("tags") or [])}
 
+    def _apply_rack_role_patch(self, item: dict[str, Any]) -> dict[str, Any]:
+        object_id = int(item["id"])
+        for record in self.objects.get(RACKS, []):
+            if int(record.get("id", 0)) != object_id:
+                continue
+            record["role"] = self._brief(RACKS, "role", item["role"])
+            self._bump(RACKS, object_id)
+            return record
+        return {"id": object_id, "role": self._brief(RACKS, "role", item["role"])}
+
     def _bump(self, endpoint: str, object_id: int) -> None:
         key = (endpoint, int(object_id))
         self._versions[key] = self._versions.get(key, 1) + 1
@@ -511,7 +525,7 @@ class FakeNetBox:
             "tenant": "tenancy.tenants",
             "device": "dcim.devices",
             "device_type": "dcim.device-types",
-            "role": "dcim.device-roles",
+            "role": RACK_ROLES if owner_endpoint == RACKS else "dcim.device-roles",
             "parent": (
                 "dcim.locations" if owner_endpoint == "dcim.locations" else "dcim.interfaces"
             ),

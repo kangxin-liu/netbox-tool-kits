@@ -29,6 +29,7 @@ REVERT_METHODS = frozenset({"GET", "OPTIONS", "HEAD", "PATCH", "DELETE"})
 
 PRIMARY_IP_PATCH_FIELDS = frozenset({"id", "primary_ip4", "primary_ip6"})
 INTERFACE_TAG_PATCH_FIELDS = frozenset({"id", "tags"})
+RACK_ROLE_PATCH_FIELDS = frozenset({"id", "role"})
 
 
 class Failure(StrEnum):
@@ -247,7 +248,7 @@ def _looks_like_dns(exception: Exception, text: str) -> bool:
 
 
 class NetBoxClient:
-    """Reads/creates plus the field-scoped D11 primary-IP and D15 interface-tag PATCHes."""
+    """Reads/creates plus the field-scoped forward PATCH exceptions."""
 
     def __init__(
         self,
@@ -373,7 +374,7 @@ class NetBoxClient:
         return [dict(created)]
 
     def patch(self, endpoint: str, payload: dict | list[dict]) -> list[dict[str, Any]]:
-        """The bounded forward PATCH exceptions from D11 and D15.
+        """The bounded forward PATCH exceptions.
 
         Any other endpoint or field is refused here, so a caller cannot accidentally reopen
         update-in-general (Requirements 8.19, 9.49, 11.3).
@@ -381,12 +382,13 @@ class NetBoxClient:
         allowed = {
             "dcim.devices": PRIMARY_IP_PATCH_FIELDS,
             "dcim.interfaces": INTERFACE_TAG_PATCH_FIELDS,
+            "dcim.racks": RACK_ROLE_PATCH_FIELDS,
         }
         permitted_fields = allowed.get(endpoint)
         if permitted_fields is None:
             raise RuntimeError(
                 f"PATCH of {endpoint} is not permitted: forward apply only PATCHes device "
-                f"primary IPs and interface tags."
+                f"primary IPs, interface tags, and rack roles."
             )
         payloads = payload if isinstance(payload, list) else [payload]
         for item in payloads:
@@ -406,6 +408,11 @@ class NetBoxClient:
                     isinstance(tag_id, int) for tag_id in item["tags"]
                 ):
                     raise RuntimeError("interface PATCH tags must be a list of integer tag ids.")
+            if endpoint == "dcim.racks":
+                if set(item) != RACK_ROLE_PATCH_FIELDS:
+                    raise RuntimeError("rack PATCH must contain exactly id and role.")
+                if not isinstance(item["role"], int):
+                    raise RuntimeError("rack PATCH role must be an integer rack-role id.")
 
         updated: list[dict[str, Any]] = []
         try:

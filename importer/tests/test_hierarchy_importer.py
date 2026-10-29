@@ -19,6 +19,7 @@ from importer.validation import Code, Severity
 SITES = "dcim.sites"
 LOCATIONS = "dcim.locations"
 RACKS = "dcim.racks"
+RACK_ROLES = "dcim.rack-roles"
 TENANTS = "tenancy.tenants"
 
 BASE_ROW = {
@@ -169,6 +170,25 @@ class TestCreateAndReuse:
         assert rack.payload["width"] == 19
         assert rack.payload["status"] == "active"
 
+    def test_new_rack_can_carry_an_existing_rack_role_slug(self, importer, netbox):
+        site, parent = seed_prerequisites(netbox)
+        role = netbox.add(
+            RACK_ROLES, name="Corporate Networks Rack", slug="corporate-networks-rack"
+        )
+        plan = validate(importer, netbox, [row(rack_role="corporate-networks-rack")])
+        assert plan.verdict.is_applyable()
+        rack = plan.rows[0].actions[-1]
+        assert rack.payload["role"] == role["id"]
+        assert plan.rows[0].resolved["rack_role"] == "Corporate Networks Rack (existing)"
+
+    def test_rack_role_must_be_the_slug_not_the_display_name(self, importer, netbox):
+        site, parent = seed_prerequisites(netbox)
+        netbox.add(RACK_ROLES, name="Compute Rack", slug="compute")
+        plan = validate(importer, netbox, [row(rack_role="Compute Rack")])
+        assert plan.verdict.is_applyable() is False
+        error = next(issue for issue in plan.verdict.errors if issue.column == "rack_role")
+        assert "slug" in error.message
+
     def test_existing_child_plans_only_the_rack(self, importer, netbox):
         site, parent = seed_prerequisites(netbox)
         seed_child(netbox, site, parent)
@@ -183,6 +203,42 @@ class TestCreateAndReuse:
         assert plan.verdict.is_applyable()
         assert plan.rows[0].outcome is RowOutcome.SKIP_EXISTS
         assert any(issue.code is Code.ALREADY_EXISTS for issue in plan.verdict.issues)
+
+    def test_existing_rack_missing_role_is_updated_from_sheet(self, importer, netbox):
+        site, parent = seed_prerequisites(netbox)
+        child = seed_child(netbox, site, parent)
+        rack = seed_rack(netbox, site, child)
+        role = netbox.add(RACK_ROLES, name="Compute", slug="compute")
+        plan = validate(importer, netbox, [row(rack_role="compute")])
+        assert plan.verdict.is_applyable()
+        action = plan.rows[0].actions[-1]
+        assert action.method == "patch"
+        assert action.payload == {"id": rack["id"], "role": role["id"]}
+
+        report = importer.apply(plan, Lookups(client=netbox))
+        assert report.changed_count == 1
+        assert netbox.patches[0].payloads == [{"id": rack["id"], "role": role["id"]}]
+        assert netbox.stored(RACKS)[0]["role"]["slug"] == "compute"
+
+    def test_existing_rack_role_is_overridden_from_sheet(self, importer, netbox):
+        site, parent = seed_prerequisites(netbox)
+        child = seed_child(netbox, site, parent)
+        old_role = netbox.add(RACK_ROLES, name="Storage", slug="storage")
+        new_role = netbox.add(RACK_ROLES, name="Compute", slug="compute")
+        seed_rack(netbox, site, child, role={"id": old_role["id"], "name": "Storage"})
+        plan = validate(importer, netbox, [row(rack_role="compute")])
+        assert plan.verdict.is_applyable()
+        assert plan.rows[0].actions[-1].payload["role"] == new_role["id"]
+
+    def test_existing_rack_with_matching_role_is_skipped(self, importer, netbox):
+        site, parent = seed_prerequisites(netbox)
+        child = seed_child(netbox, site, parent)
+        role = netbox.add(RACK_ROLES, name="Compute", slug="compute")
+        seed_rack(netbox, site, child, role={"id": role["id"], "name": "Compute"})
+        plan = validate(importer, netbox, [row(rack_role="compute")])
+        assert plan.verdict.is_applyable()
+        assert plan.rows[0].outcome is RowOutcome.SKIP_EXISTS
+        assert plan.rows[0].actions == []
 
     def test_apply_creates_child_before_rack(self, importer, netbox):
         seed_prerequisites(netbox)
@@ -327,6 +383,11 @@ class TestOptionalReferencesAndGate:
         seed_prerequisites(netbox)
         plan = validate(importer, netbox, [row(tenant="Missing Tenant")])
         assert any(issue.code is Code.TENANT_NOT_FOUND for issue in plan.verdict.errors)
+
+    def test_missing_rack_role_blocks(self, importer, netbox):
+        seed_prerequisites(netbox)
+        plan = validate(importer, netbox, [row(rack_role="missing-role")])
+        assert any(issue.column == "rack_role" for issue in plan.verdict.errors)
 
     def test_validation_never_writes(self, importer, netbox):
         seed_prerequisites(netbox)

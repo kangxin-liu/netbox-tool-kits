@@ -35,6 +35,7 @@ from importer.validation import (
 SITES = "dcim.sites"
 LOCATIONS = "dcim.locations"
 RACKS = "dcim.racks"
+RACK_ROLES = "dcim.rack-roles"
 TENANTS = "tenancy.tenants"
 
 DEFAULT_WIDTH = 19
@@ -61,6 +62,7 @@ class Resolution:
 class HierarchyImporter(BaseImporter):
     name = "hierarchy"
     endpoint_order = (LOCATIONS, RACKS)
+    apply_phases = ((LOCATIONS, "post"), (RACKS, "post"), (RACKS, "patch"))
 
     choice_sources: ClassVar[dict[str, tuple[str, str]]] = {
         "rack_status": (RACKS, "status"),
@@ -180,12 +182,15 @@ class HierarchyImporter(BaseImporter):
         child_slugs = sorted({row.get("datahall_slug").strip() for row in rows})
         child_names = [row.get("datahall") for row in rows]
         rack_names = [row.get("rack") for row in rows]
+        rack_roles = [row.get("rack_role") for row in rows if row.get("rack_role")]
         tenant_names = [row.get("tenant") for row in rows if row.get("tenant")]
 
         lookups.prefetch(SITES, slug__ie=site_slugs)
         lookups.prefetch(LOCATIONS, slug__ie=sorted(set(parent_slugs + child_slugs)))
         lookups.prefetch(LOCATIONS, names=child_names)
         lookups.prefetch(RACKS, names=rack_names)
+        if rack_roles:
+            lookups.prefetch(RACK_ROLES, slug__ie=rack_roles)
         if tenant_names:
             lookups.prefetch(TENANTS, names=tenant_names)
 
@@ -529,6 +534,10 @@ class HierarchyImporter(BaseImporter):
         if tenant_id is False:
             planned.outcome = RowOutcome.BLOCKED
             return resolution
+        role_id = self._rack_role(row, lookups, collector, planned)
+        if role_id is False:
+            planned.outcome = RowOutcome.BLOCKED
+            return resolution
 
         matches = lookups.get_matches(RACKS, name=rack_name.raw)
         if len(matches) > 1:
@@ -601,13 +610,18 @@ class HierarchyImporter(BaseImporter):
                     if conflict.severity is Severity.ERROR:
                         planned.outcome = RowOutcome.BLOCKED
 
+            role_action = self._rack_role_action(row, existing, role_id)
+            if role_action is not None:
+                resolution.action = role_action
+                planned.resolved["rack_role"] = f"{row.get('rack_role').strip()} (will update)"
+
             self._register(
                 state,
                 registry,
                 resolution,
                 f"id={existing['id']},u_height={existing.get('u_height')},"
                 f"site={_related_id(existing, 'site')},"
-                f"location={_related_id(existing, 'location')}",
+                f"location={_related_id(existing, 'location')},role={_related_id(existing, 'role')}",
             )
             planned.resolved["rack"] = f"{existing.get('name')} (existing)"
             return resolution
@@ -626,6 +640,8 @@ class HierarchyImporter(BaseImporter):
             payload["description"] = row.get("description").strip()
         if tenant_id:
             payload["tenant"] = tenant_id
+        if role_id:
+            payload["role"] = role_id
 
         resolution.action = CreateAction(
             endpoint=RACKS,
@@ -639,6 +655,52 @@ class HierarchyImporter(BaseImporter):
         return resolution
 
     # --- shared helpers ---------------------------------------------------------------------
+
+    def _rack_role(
+        self,
+        row: Row,
+        lookups: Lookups,
+        collector: IssueCollector,
+        planned: PlannedRow,
+    ) -> int | None | bool:
+        name = row.get("rack_role").strip()
+        if not name:
+            return None
+        role = lookups.get_or_none(RACK_ROLES, slug=name)
+        if role is None:
+            collector.add(
+                Severity.ERROR,
+                Code.PREREQUISITE_MISSING,
+                line=row.line,
+                column="rack_role",
+                value=name,
+                expected="the slug of a rack role that already exists in NetBox",
+                message=(
+                    f"No rack role with slug {name!r} exists in NetBox. This importer never creates "
+                    "rack roles: create it first, or clear the column."
+                ),
+            )
+            return False
+        planned.resolved["rack_role"] = f"{role.get('name') or role.get('slug')} (existing)"
+        return int(role["id"])
+
+    def _rack_role_action(
+        self,
+        row: Row,
+        existing: dict[str, Any],
+        role_id: int | None | bool,
+    ) -> CreateAction | None:
+        if not role_id or _related_id(existing, "role") == int(role_id):
+            return None
+        return CreateAction(
+            endpoint=RACKS,
+            payload={"id": int(existing["id"]), "role": int(role_id)},
+            key=Registry.key(existing["id"], "role"),
+            label=f"Rack {existing.get('name')}",
+            line=row.line,
+            object_kind="rack role",
+            method="patch",
+        )
 
     def _tenant(
         self,

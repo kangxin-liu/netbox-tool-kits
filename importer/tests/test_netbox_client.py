@@ -317,9 +317,9 @@ class TestCreateOnlyInvariant:
         assert "patch" in surface
         assert not surface & {"update", "delete", "save", "remove"}
 
-    def test_patch_refuses_endpoints_outside_the_two_forward_exceptions(self, client):
-        with pytest.raises(RuntimeError, match="primary IPs and interface tags"):
-            client.patch("dcim.racks", {"id": 1, "primary_ip4": 1})
+    def test_patch_refuses_endpoints_outside_the_forward_exceptions(self, client):
+        with pytest.raises(RuntimeError, match="primary IPs, interface tags, and rack roles"):
+            client.patch("dcim.locations", {"id": 1, "name": "new"})
 
     def test_patch_refuses_fields_other_than_primary_ip(self, client):
         with pytest.raises(RuntimeError, match="forbidden field"):
@@ -328,6 +328,23 @@ class TestCreateOnlyInvariant:
     def test_interface_patch_refuses_every_field_except_tags(self, client):
         with pytest.raises(RuntimeError, match="forbidden field"):
             client.patch("dcim.interfaces", {"id": 1, "tags": [7], "name": "swp1"})
+
+    def test_rack_patch_refuses_every_field_except_role(self, client):
+        with pytest.raises(RuntimeError, match="forbidden field"):
+            client.patch("dcim.racks", {"id": 1, "role": 7, "name": "rack01"})
+
+    @responses.activate
+    def test_rack_patch_accepts_only_id_and_integer_role_id(self, client):
+        responses.add(
+            responses.PATCH,
+            f"{BASE}/api/dcim/racks/9/",
+            json={"id": 9, "role": {"id": 7, "slug": "compute"}},
+            status=200,
+        )
+        updated = client.patch("dcim.racks", {"id": 9, "role": 7})
+        assert updated[0]["role"]["id"] == 7
+        with pytest.raises(RuntimeError, match="integer rack-role id"):
+            client.patch("dcim.racks", {"id": 9, "role": "7"})
 
     @responses.activate
     def test_interface_patch_accepts_only_id_and_integer_tag_ids(self, client):

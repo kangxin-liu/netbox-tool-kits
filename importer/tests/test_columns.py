@@ -28,6 +28,7 @@ EXPECTED_REQUIRED = {
 
 EXPECTED_OPTIONAL = {
     "hierarchy": (
+        "rack_role",
         "rack_width",
         "rack_status",
         "rack_form_factor",
@@ -94,7 +95,7 @@ EXPECTED_CONSEQUENTIAL = {
 }
 
 EXPECTED_DESCRIPTIVE = {
-    "hierarchy": {"rack_status", "rack_form_factor", "tenant", "description"},
+    "hierarchy": {"rack_role", "rack_status", "rack_form_factor", "tenant", "description"},
     "devices": {"serial", "manufacturer", "device_role", "status", "asset_tag", "tenant"},
     # The two `*_interface_type` columns are DESCRIPTIVE only because `Conflict` is required on
     # every spec and has no value for "not comparable": the column is read when the interface does

@@ -34,6 +34,7 @@ NATURAL_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("site", "name"),
     ),
     "dcim.racks": (("site", "name"), ("name",)),
+    "dcim.rack-roles": (("slug",), ("name",)),
     "dcim.device-types": (("model",), ("slug",)),
     "dcim.device-roles": (("slug",), ("name",)),
     "dcim.manufacturers": (("slug",), ("name",)),

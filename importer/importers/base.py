@@ -799,7 +799,11 @@ class BaseImporter(ABC):
                     message=(
                         "Breakout tag added."
                         if action.object_kind == "interface tags"
-                        else "Primary IP set."
+                        else (
+                            "Rack role set."
+                            if action.object_kind == "rack role"
+                            else "Primary IP set."
+                        )
                     ),
                     sequence=report.write_count,
                 )
