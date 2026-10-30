@@ -436,6 +436,7 @@ on disk — it should be rotated if it has ever been shared, and `.gitignore` no
 | D14 **(built)** | Append-only operation journal plus a two-step, reverse-order compensating revert | Row results cannot represent one-row/many-object and many-row/one-object writes precisely. Safe reversion needs operation identity, minimal before/after values, same-target and post-state checks, and immutable attempt outcomes; without those, a history button could delete later work | apply instrumentation, audit models, history UI/CSV, `services/revert.py`, NetBox delete permission, Requirement 18 |
 | D15 **(built, probe outstanding)** | Derive `port-breakout-2x` / `4x` / `8x` from each D13 parent's profile-side positions and add the existing tag to that physical parent | Row count is population, not breakout capacity; total profile connectors misstate shuffle parents. Positions per connector is the stable factor. Existing parents need a bounded tags-only PATCH, while conflicting factor tags block rather than being removed | tag lookup/readiness, cabling S3/S4 planning, interface create payloads, an interface PATCH phase, drift signatures, D14 UPDATE/revert coverage, live probe |
 | D16 **(built, live write probe and release approvals outstanding)** | Existing site + parent location are hierarchy prerequisites; create/reuse only the direct child datahall and rack; rack names are opaque | Governed upper-level inventory must not be invented from typos, and NetBox relationships are authoritative where punctuation and slug prefixes are not | hierarchy columns/templates/importer, location natural keys, naming validation, readiness, samples/docs/tests |
+| D17 **(built)** | Amends D11: the four address cells are optional on a new device even when its type defines management or loopback; blank cells create the device without addresses and raise a `DEVICE_IP_DEFERRED` WARNING for acknowledgement; a later re-upload with addresses completes the device under 8.10/8.20 | Rack mounting and IP planning finish at different times; blocking a hall's elevations on the IP plan forced operators to edit device types around imports. A WARNING keeps the incomplete record visible without rejecting a row that is correct, just unfinished | S4 in `importers/devices.py`, one issue code (`DEVICE_IP_REQUIRED` retired), template guidance, task 28 tests, runbook, device samples |
 
 ## Component design
 
@@ -983,9 +984,11 @@ discriminates them on the device type: `mgmt_only=true` is the management port, 
 the loopback. Community device-type YAML often types `Loopback0` as `virtual`; that is not this
 tool's loopback, and it is prep to correct (see `docs/empty-instance-prep.md`).
 
-A row supplies addresses; the type supplies names. At least one of the four address cells is
-required when the type defines either interface; all four must be blank when it defines neither
-(a patch panel). Dual-stack assignment is four columns, not two overloaded cells.
+A row supplies addresses; the type supplies names. All four address cells are optional (D17): a new
+device whose type defines either interface may leave them blank, is created without addresses, and
+raises a `DEVICE_IP_DEFERRED` WARNING; re-uploading the row with addresses later completes it. All
+four must be blank when the type defines neither interface (a patch panel). Dual-stack assignment is
+four columns, not two overloaded cells.
 
 Two additional optional Excel columns, `primary address v4` and `primary address v6` (normalised
 internally to `primary_address_v4` / `primary_address_v6`), explicitly select the corresponding
@@ -1012,8 +1015,10 @@ sequenceDiagram
     I->>L: interface templates: unique mgmt_only, unique type=loopback
     alt type has neither interface
         I-->>I: all four IP cells must be blank
-    else type has at least one
-        I-->>I: at least one of four IP cells required
+    else type has at least one, all four cells blank, new device
+        I-->>I: WARNING DEVICE_IP_DEFERRED (D17); create device only
+    else type has at least one, some cells filled
+        I-->>I: validate and assign the filled cells
     end
     alt device does not exist
         I->>NB: POST /api/dcim/devices/

@@ -176,8 +176,8 @@ class Code(StrEnum):
     UNIQUE_FIELD_TAKEN = "UNIQUE_FIELD_TAKEN"
     RU_RANGE_EXCEEDS_RACK = "RU_RANGE_EXCEEDS_RACK"
     RU_HEIGHT_DISAGREES_WITH_TYPE = "RU_HEIGHT_DISAGREES_WITH_TYPE"
-    DEVICE_IP_REQUIRED = "DEVICE_IP_REQUIRED"
-    """The type defines a management or loopback interface and every IP cell is blank."""
+    DEVICE_IP_DEFERRED = "DEVICE_IP_DEFERRED"
+    """A new device's type defines management or loopback, and every IP cell is blank (D17)."""
 
     DEVICE_IP_NOT_APPLICABLE = "DEVICE_IP_NOT_APPLICABLE"
     """An address was supplied on a type that has nowhere to assign it (Requirement 8.14)."""

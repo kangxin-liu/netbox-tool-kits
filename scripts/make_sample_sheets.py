@@ -510,6 +510,20 @@ DEVICES_VALID = (
         management_ip4="192.0.2.21/24",
         primary_address_v4="192.0.2.21/24",
     ),
+    # D17: addresses deferred. Mounts with a DEVICE_IP_DEFERRED warning to acknowledge; re-upload
+    # this row with addresses once the IP plan exists.
+    device(
+        "LAB1-DH1-R02",
+        "front",
+        "12",
+        "1",
+        "lab1-dh1-r02-leaf02",
+        "Spectrum-SN4700",
+        "",
+        "Nvidia",
+        "ns-leaf",
+        "active",
+    ),
 )
 
 DEVICES_INVALID = (
@@ -671,7 +685,8 @@ DEVICES_INVALID = (
         "Nvidia",
         "ns-leaf",
         "active",
-        note="network device with no address: at least one of the four IP cells is required",
+        primary_address_v4="192.0.2.51/24",
+        note="primary address with no address in the row: a new device has nothing to select",
     ),
     device(
         "LAB1-DH1-R02",

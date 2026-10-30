@@ -38,8 +38,15 @@ by sheet 2.
 
 ## Device loopback and management addresses
 
-Four optional columns on the device sheet. Fill at least one of them on every network device. A
-patch panel — whose device type has no management port and no loopback — leaves all four blank.
+Four optional columns on the device sheet. A patch panel — whose device type has no management port
+and no loopback — must leave all four blank.
+
+**Mount first, address later.** A network device may also leave all four blank when its IP plan is
+not ready. The device is created with its interfaces but no addresses and no primary IP, and each
+such row raises a `DEVICE_IP_DEFERRED` warning that you acknowledge once before applying. When the
+plan lands, upload the same rows again with the addresses filled: the devices already exist, so only
+the addresses (and any primary you select) are created. A device that already exists and still has
+blank cells is reported as already present, with no second warning.
 
 | Column | What it does |
 | --- | --- |

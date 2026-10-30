@@ -208,13 +208,6 @@ class TestInterfaceResolution:
         assert plan.rows[0].outcome == RowOutcome.CREATE
         assert all(action.endpoint != IPS for action in plan.rows[0].actions)
 
-    def test_a_switch_with_templates_and_blank_ips_is_rejected(self, importer, netbox):
-        seeded = seed(netbox)
-        add_templates(netbox, seeded.device_type)
-        plan = validate(importer, netbox, [row()])
-        error = next(i for i in plan.verdict.errors if i.code is Code.DEVICE_IP_REQUIRED)
-        assert "at least one" in error.message
-
     def test_a_management_address_against_a_type_with_no_mgmt_blocks(self, importer, netbox):
         seed(netbox)
         plan = validate(importer, netbox, [row(management_ip4=MGMT_V4)])
@@ -222,6 +215,82 @@ class TestInterfaceResolution:
             Code.MGMT_INTERFACE_NOT_FOUND,
             Code.DEVICE_IP_NOT_APPLICABLE,
         }
+
+
+# --- D17: addressing deferred -----------------------------------------------------------------
+
+
+class TestDeferredAddressing:
+    def test_a_switch_with_blank_ips_warns_instead_of_blocking(self, importer, netbox):
+        seeded = seed(netbox)
+        add_templates(netbox, seeded.device_type)
+        plan = validate(importer, netbox, [row()])
+        assert plan.verdict.errors == []
+        warning = next(i for i in plan.verdict.warnings if i.code is Code.DEVICE_IP_DEFERRED)
+        assert warning.column == "management_ip4"
+        assert "management and loopback" in warning.message
+        assert plan.rows[0].outcome == RowOutcome.CREATE
+        assert [a.endpoint for a in plan.rows[0].actions] == [DEVICES]
+
+    def test_the_deferral_must_be_acknowledged_before_applying(self, importer, netbox):
+        seeded = seed(netbox)
+        add_templates(netbox, seeded.device_type)
+        plan = validate(importer, netbox, [row()])
+        assert not plan.verdict.is_applyable()
+        assert "acknowledged" in (plan.verdict.refusal_reason() or "")
+
+        plan.verdict.acknowledge()
+        report = apply_plan(importer, netbox, plan)
+        assert report.aborted is False
+        assert len(netbox.stored(DEVICES)) == 1
+        assert netbox.stored(IPS) == []
+        assert netbox.patches == []
+
+    def test_a_reupload_with_addresses_completes_the_device(self, importer, netbox):
+        seeded = seed(netbox)
+        add_templates(netbox, seeded.device_type)
+        plan = validate(importer, netbox, [row()])
+        plan.verdict.acknowledge()
+        apply_plan(importer, netbox, plan)
+        device = netbox.stored(DEVICES)[0]
+        add_ifaces(netbox, device)
+        netbox.posts.clear()
+
+        plan = validate(importer, netbox, [addressed()])
+        assert plan.verdict.errors == []
+        assert plan.verdict.warnings == []
+        assert plan.rows[0].outcome == RowOutcome.CREATE
+        apply_plan(importer, netbox, plan)
+        assert {ip["address"] for ip in netbox.stored(IPS)} == {MGMT_V4, LOOP_V4}
+        assert netbox.stored(DEVICES)[0]["primary_ip4"]["address"] == MGMT_V4
+        assert len(netbox.stored(DEVICES)) == 1
+
+    def test_an_existing_device_with_blank_ips_is_already_present(self, importer, netbox):
+        seeded = seed(netbox)
+        add_templates(netbox, seeded.device_type)
+        add_ifaces(netbox, mounted(netbox, seeded))
+        plan = validate(importer, netbox, [row()])
+        assert plan.verdict.errors == []
+        assert plan.verdict.warnings == []
+        assert plan.rows[0].outcome == RowOutcome.SKIP_EXISTS
+
+    def test_a_primary_reference_with_no_address_still_blocks_a_new_device(self, importer, netbox):
+        seeded = seed(netbox)
+        add_templates(netbox, seeded.device_type)
+        plan = validate(importer, netbox, [row(primary_address_v4=MGMT_V4)])
+        assert any(i.code is Code.PRIMARY_IP_NOT_ON_DEVICE for i in plan.verdict.errors)
+
+    def test_a_large_all_blank_sheet_is_one_grouped_code(self, importer, netbox):
+        seeded = seed(netbox, rack_height=48, type_height=1)
+        add_templates(netbox, seeded.device_type)
+        rows = [
+            row(device_name=f"exa1-dh1-r01-sw{n:02d}", bottom_ru=str(n), ru_height="1")
+            for n in range(1, 41)
+        ]
+        plan = validate(importer, netbox, rows)
+        assert plan.verdict.errors == []
+        assert {i.code for i in plan.verdict.warnings} == {Code.DEVICE_IP_DEFERRED}
+        assert len(plan.verdict.warnings) == 40
 
 
 # --- apply: create, remaining work, primary IP ----------------------------------------------

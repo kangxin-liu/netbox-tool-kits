@@ -257,8 +257,10 @@ Optional: `serial`, `manufacturer`, `device_role`, `status`, `asset_tag`, `tenan
 
 The four interface-address columns are optional as *columns* so a sheet written before they existed still
 parses, and so a patch panel — whose device type has neither interface — can leave all four cells
-blank. They are not optional as *values* on a device whose type defines those interfaces: at least
-one of the four cells must be filled, which is decision **D11**. Dual-stack is first-class: each
+blank. They are also optional as *values* on a device whose type defines those interfaces, so racks
+can be populated before the IP plan exists: a row that leaves all four cells blank creates the device
+without addresses and raises an acknowledgement WARNING, and a later upload of the same row with
+addresses completes it under 8.10. That is decision **D11** as amended by **D17**. Dual-stack is first-class: each
 role has an IPv4 column and an IPv6 column, and a row may fill any non-empty subset. Interface
 *names* are not columns. Arista, Juniper and Nvidia Cumulus all call the management port something
 different, and the same is true of the loopback; putting those names in the sheet would copy the
@@ -307,13 +309,22 @@ primary IP.
  the same cell. `loopback_ip4`, `management_ip4`, and `primary address v4` SHALL be IPv4;
  `loopback_ip6`, `management_ip6`, and `primary address v6` SHALL be IPv6. A family that disagrees
  with its column is rejected against that column, not silently swapped.
-14. WHEN the resolved device type (or, for an existing device, the device itself) has at least one
- management or loopback interface as defined in 8.16, THEN the system SHALL require at least one of
- the four address cells to be non-blank, and SHALL reject a row that fills none. WHEN the type has
- neither interface, THEN all four cells SHALL be blank; a non-blank cell with nowhere to assign it
- is an ERROR naming the type. This is what lets a patch panel share the sheet with a switch. An
- autocreated device type (8.7) has no interface templates, so it is treated as a type with neither
- interface: all four IP cells must be blank, and the device is created with no primary IP.
+14. *(Amended by D17.)* The four address cells SHALL be optional as values. WHEN a row would create
+ a new device whose resolved device type has at least one management or loopback interface as
+ defined in 8.16, and all four address cells are blank, THEN the system SHALL create the device with
+ no addresses and no primary IP, and SHALL raise one `DEVICE_IP_DEFERRED` WARNING per such row,
+ naming the device and the interface roles its type defines, for acknowledgement under 10.9. The
+ row SHALL NOT be rejected. WHEN the row names an existing device and all four cells are blank, THEN
+ the row requests no address work: it is reported as already present under 8.10 when nothing else
+ differs, and SHALL NOT raise `DEVICE_IP_DEFERRED` again. A later upload that fills the cells for an
+ existing device SHALL create the missing addresses and any requested primary under 8.10 and 8.20.
+ WHEN the type has neither interface, THEN all four cells SHALL be blank; a non-blank cell with
+ nowhere to assign it is an ERROR naming the type. This is what lets a patch panel share the sheet
+ with a switch. An autocreated device type (8.7) has no interface templates, so it is treated as a
+ type with neither interface: all four IP cells must be blank, and the device is created with no
+ primary IP. A non-blank primary-address cell on a row whose four address cells are blank still
+ resolves under 8.18 against addresses already assigned to the device, and so blocks on a new
+ device, which has none.
 15. The system SHALL NOT read, require, or write an interface *name* from the sheet. Vendor names —
  Arista `Management1` / `Loopback0`, Juniper `fxp0` / `lo0`, Cumulus `eth0` / `lo` — live on the
  device type, which is the template the device inherits from. A column of names would duplicate that
@@ -910,7 +921,7 @@ explanation, so that I can fix the spreadsheet without hunting for what the tool
 3. WHERE the upload is a `.csv`, the worksheet SHALL be reported as the file name so the format of
  an issue is identical across csv and xlsx.
 4. Each issue SHALL carry a stable machine-readable code — for example `RACK_NAME_MALFORMED`,
- `RU_RANGE_OVERLAP`, `DEVICE_TYPE_NOT_FOUND`, `PORT_ALREADY_CABLED`, `DEVICE_IP_REQUIRED`,
+ `RU_RANGE_OVERLAP`, `DEVICE_TYPE_NOT_FOUND`, `PORT_ALREADY_CABLED`, `DEVICE_IP_DEFERRED`,
  `DEVICE_IP_FAMILY_MISMATCH`, `MGMT_INTERFACE_NOT_FOUND`, `INTERFACE_TYPE_REQUIRED` — so that issues
  can be grouped, counted, and asserted in tests.
 5. Issue messages SHALL be written for an engineer fixing a sheet, quoting the received value and
@@ -1149,8 +1160,9 @@ without guessing or deleting unrelated NetBox data.
 
 - **D11 — Dual-stack loopback and management addresses on the device sheet. PROPOSED, awaiting
  review.** The device sheet gains four optional interface-address columns: `loopback_ip4`,
- `loopback_ip6`, `management_ip4`, `management_ip6`. At least one must be filled on any row whose
- device type defines those interfaces. It also gains optional `primary address v4` and
+ `loopback_ip6`, `management_ip4`, `management_ip6`. As amended by D17, all four may be left blank
+ on a new device whose type defines those interfaces; the row warns rather than blocks. It also
+ gains optional `primary address v4` and
  `primary address v6` columns. Each non-blank primary column explicitly references an address
  assigned to any interface on the device, whether supplied by the same row or already present in
  NetBox. Blank primary columns request no primary-IP change. Interface names are not columns.
@@ -1171,11 +1183,12 @@ without guessing or deleting unrelated NetBox data.
  management port, and type `loopback` is the loopback. Both families of one role assign to that
  same interface. The operator's job is to mark those on the type once — including correcting a
  community YAML that typed `Loopback0` as `virtual` — and then type only addresses in the sheet.
- **Why at-least-one, not both-roles-required, and not both-optional.** A device reachable on one
- address is enough to be the primary IP; forcing both roles would reject a loopback-only box or a
- management-only OOB box, and forcing both families would reject a v4-only hall. Forcing none would
- let a switch import with no address at all, which is the gap this change exists to close. A type
- with neither interface (a patch panel) is the exemption, so a mixed sheet still works.
+ **Why no role or family is forced.** A device reachable on one address is enough to be the primary
+ IP; forcing both roles would reject a loopback-only box or a management-only OOB box, and forcing
+ both families would reject a v4-only hall. D11 originally also required at least one of the four
+ cells on a type that defines either interface; **D17 replaces that rule** with a deferral WARNING,
+ so a switch may be mounted before its IP plan exists. A type with neither interface (a patch panel)
+ still must leave all four blank, so a mixed sheet still works.
  **Why this is the first PATCH.** NetBox will not accept `primary_ip4` on the device create: the IP
  does not exist yet. The sequence is create device → create addresses on its inherited interfaces →
  PATCH only the primary-IP fields. That PATCH is scoped to those two fields and does not reopen
@@ -1346,6 +1359,31 @@ without guessing or deleting unrelated NetBox data.
  prefetch, hierarchy planning/order, rack validation in the hierarchy and device importers,
  readiness, runbooks, and D9 naming tests.
 
+- **D17 — Deferred device addressing. DECIDED and built 2026-10-30 (tasks 48–49).** Amends D11's at-least-one rule
+ (Requirement 8.14). A new device whose type defines a management or loopback interface may be
+ uploaded with all four address cells blank. The device is created with its inherited interfaces,
+ no `ipam.IPAddress`, and no primary IP; each such row raises a `DEVICE_IP_DEFERRED` WARNING that
+ the operator acknowledges once for the file under 10.9. Addresses are added later by uploading the
+ same rows with the cells filled: the device already exists, so 8.10 skips its create and 8.20
+ creates the addresses and any explicitly selected primary. `DEVICE_IP_REQUIRED` is retired.
+ **Why.** Physical mounting and IP planning are owned by different teams and finish at different
+ times. A hall's rack elevations — thousands of switches — were blocked on an IP plan that did not
+ exist yet, and the only workaround was to edit device types (clearing `mgmt_only`) around an
+ import, which silently changes how every later upload resolves the management port. Rack
+ position, model, and role are useful in NetBox on their own.
+ **Why a WARNING and not silence.** D11's concern stands: a switch with no address is an incomplete
+ record. The WARNING keeps that visible at the moment of upload and in the run's recorded
+ acknowledgement, and 16.8 groups it into one counted code rather than one line per switch. It is
+ not an ERROR because nothing about the row is wrong — only unfinished.
+ **What does not change.** A filled cell is still validated exactly as before (CIDR with a mask,
+ family per column, unique interface per role, collisions with existing addresses). A patch-panel
+ type still rejects any address. Primary selection stays explicit and cannot be satisfied on a new
+ device without a same-row address. An existing device with blank cells gets no address work and no
+ repeated WARNING.
+ **Cost if reversed:** the S4 rule in `importers/devices.py`, one issue code, template guidance,
+ tests for task 28, the operator runbook, and the invalid-device sample. Devices created while D17
+ was in force would need their addresses supplied before the stricter rule could be restored.
+
 D1–D9 are settled historically; D1 and D9 are superseded for hierarchy import by D16. D3 and D6 are
 deferred to iteration 2 by choice, not left undecided. **D10, D11,
 D12 are the open decisions.** Inside D10: whether grouped rows must repeat the cable's
@@ -1356,4 +1394,5 @@ whether Requirement 8.23 shares it. D13 is decided and built; only its live 4.6.
 D14 is decided, built, and covered by the Phase 12 regression suite; the destructive flow still
 requires the Security Design Authority review named in `design.md` before merge or deployment. D15 is
 decided, built, and covered by the Phase 13 regression suite; its live interface-tag PATCH probe and
-production security gates remain.
+production security gates remain. D17 is decided: it settles D11's address-requirement rule (8.14)
+independently of D11's remaining `oob_ip` question, and Phase 15 built it.

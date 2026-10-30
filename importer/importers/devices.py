@@ -1086,31 +1086,30 @@ class DeviceImporter(BaseImporter):
             ifaces = []
             device_roles = type_roles
 
-        defines = any(
-            match.found or match.ambiguous
-            for match in (type_roles["management"], type_roles["loopback"])
-        )
-        has_on_device = any(
-            match.found or match.ambiguous
-            for match in (device_roles["management"], device_roles["loopback"])
-        )
-        need_ip = has_on_device if existing is not None else defines
+        defined_roles = [
+            role
+            for role in ("management", "loopback")
+            if type_roles[role].found or type_roles[role].ambiguous
+        ]
+        defines = bool(defined_roles)
 
-        if need_ip and not addresses:
+        # D17: a new device may be mounted before its IP plan exists. An existing device with
+        # blank cells simply has no address work, so it is not warned about a second time.
+        if defines and not addresses and existing is None:
             collector.add(
-                Severity.ERROR,
-                Code.DEVICE_IP_REQUIRED,
+                Severity.WARNING,
+                Code.DEVICE_IP_DEFERRED,
                 line=row.line,
                 column="management_ip4",
                 value="(blank)",
-                expected="at least one of the four address cells",
+                expected="addresses now, or a re-upload of this row with them later",
                 message=(
-                    f"{device_name!r} is a type that defines a management or loopback interface, "
-                    f"so at least one of the four address cells must be filled."
+                    f"{device_name!r} is a type that defines {' and '.join(defined_roles)} "
+                    f"interfaces, but all four address cells are blank. The device will be "
+                    f"created without addresses or a primary IP; re-upload this row with them "
+                    f"filled to add them."
                 ),
             )
-            planned.outcome = RowOutcome.BLOCKED
-            return False
 
         if not addresses and not primary_addresses:
             return False

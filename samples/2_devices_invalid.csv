@@ -9,7 +9,7 @@ LAB1-DH1-R02,front,21,2,lab1-dh1-r02-spine03,Spectrum-SN5610,,Nvidia,ns-spine,ac
 LAB1-DH1-R02,front,28,1,lab1-dh1-r02-nope01,Spectrum-SN9999,,Nvidia,ns-leaf,active,,,,,192.0.2.37/24,,,
 LAB1-DH1-R02,front,32,1,lab1-dh1-r02-spine04,Spectrum-SN5610,,Nvidia,ns-spine,active,,,192.0.2.38/32,,,,,
 LAB1-DH1-R02,front,34,1,lab1-dh1-r02-leaf10,Spectrum-SN4700,,Nvidia,chief-router,active,,,,,192.0.2.39/24,,,
-LAB1-DH1-R02,front,36,1,lab1-dh1-r02-leaf-noip,Spectrum-SN4700,,Nvidia,ns-leaf,active,,,,,,,,
+LAB1-DH1-R02,front,36,1,lab1-dh1-r02-leaf-noip,Spectrum-SN4700,,Nvidia,ns-leaf,active,,,,,,,192.0.2.51/24,
 LAB1-DH1-R02,front,38,1,lab1-dh1-r02-pp-with-ip,Patch Panel - 24 pair LC-LC-SM - 1U,,Commscope,patch-panel,active,,,,,192.0.2.50/24,,,
 LAB1-DH1-R02,front,40,1,lab1-dh1-r02-leaf-nomask,Spectrum-SN4700,,Nvidia,ns-leaf,active,,,,,192.0.2.41,,,
 LAB1-DH1-R02,front,41,1,lab1-dh1-r02-leaf-family,Spectrum-SN4700,,Nvidia,ns-leaf,active,,,,,2001:db8::1/128,,,

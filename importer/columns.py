@@ -337,8 +337,8 @@ DEVICE_COLUMNS: tuple[ColumnSpec, ...] = (
         required=False,
         conflict=Conflict.CONSEQUENTIAL,
         help_text=(
-            "IPv4 CIDR of the loopback (type=loopback on the device type). At least one of "
-            "the four address cells is required on a type that defines those interfaces"
+            "IPv4 CIDR of the loopback (type=loopback on the device type). All four address "
+            "cells may be left blank to mount the device first and add addresses by re-upload"
         ),
         example="192.0.2.1/32",
     ),

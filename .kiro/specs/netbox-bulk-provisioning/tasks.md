@@ -823,9 +823,9 @@ in `design.md`.
   - S3: the same address in two cells — two rows, or two columns of one row — is
     `DUPLICATE_IP_IN_FILE` naming both locations, except that a primary-address cell is a reference
     and may repeat one same-row interface-address declaration
-  - Template guidance states at-least-one of four on a type that defines the interfaces, and all
-    blank on a type that does not; primary-address cells are optional and blank means no primary
-    request for that family
+  - Template guidance states the four cells are optional and may be left blank to mount a device
+    before its IP plan exists (D17), and must be blank on a type that defines neither interface;
+    primary-address cells are optional and blank means no primary request for that family
   - Tests: valid v4 in ip4 / v6 in ip6 accepted; `10.0.0.1` without a mask rejected; v6 in
     `management_ip4` or `primary address v4` rejected; duplicate declarations blocked; a primary
     reference matching a same-row declaration accepted
@@ -835,7 +835,8 @@ in `design.md`.
   - Prefetch interface templates per device type touched by the sheet: unique `mgmt_only`, unique
     type `loopback`. For an existing device, resolve against the device's own interfaces by the
     same rules. Both families of one role assign to that same interface
-  - S4: at-least-one of four when the type has either role (8.14); all-blank when it has neither;
+  - S4: originally at-least-one of four when the type has either role; **task 48 (D17) replaces
+    that with the `DEVICE_IP_DEFERRED` WARNING**; all-blank when it has neither;
     zero or more-than-one match on a filled column is `MGMT_INTERFACE_NOT_FOUND` /
     `MGMT_INTERFACE_AMBIGUOUS` or the loopback pair, naming the type and the candidates
   - An existing device missing the interface its type now defines has that interface created from
@@ -848,7 +849,7 @@ in `design.md`.
   - Tests: Arista-named `Management1` and Cumulus-named `eth0` both resolve as management from
     `mgmt_only` alone; two `mgmt_only` templates block; a patch panel with no such templates and
     all cells blank applies; a switch with the templates and all four cells blank is
-    `DEVICE_IP_REQUIRED`; filling `management_ip4` against a type with no `mgmt_only` blocks
+    `DEVICE_IP_DEFERRED` (task 48); filling `management_ip4` against a type with no `mgmt_only` blocks
   - _Requirements: 8.14–8.16, 8.23, 8.26, 17.1, 17.2_
 
 - [ ] 29. Create addresses and PATCH the primary IP
@@ -874,16 +875,17 @@ in `design.md`.
   - _Requirements: 8.17–8.21, 11.3, 11.6, 11.7_
 
 - [ ] 30. Documentation and samples for device addresses
-  - `docs/operator-runbook.md`: at-least-one of four, CIDR with a mask, names are on the type,
+  - `docs/operator-runbook.md`: the four cells are optional and blank defers addressing (D17),
+    CIDR with a mask, names are on the type,
     primary selection is explicit and may reference a same-row or pre-existing interface address,
     blank primary columns request no change, and patch panels leave the four assignment cells blank
   - `docs/empty-instance-prep.md`: mark exactly one `mgmt_only` and exactly one type-`loopback`
     interface on each network device type; community YAML that types `Loopback0` as `virtual` must
     be corrected before sheet 2 will accept a loopback address
   - Samples: switch rows in `2_devices_valid.csv` gain CIDR values (at least one family) and examples
-    of both same-row and existing-device primary references; panel rows stay blank; the invalid
-    sheet gains an all-blank switch, a panel with an address, a mask-less host, a v6 value in an
-    IPv4 column, a duplicate declaration, and a primary reference not assigned to the device
+    of both same-row and existing-device primary references; panel rows stay blank; the valid
+    sheet keeps one all-blank switch (deferred, D17); the invalid sheet gains a panel with an
+    address, a mask-less host, a v6 value in an IPv4 column, a duplicate declaration, and a primary reference not assigned to the device
   - `scripts/seed_netbox.py`: add `mgmt_only` and `loopback` templates for the switch types it
     already seeds, named for the `--naming` scheme
   - _Requirements: 8.13–8.26, 17.6_
@@ -1311,6 +1313,39 @@ columns so their meaning cannot change silently.
   - Before deployment, link the change record with risk assessment, validation plan, rollback plan,
     review approval, and Security Design Authority review of the revised trust assumptions
   - _Requirements: 7, 10, 11.3, 14, 17.7, 18, D16_
+
+## Phase 15 — Deferred device addressing (D17)
+
+D17 was accepted on 2026-10-30, so this phase is unblocked. Amends task 28's S4 rule; everything else in D11 (S2 CIDR and
+family checks, interface resolution, address creates, explicit primary PATCH) is unchanged.
+
+- [x] 48. Replace the at-least-one rule with a deferral WARNING — **done 2026-10-30**
+  - S4 in `importers/devices.py`: a *new* device whose type defines a management or loopback
+    interface and whose four address cells are blank plans the device create only and raises one
+    `DEVICE_IP_DEFERRED` WARNING per row (Severity.WARNING, column `management_ip4`, message naming
+    the device and the roles its type defines). Remove `DEVICE_IP_REQUIRED` from `Code`
+  - An *existing* device with all four cells blank requests no address work: already present when
+    nothing else differs, and no `DEVICE_IP_DEFERRED`
+  - Unchanged: a filled cell on a type with neither role still blocks; a non-blank primary-address
+    cell with no same-row address still blocks on a new device (8.18)
+  - Apply needs no change: a device with no address actions issues no `ipam.ip-addresses` POST and no
+    primary PATCH. The WARNING is acknowledged once per file through the existing 10.9 gate
+  - Column `help_text` for the four address columns and the template guidance say blank defers
+    addressing
+  - Tests: an all-blank switch row validates with one `DEVICE_IP_DEFERRED` WARNING and applies after
+    acknowledgement, creating the device and no IP; the same file without acknowledgement is not
+    applyable; re-uploading the row with `management_ip4` creates the address on the existing
+    device; an existing device with blank cells is `ALREADY_EXISTS` with no WARNING; a blank-cell
+    row with `primary address v4` on a new device still blocks; patch-panel behaviour unchanged;
+    a 2,000-row all-blank sheet reports the code once in the grouped counts (16.8)
+  - _Requirements: 8.10, 8.14, 8.18, 8.20, 10.9, 16.4, 16.8, D17_
+
+- [x] 49. Documentation and samples for deferred addressing — **done 2026-10-30**
+  - `docs/operator-runbook.md`: mount-first workflow — upload with blank addresses, acknowledge the
+    deferral, re-upload the same rows with addresses when the IP plan lands
+  - Samples: `2_devices_valid` gains an all-blank switch row; the invalid sample drops its all-blank
+    switch case
+  - _Requirements: 8.14, 17.6, D17_
 
 ## Deferred to iteration 2 (do not build now)
 
